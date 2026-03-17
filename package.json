@@ -1,0 +1,21 @@
+{
+  "name": "resource-forwarder-workspace",
+  "private": true,
+  "packageManager": "pnpm@9.15.1",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "dev:service": "pnpm --filter @resource-forwarder/forwarder-service dev",
+    "dev:extension": "pnpm --filter @resource-forwarder/extension-shell dev"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/node": "^22.13.4",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

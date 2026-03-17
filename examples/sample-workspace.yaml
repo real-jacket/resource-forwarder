@@ -1,0 +1,63 @@
+version: 1
+updatedAt: "2026-03-17T00:00:00.000Z"
+projects:
+  - id: "project-app"
+    name: "App Shell"
+    enabled: true
+    siteHosts:
+      - "app.example.com"
+    envLabel: "local"
+    tags: ["demo"]
+    note: "Example project for local app shell forwarding."
+    createdAt: "2026-03-17T00:00:00.000Z"
+    updatedAt: "2026-03-17T00:00:00.000Z"
+ruleSets:
+  - id: "ruleset-app-default"
+    projectId: "project-app"
+    name: "Default rule set"
+    enabled: true
+    ruleIds:
+      - "rule-api-local"
+      - "rule-asset-https"
+    createdAt: "2026-03-17T00:00:00.000Z"
+    updatedAt: "2026-03-17T00:00:00.000Z"
+rules:
+  - id: "rule-api-local"
+    name: "Forward app API"
+    enabled: true
+    kind: "api_forward"
+    priority: 100
+    match:
+      host: ["app.example.com"]
+      pathGlob: "/api/**"
+      resourceType: ["fetch", "xmlhttprequest"]
+      method: ["GET", "POST", "PUT", "DELETE"]
+      tabScope:
+        mode: "all"
+    target:
+      forwardProfile:
+        targetBaseUrl: "http://127.0.0.1:3000"
+        stripPrefix: "/api"
+        headers:
+          x-forwarded-by: "resource-forwarder"
+    tags: ["demo", "api"]
+    note: "Send API calls to a local backend."
+    createdAt: "2026-03-17T00:00:00.000Z"
+    updatedAt: "2026-03-17T00:00:00.000Z"
+  - id: "rule-asset-https"
+    name: "Swap asset bundle"
+    enabled: true
+    kind: "asset_redirect"
+    priority: 80
+    match:
+      host: ["app.example.com"]
+      pathGlob: "/assets/app.js"
+      resourceType: ["script"]
+      tabScope:
+        mode: "all"
+    target:
+      redirectUrl: "https://localhost-forwarder.example.com/app.js"
+    tags: ["demo", "asset"]
+    note: "Asset redirects must point to a browser-reachable HTTPS target in v1."
+    createdAt: "2026-03-17T00:00:00.000Z"
+    updatedAt: "2026-03-17T00:00:00.000Z"

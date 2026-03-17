@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Resource Forwarder",
+  "version": "0.1.0",
+  "description": "Friendly browser resource forwarding with local rule management.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "scripting",
+    "sidePanel",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Resource Forwarder"
+  },
+  "options_page": "options.html",
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page-bridge.js", "styles.css"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

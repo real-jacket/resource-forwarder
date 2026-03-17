@@ -1,0 +1,25 @@
+{
+  "name": "@resource-forwarder/forwarder-service",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.2",
+    "@resource-forwarder/rule-core": "workspace:*",
+    "@resource-forwarder/shared-types": "workspace:*",
+    "fastify": "^5.2.1"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "test": "vitest run"
+  }
+}
