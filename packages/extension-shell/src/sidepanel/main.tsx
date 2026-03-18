@@ -1,49 +1,73 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { MatchResourceType, Project } from "@resource-forwarder/shared-types";
-import { createId, getPathFromUrl } from "../shared/helpers.js";
+import { sortRules } from "@resource-forwarder/rule-core";
+import type { Project, Rule } from "@resource-forwarder/shared-types";
+import { joinCsv } from "../shared/helpers.js";
 import type { GetDashboardStateResponse, UpsertMutationResponse } from "../shared/messages.js";
 import { runtimeRequest } from "../shared/messages.js";
 
 function App() {
   const [dashboard, setDashboard] = useState<GetDashboardStateResponse | null>(null);
-  const [status, setStatus] = useState("Loading side panel...");
+  const [status, setStatus] = useState("正在加载当前页面...");
   const [busy, setBusy] = useState(false);
-  const [quickKind, setQuickKind] = useState<"api_forward" | "asset_redirect">("api_forward");
-  const [quickName, setQuickName] = useState("Quick forward");
-  const [quickTarget, setQuickTarget] = useState("http://127.0.0.1:3000");
-  const [quickPath, setQuickPath] = useState("/api/**");
 
   useEffect(() => {
     void refresh();
   }, []);
 
   const currentHost = dashboard?.currentTab?.host ?? "";
-  const relevantProjects = useMemo(() => {
-    if (!dashboard) {
+  const currentUrl = dashboard?.currentTab?.url ?? "";
+
+  const matchedProjects = useMemo(() => {
+    if (!dashboard || !currentHost) {
       return [];
     }
-    const matches = dashboard.workspace.projects.filter((project) => project.siteHosts.includes(currentHost));
-    return matches.length > 0 ? matches : dashboard.workspace.projects;
+    return dashboard.workspace.projects.filter((project) => project.siteHosts.includes(currentHost));
   }, [dashboard, currentHost]);
 
-  const defaultRuleSet = useMemo(() => {
+  const matchedProjectIds = useMemo(
+    () => new Set(matchedProjects.map((project) => project.id)),
+    [matchedProjects],
+  );
+
+  const matchedRuleIds = useMemo(() => {
     if (!dashboard) {
-      return undefined;
+      return new Set<string>();
     }
-    const projectIds = new Set(relevantProjects.map((project) => project.id));
-    return dashboard.workspace.ruleSets.find((ruleSet) => projectIds.has(ruleSet.projectId)) ?? dashboard.workspace.ruleSets[0];
-  }, [dashboard, relevantProjects]);
+    return new Set(
+      dashboard.workspace.ruleSets
+        .filter((ruleSet) => matchedProjectIds.has(ruleSet.projectId))
+        .flatMap((ruleSet) => ruleSet.ruleIds),
+    );
+  }, [dashboard, matchedProjectIds]);
+
+  const matchedRules = useMemo(
+    () =>
+      dashboard
+        ? sortRules(dashboard.workspace.rules.filter((rule) => matchedRuleIds.has(rule.id))).sort((left, right) => {
+            if (left.enabled !== right.enabled) {
+              return left.enabled ? -1 : 1;
+            }
+            return 0;
+          })
+        : [],
+    [dashboard, matchedRuleIds],
+  );
 
   async function refresh(): Promise<void> {
     setBusy(true);
     try {
       const state = await runtimeRequest<GetDashboardStateResponse>({ type: "get-dashboard-state" });
       setDashboard(state);
-      setQuickPath(defaultQuickPath(state.currentTab?.url ?? ""));
-      setStatus(state.health ? "Side panel ready." : "Local service is not reachable.");
+      if (!state.currentTab?.host) {
+        setStatus("当前标签页不可识别，请切到一个正常网页。");
+      } else if (!state.health) {
+        setStatus("未连接到本地服务，请先启动本地服务。");
+      } else {
+        setStatus("当前页面状态已同步。");
+      }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to load side panel.");
+      setStatus(error instanceof Error ? error.message : "加载侧边栏失败。");
     } finally {
       setBusy(false);
     }
@@ -53,6 +77,7 @@ function App() {
     if (!dashboard) {
       return;
     }
+
     setBusy(true);
     try {
       const state = await runtimeRequest<UpsertMutationResponse>({
@@ -63,158 +88,163 @@ function App() {
         },
       });
       setDashboard({ ...state, logs: dashboard.logs, currentTab: dashboard.currentTab });
-      setStatus(`${project.name} ${project.enabled ? "disabled" : "enabled"}.`);
+      setStatus(`站点「${project.name}」已${project.enabled ? "停用" : "启用"}。`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to toggle project.");
+      setStatus(error instanceof Error ? error.message : "切换站点状态失败。");
     } finally {
       setBusy(false);
     }
   }
 
-  async function createQuickRule(): Promise<void> {
-    if (!dashboard || !defaultRuleSet || !dashboard.currentTab?.url) {
-      setStatus("Create a project in the options page before using quick rule creation.");
+  async function toggleRule(rule: Rule): Promise<void> {
+    if (!dashboard) {
       return;
     }
 
     setBusy(true);
     try {
-      const now = new Date().toISOString();
-      const payload = {
-        rule: {
-          id: createId("rule"),
-          name: quickName.trim() || "Quick rule",
-          enabled: true,
-          kind: quickKind,
-          priority: 100,
-          match: {
-            host: [dashboard.currentTab.host],
-            pathGlob: quickPath || defaultQuickPath(dashboard.currentTab.url),
-            resourceType:
-              (quickKind === "api_forward"
-                ? ["fetch", "xmlhttprequest"]
-                : ["script", "stylesheet", "image", "font"]) as MatchResourceType[],
-            method: quickKind === "api_forward" ? ["GET", "POST"] : undefined,
-            tabScope: { mode: "all" as const },
-          },
-          target:
-            quickKind === "asset_redirect"
-              ? { redirectUrl: quickTarget.trim() }
-              : {
-                  forwardProfile: {
-                    targetBaseUrl: quickTarget.trim(),
-                  },
-                },
-          tags: ["quick-create"],
-          createdAt: now,
-          updatedAt: now,
+      const owningRuleSet = dashboard.workspace.ruleSets.find((ruleSet) => ruleSet.ruleIds.includes(rule.id));
+      const state = await runtimeRequest<UpsertMutationResponse>({
+        type: "upsert-rule",
+        payload: {
+          rule: { ...rule, enabled: !rule.enabled },
+          ruleSetId: owningRuleSet?.id,
         },
-        ruleSetId: defaultRuleSet.id,
-      };
-      const state = await runtimeRequest<UpsertMutationResponse>({ type: "upsert-rule", payload });
+      });
       setDashboard({ ...state, logs: dashboard.logs, currentTab: dashboard.currentTab });
-      setStatus(`Created ${payload.rule.kind} rule for ${dashboard.currentTab.host}.`);
+      setStatus(`规则「${rule.name}」已${rule.enabled ? "停用" : "启用"}。`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Failed to create quick rule.");
+      setStatus(error instanceof Error ? error.message : "切换规则状态失败。");
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="panel-shell">
-      <section className="hero">
-        <span className="kicker">Current tab</span>
-        <h2>{dashboard?.currentTab?.host || "No active tab"}</h2>
-        <p>{dashboard?.currentTab?.url || "Open a page to inspect matching projects and quick-create rules."}</p>
-        <div className="row">
-          <span className={`badge ${dashboard?.health ? "" : "danger"}`}>
-            {dashboard?.health ? "Service online" : "Service offline"}
+    <div className="minimal-panel-shell">
+      <section className="hero minimal-panel-hero">
+        <div className="stack compact-gap">
+          <span className="kicker">当前页面</span>
+          <h2>{currentHost || "未识别标签页"}</h2>
+          <p className="muted small mono-line">{currentUrl || "打开一个网页后，这里会显示当前 URL。"}</p>
+        </div>
+        <div className="row wrap-gap status-row">
+          <span className={`badge ${dashboard?.health ? "success" : "danger"}`}>
+            {dashboard?.health ? "服务在线" : "服务离线"}
           </span>
-          <span className="badge">Projects {relevantProjects.length}</span>
+          <span className={`badge ${matchedProjects.length > 0 ? "success" : "warning"}`}>
+            {matchedProjects.length > 0 ? `已匹配 ${matchedProjects.length} 个站点` : "未匹配站点"}
+          </span>
         </div>
-        <p className="small">{status}</p>
-      </section>
-
-      <section className="card">
-        <div className="row between">
-          <h3>Project toggles</h3>
+        <div className="row wrap-gap">
           <button className="secondary" onClick={() => void refresh()} disabled={busy}>
-            Refresh
+            刷新
           </button>
-        </div>
-        <div className="list">
-          {relevantProjects.map((project) => (
-            <article className="item" key={project.id}>
-              <div className="item-header">
-                <div className="stack">
-                  <h4>{project.name}</h4>
-                  <p className="small">{project.siteHosts.join(", ")}</p>
-                </div>
-                <button onClick={() => void toggleProject(project)}>{project.enabled ? "Disable" : "Enable"}</button>
-              </div>
-            </article>
-          ))}
-          {relevantProjects.length === 0 ? <p className="muted">No matching project yet. Use the options page to define one.</p> : null}
-        </div>
-      </section>
-
-      <section className="card">
-        <div className="row between">
-          <h3>Quick rule</h3>
           <button className="ghost" onClick={() => void chrome.runtime.openOptionsPage()}>
-            Open options
+            打开规则页
           </button>
         </div>
-        <label className="stack">
-          <span className="label">Rule kind</span>
-          <select value={quickKind} onChange={(event) => setQuickKind(event.target.value as "api_forward" | "asset_redirect")}>
-            <option value="api_forward">api_forward</option>
-            <option value="asset_redirect">asset_redirect</option>
-          </select>
-        </label>
-        <label className="stack">
-          <span className="label">Rule name</span>
-          <input value={quickName} onChange={(event) => setQuickName(event.target.value)} />
-        </label>
-        <label className="stack">
-          <span className="label">Path glob</span>
-          <input value={quickPath} onChange={(event) => setQuickPath(event.target.value)} />
-        </label>
-        <label className="stack">
-          <span className="label">{quickKind === "api_forward" ? "Target base URL" : "Redirect URL"}</span>
-          <input value={quickTarget} onChange={(event) => setQuickTarget(event.target.value)} placeholder={quickKind === "api_forward" ? "http://127.0.0.1:3000" : "https://cdn.example.com/app.js"} />
-        </label>
-        <button onClick={() => void createQuickRule()} disabled={busy || !defaultRuleSet}>
-          Create quick rule
-        </button>
       </section>
 
-      <section className="card">
-        <h3>Recent hits</h3>
-        <div className="list">
-          {(dashboard?.logs ?? []).slice(0, 6).map((log) => (
-            <article className="item" key={log.id}>
-              <div className="stack">
-                <h4>{log.method} {shorten(log.requestUrl)}</h4>
-                <p className="small">{log.outcome} · {log.statusCode ?? "-"} · {log.durationMs} ms</p>
+      <section className="card compact-card">
+        <div className="row between align-start">
+          <div className="stack compact-gap">
+            <h3>匹配站点</h3>
+            <p className="small muted">这里显示当前页面真正命中的站点，而不是全部站点。</p>
+          </div>
+        </div>
+
+        <div className="site-mini-list">
+          {matchedProjects.map((project) => (
+            <article className="item compact-item" key={project.id}>
+              <div className="item-header">
+                <div className="stack compact-gap">
+                  <div className="row wrap-gap">
+                    <h4>{project.name}</h4>
+                    <span className={`badge ${project.enabled ? "success" : "warning"}`}>
+                      {project.enabled ? "已启用" : "已停用"}
+                    </span>
+                    {project.envLabel ? <span className="badge neutral">{project.envLabel}</span> : null}
+                  </div>
+                  <p className="small muted">{joinCsv(project.siteHosts) || "未填写 Host"}</p>
+                </div>
+                <button
+                  className={project.enabled ? "secondary" : ""}
+                  onClick={() => void toggleProject(project)}
+                  disabled={busy}
+                >
+                  {project.enabled ? "停用" : "启用"}
+                </button>
               </div>
             </article>
           ))}
-          {(dashboard?.logs ?? []).length === 0 ? <p className="muted">No forwarded requests yet.</p> : null}
+
+          {matchedProjects.length === 0 ? (
+            <div className="empty-state">
+              当前页面 `{currentHost || "未知 host"}` 还没有匹配到任何站点。去规则页新增一个 Host 后，这里会第一时间显示。
+            </div>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="card compact-card">
+        <div className="row between align-start">
+          <div className="stack compact-gap">
+            <h3>当前规则</h3>
+            <p className="small muted">只展示当前页面会命中的规则，不在侧边栏放输入表单。</p>
+          </div>
+        </div>
+
+        <div className="rule-list minimal-rule-list">
+          {matchedRules.map((rule) => (
+            <article className={`rule-row ${rule.enabled ? "" : "is-muted"}`} key={rule.id}>
+              <button
+                className={`toggle-chip ${rule.enabled ? "on" : "off"}`}
+                onClick={() => void toggleRule(rule)}
+                disabled={busy}
+              >
+                {rule.enabled ? "开" : "关"}
+              </button>
+              <div className="rule-row-main">
+                <div className="row wrap-gap">
+                  <h4>{rule.name}</h4>
+                  <span className="badge neutral">{formatKind(rule.kind)}</span>
+                </div>
+                <p className="small muted">{rule.match.pathGlob}</p>
+                <p className="target-line">{formatRuleTarget(rule)}</p>
+              </div>
+            </article>
+          ))}
+
+          {matchedRules.length === 0 ? (
+            <div className="empty-state">
+              {matchedProjects.length > 0
+                ? "当前页面虽然匹配到了站点，但还没有可用规则。去规则页补一条规则即可。"
+                : "先让当前页面匹配到站点，随后这里才会展示规则。"}
+            </div>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="card compact-card">
+        <div className="stack compact-gap">
+          <span className="label">状态</span>
+          <p>{status}</p>
         </div>
       </section>
     </div>
   );
 }
 
-function defaultQuickPath(url: string): string {
-  const path = getPathFromUrl(url);
-  return path === "/" ? "/api/**" : `${path.replace(/\/$/, "")}/**`;
+function formatKind(kind: Rule["kind"]): string {
+  return kind === "api_forward" ? "API 转发" : "资源替换";
 }
 
-function shorten(value: string): string {
-  return value.length > 72 ? `${value.slice(0, 69)}...` : value;
+function formatRuleTarget(rule: Rule): string {
+  if (rule.kind === "asset_redirect") {
+    return rule.target.redirectUrl || "未填写 HTTPS 地址";
+  }
+  return rule.target.forwardProfile?.targetBaseUrl || "未填写目标地址";
 }
 
 const rootElement = document.getElementById("app");

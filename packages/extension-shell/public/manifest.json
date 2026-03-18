@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Resource Forwarder",
+  "name": "资源转发器",
   "version": "0.1.0",
-  "description": "Friendly browser resource forwarding with local rule management.",
+  "description": "更易管理的浏览器资源转发与本地规则工具。",
   "permissions": [
     "storage",
     "tabs",
@@ -21,7 +21,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Resource Forwarder"
+    "default_title": "资源转发器"
   },
   "options_page": "options.html",
   "side_panel": {

@@ -3,8 +3,11 @@
   "private": true,
   "packageManager": "pnpm@9.15.1",
   "scripts": {
+    "dev": "pnpm run dev:all",
+    "dev:all": "sh -c 'trap \"kill 0\" INT TERM EXIT; pnpm --filter @resource-forwarder/forwarder-service dev & pnpm --filter @resource-forwarder/extension-shell dev & wait'",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
+    "start": "pnpm --filter @resource-forwarder/forwarder-service start",
     "dev:service": "pnpm --filter @resource-forwarder/forwarder-service dev",
     "dev:extension": "pnpm --filter @resource-forwarder/extension-shell dev"
   },

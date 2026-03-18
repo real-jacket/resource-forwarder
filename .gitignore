@@ -5,3 +5,6 @@ dist
 .resource-forwarder
 .history
 .DS_Store
+
+.claude
+.codex

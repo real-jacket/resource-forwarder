@@ -15,14 +15,25 @@ A Chrome and Edge focused resource forwarding toolkit with a local forwarder ser
 ```bash
 pnpm install
 pnpm build
-pnpm --filter @resource-forwarder/forwarder-service dev
+pnpm dev
 ```
 
 Then load `packages/extension-shell/dist` as an unpacked extension in Chrome or Edge.
 
+## Root scripts
+
+```bash
+pnpm dev            # 一键启动本地服务 + 扩展 watch 构建
+pnpm dev:service    # 只启动本地转发服务
+pnpm dev:extension  # 只启动扩展 watch 构建
+pnpm start          # 运行已构建的本地服务
+pnpm build          # 构建全部包
+pnpm test           # 运行全部测试
+```
+
 ## Using the service and extension
 
-1. Start the local service. It listens on `http://127.0.0.1:5178` by default and stores data under `./.resource-forwarder`.
+1. Run `pnpm dev`. It starts the local service and keeps `packages/extension-shell/dist` updated.
 2. Open the extension options page and confirm the service URL.
 3. Import `examples/sample-workspace.yaml` or create a project and rule set manually.
 4. Use the side panel on the active tab to toggle matching projects and create quick rules.
