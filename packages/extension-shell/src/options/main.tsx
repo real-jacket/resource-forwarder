@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   collectRuleConflicts,
@@ -81,8 +81,11 @@ function App() {
   const [importText, setImportText] = useState("");
   const [exportText, setExportText] = useState("");
   const [exportFormat, setExportFormat] = useState<"json" | "yaml">("yaml");
+  const [ruleQuery, setRuleQuery] = useState("");
+  const [ruleKindFilter, setRuleKindFilter] = useState<"all" | Rule["kind"]>("all");
   const [status, setStatus] = useState("正在加载规则...");
   const [busy, setBusy] = useState(false);
+  const deferredRuleQuery = useDeferredValue(ruleQuery.trim().toLowerCase());
 
   useEffect(() => {
     void refresh();
@@ -164,6 +167,22 @@ function App() {
     () => selectedRules.filter((rule) => rule.kind === "asset_redirect").length,
     [selectedRules],
   );
+
+  const visibleRules = useMemo(
+    () =>
+      selectedRules.filter((rule) => {
+        if (ruleKindFilter !== "all" && rule.kind !== ruleKindFilter) {
+          return false;
+        }
+        if (!deferredRuleQuery) {
+          return true;
+        }
+        return buildRuleSearchText(rule).includes(deferredRuleQuery);
+      }),
+    [selectedRules, ruleKindFilter, deferredRuleQuery],
+  );
+
+  const previewRules = useMemo(() => visibleRules.slice(0, 3), [visibleRules]);
 
   const draftRule = useMemo(() => {
     if (!dashboard || !selectedProject) {
@@ -517,156 +536,346 @@ function App() {
 
   return (
     <div className="minimal-app-shell">
-      <section className="hero minimal-hero">
-        <div className="stack compact-gap">
-          <span className="kicker">资源转发器</span>
-          <h1>先看规则，其他操作都收进设置。</h1>
-          <p className="muted">
-            默认页面只保留你最常用的规则列表；站点管理、服务地址、日志、导入导出都放进设置弹窗。
-          </p>
-        </div>
+      <a className="skip-link" href="#main-content">
+        跳到主要内容
+      </a>
 
-        <div className="hero-controls">
-          <label className="stack compact-gap control-block">
-            <span className="label">当前站点</span>
-            <select
-              value={selectedProject?.id ?? ""}
-              onChange={(event) => setSelectedProjectId(event.target.value)}
-              disabled={projects.length === 0}
-            >
-              {projects.length === 0 ? <option value="">请先创建站点</option> : null}
-              {siteViews.map((item) => (
-                <option key={item.project.id} value={item.project.id}>
-                  {item.project.name}
-                  {item.matchesCurrent ? " · 当前页面" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
+      <section className="hero minimal-hero editorial-hero">
+        <div className="hero-stage">
+          <div className="hero-copy stack">
+            <div className="stack compact-gap">
+              <span className="kicker">Advanced Resource</span>
+              <h1>把每个站点的资源规则，整理成一页安静、可检索的浏览器工作台。</h1>
+              <p className="muted hero-lead">
+                规则优先，站点一眼可见。新增、筛选、切换都停留在第一屏，其余操作继续收进设置。
+              </p>
+            </div>
 
-          <div className="row wrap-gap hero-actions">
-            <button onClick={() => openBatchRuleEditor("api_forward")} disabled={busy || !selectedRuleSet}>
-              新建规则
-            </button>
-            <button className="secondary" onClick={() => openSettings("site")}>
-              设置
-            </button>
-            <button className="ghost" onClick={() => void refresh()} disabled={busy}>
-              刷新
-            </button>
-          </div>
-        </div>
+            <div className="row wrap-gap status-row">
+              <span className={`badge ${dashboard?.health ? "success" : "danger"}`}>
+                {dashboard?.health ? "本地服务已连接" : "本地服务未连接"}
+              </span>
+              <span className="badge neutral">当前标签页 {dashboard?.currentTab?.host || "未检测到"}</span>
+              {selectedProject ? (
+                <span className={`badge ${selectedProject.enabled ? "success" : "warning"}`}>
+                  {selectedProject.enabled ? "站点启用中" : "站点已停用"}
+                </span>
+              ) : null}
+            </div>
 
-        <div className="row wrap-gap status-row">
-          <span className={`badge ${dashboard?.health ? "success" : "danger"}`}>
-            {dashboard?.health ? "本地服务已连接" : "本地服务未连接"}
-          </span>
-          <span className="badge neutral">当前标签页 {dashboard?.currentTab?.host || "未检测到"}</span>
-          {selectedProject ? (
-            <span className={`badge ${selectedProject.enabled ? "success" : "warning"}`}>
-              {selectedProject.enabled ? "站点启用中" : "站点已停用"}
-            </span>
-          ) : null}
-        </div>
-      </section>
+            <div className="hero-controls editorial-controls">
+              <label className="stack compact-gap control-block">
+                <span className="label">当前站点</span>
+                <select
+                  value={selectedProject?.id ?? ""}
+                  onChange={(event) => setSelectedProjectId(event.target.value)}
+                  disabled={projects.length === 0}
+                >
+                  {projects.length === 0 ? <option value="">请先创建站点</option> : null}
+                  {siteViews.map((item) => (
+                    <option key={item.project.id} value={item.project.id}>
+                      {item.project.name}
+                      {item.matchesCurrent ? " · 当前页面" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
-      <section className="card rule-focus-card">
-        {selectedProject ? (
-          <>
-            <div className="row between align-start">
-              <div className="stack compact-gap">
-                <h2>{selectedProject.name}</h2>
-                <p className="muted small">
-                  {joinCsv(selectedProject.siteHosts)}
-                  {selectedProject.envLabel ? ` · ${selectedProject.envLabel}` : ""}
-                </p>
-              </div>
-              <div className="row wrap-gap compact-actions">
-                <span className="badge neutral">API {selectedApiRuleCount}</span>
-                <span className="badge neutral">资源 {selectedAssetRuleCount}</span>
-                <span className="badge neutral">命中 {filteredLogs.length}</span>
-                <button className="secondary" onClick={() => openBatchRuleEditor("api_forward")} disabled={!selectedRuleSet || busy}>
-                  在当前站点新增 API
+              <div className="row wrap-gap hero-actions">
+                <button onClick={() => openBatchRuleEditor("api_forward")} disabled={busy || !selectedRuleSet}>
+                  新建规则
                 </button>
-                <button className="ghost" onClick={() => openBatchRuleEditor("asset_redirect")} disabled={!selectedRuleSet || busy}>
-                  新增资源规则
+                <button className="secondary" onClick={() => openSettings("site")}>
+                  设置
+                </button>
+                <button className="ghost" onClick={() => void refresh()} disabled={busy}>
+                  刷新
                 </button>
               </div>
             </div>
+          </div>
 
-            <div className="rule-list minimal-rule-list">
-              {selectedRules.map((rule) => (
-                <article className={`rule-row ${rule.enabled ? "" : "is-muted"}`} key={rule.id}>
-                  <button
-                    className={`toggle-chip ${rule.enabled ? "on" : "off"}`}
-                    onClick={() => void toggleRule(rule)}
-                    disabled={busy}
-                  >
-                    {rule.enabled ? "开" : "关"}
-                  </button>
-                  <div className="rule-row-main">
-                    <div className="row wrap-gap">
-                      <h4>{rule.name}</h4>
-                      <span className="badge neutral">{formatKind(rule.kind)}</span>
-                    </div>
-                    <p className="small muted">
-                      {joinCsv(rule.match.host) || "继承站点 Host"} · {rule.match.pathGlob}
-                    </p>
-                    <p className="target-line">{formatRuleTarget(rule)}</p>
+          <div className="hero-preview">
+            <div className="browser-preview">
+              <div className="browser-bar">
+                <div className="browser-dots">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                <div className="browser-address">{currentHost || joinCsv(selectedProject?.siteHosts) || "resource.local"}</div>
+              </div>
+
+              <div className="browser-body">
+                <div className="preview-search-card">
+                  <span className="label">Quick View</span>
+                  <strong>{selectedProject?.name || "先创建站点"}</strong>
+                  <p className="small muted">
+                    {selectedProject
+                      ? `${selectedRules.length} 条规则，${filteredLogs.length} 条命中记录`
+                      : "把一个域名归到站点里，再开始维护规则。"}
+                  </p>
+                </div>
+
+                <div className="preview-metrics">
+                  <div className="preview-metric">
+                    <span className="label">API</span>
+                    <strong>{selectedApiRuleCount}</strong>
                   </div>
-                  <div className="rule-row-actions">
-                    <button className="ghost" onClick={() => openRuleEditor(rule.kind, rule)}>
-                      编辑
+                  <div className="preview-metric">
+                    <span className="label">资源</span>
+                    <strong>{selectedAssetRuleCount}</strong>
+                  </div>
+                  <div className="preview-metric">
+                    <span className="label">站点</span>
+                    <strong>{projects.length}</strong>
+                  </div>
+                </div>
+
+                <div className="preview-rule-list">
+                  {previewRules.map((rule) => (
+                    <article className="preview-rule" key={rule.id}>
+                      <div className="row between align-start">
+                        <strong>{rule.name}</strong>
+                        <span className="badge neutral">{formatKind(rule.kind)}</span>
+                      </div>
+                      <p className="small muted">{rule.match.pathGlob}</p>
+                    </article>
+                  ))}
+                  {previewRules.length === 0 ? (
+                    <div className="preview-empty small muted">规则会在这里形成一组干净的预览卡片。</div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <main id="main-content" className="main-flow">
+        {selectedProject ? (
+          <>
+            <section className="card site-rail-card">
+              <div className="row between align-start">
+                <div className="stack compact-gap">
+                  <span className="kicker">站点导航</span>
+                  <h2>先看你正在拦截哪个站点</h2>
+                  <p className="small muted">切换站点、查看 Host、直接在对应站点下新增规则。</p>
+                </div>
+                <button className="secondary" onClick={() => openProjectEditor()}>
+                  新建站点
+                </button>
+              </div>
+
+              <div className="site-rail">
+                {siteViews.map((item) => (
+                  <article className={`site-spotlight-card ${selectedProject.id === item.project.id ? "active" : ""}`} key={item.project.id}>
+                    <button className="site-spotlight-main" onClick={() => setSelectedProjectId(item.project.id)}>
+                      <div className="stack compact-gap">
+                        <div className="row wrap-gap">
+                          <strong>{item.project.name}</strong>
+                          {item.matchesCurrent ? <span className="badge success">当前页面</span> : null}
+                        </div>
+                        <p className="small muted">{joinCsv(item.project.siteHosts) || "未填写 Host"}</p>
+                      </div>
+                      <div className="row wrap-gap site-spotlight-meta">
+                        <span className="badge neutral">{item.ruleCount} 条规则</span>
+                        <span className="badge neutral">{item.hitCount} 次命中</span>
+                      </div>
                     </button>
-                  </div>
-                </article>
-              ))}
+                    <div className="site-spotlight-actions">
+                      <button className="ghost" onClick={() => setSelectedProjectId(item.project.id)}>
+                        查看规则
+                      </button>
+                      <button
+                        className="secondary"
+                        onClick={() => openBatchRuleEditorForProject(item.project.id, "api_forward")}
+                        disabled={busy}
+                      >
+                        在此站点新增
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
 
-              {selectedRules.length === 0 ? (
-                <div className="empty-state large-empty-state">
-                  <p>当前站点还没有规则。</p>
-                  <p className="small muted">从最基础开始，先新建一条规则，只填“匹配路径”和“目标地址”。</p>
-                  <div className="row wrap-gap">
-                    <button onClick={() => openBatchRuleEditor("api_forward")} disabled={!selectedRuleSet || busy}>
-                      新建 API 规则
+            <section className="card rule-focus-card">
+              <div className="row between align-start">
+                <div className="stack compact-gap">
+                  <span className="kicker">规则库</span>
+                  <h2>{selectedProject.name}</h2>
+                  <p className="small muted">
+                    {joinCsv(selectedProject.siteHosts)}
+                    {selectedProject.envLabel ? ` · ${selectedProject.envLabel}` : ""}
+                  </p>
+                </div>
+                <div className="row wrap-gap compact-actions">
+                  <span className="badge neutral">全部 {selectedRules.length}</span>
+                  <span className="badge neutral">API {selectedApiRuleCount}</span>
+                  <span className="badge neutral">资源 {selectedAssetRuleCount}</span>
+                  <button className="secondary" onClick={() => openBatchRuleEditor("api_forward")} disabled={!selectedRuleSet || busy}>
+                    新增 API
+                  </button>
+                  <button className="ghost" onClick={() => openBatchRuleEditor("asset_redirect")} disabled={!selectedRuleSet || busy}>
+                    新增资源
+                  </button>
+                </div>
+              </div>
+
+              <div className="workspace-toolbar">
+                <label className="stack compact-gap search-field">
+                  <span className="label">搜索规则</span>
+                  <input
+                    value={ruleQuery}
+                    onChange={(event) => setRuleQuery(event.target.value)}
+                    placeholder="搜索名称、路径、目标地址、Host"
+                  />
+                </label>
+
+                <div className="stack compact-gap kind-filter">
+                  <span className="label">分类</span>
+                  <div className="segmented-row compact-segmented-row kind-segmented-row">
+                    <button
+                      className={ruleKindFilter === "all" ? "active-segment" : "ghost"}
+                      onClick={() => setRuleKindFilter("all")}
+                    >
+                      全部
                     </button>
                     <button
-                      className="secondary"
-                      onClick={() => openBatchRuleEditor("asset_redirect")}
-                      disabled={!selectedRuleSet || busy}
+                      className={ruleKindFilter === "api_forward" ? "active-segment" : "ghost"}
+                      onClick={() => setRuleKindFilter("api_forward")}
                     >
-                      新建资源规则
+                      API
+                    </button>
+                    <button
+                      className={ruleKindFilter === "asset_redirect" ? "active-segment" : "ghost"}
+                      onClick={() => setRuleKindFilter("asset_redirect")}
+                    >
+                      资源
                     </button>
                   </div>
                 </div>
-              ) : null}
-            </div>
+              </div>
+
+              <div className="row between wrap-gap workspace-summary">
+                <p className="small muted">
+                  {deferredRuleQuery
+                    ? `已筛出 ${visibleRules.length} 条规则`
+                    : `当前站点共有 ${selectedRules.length} 条规则，可直接搜索或按类型筛选。`}
+                </p>
+                {deferredRuleQuery || ruleKindFilter !== "all" ? (
+                  <button
+                    className="ghost"
+                    onClick={() => {
+                      setRuleQuery("");
+                      setRuleKindFilter("all");
+                    }}
+                  >
+                    清空筛选
+                  </button>
+                ) : null}
+              </div>
+
+              <div className="rule-list minimal-rule-list">
+                {visibleRules.map((rule) => (
+                  <article className={`rule-row ${rule.enabled ? "" : "is-muted"}`} key={rule.id}>
+                    <button
+                      className={`toggle-chip ${rule.enabled ? "on" : "off"}`}
+                      onClick={() => void toggleRule(rule)}
+                      disabled={busy}
+                    >
+                      {rule.enabled ? "开" : "关"}
+                    </button>
+                    <div className="rule-row-main">
+                      <div className="row between align-start">
+                        <div className="stack compact-gap">
+                          <div className="row wrap-gap">
+                            <h4>{rule.name}</h4>
+                            <span className="badge neutral">{formatKind(rule.kind)}</span>
+                          </div>
+                          <p className="small muted">
+                            {joinCsv(rule.match.host) || "继承站点 Host"} · {rule.match.pathGlob}
+                          </p>
+                        </div>
+                        <span className="rule-priority">P{rule.priority}</span>
+                      </div>
+                      <p className="target-line">{formatRuleTarget(rule)}</p>
+                    </div>
+                    <div className="rule-row-actions">
+                      <button className="ghost" onClick={() => openRuleEditor(rule.kind, rule)}>
+                        编辑
+                      </button>
+                    </div>
+                  </article>
+                ))}
+
+                {selectedRules.length === 0 ? (
+                  <div className="empty-state large-empty-state">
+                    <p>当前站点还没有规则。</p>
+                    <p className="small muted">从最基础开始，先新建一条规则，只填“匹配路径”和“目标地址”。</p>
+                    <div className="row wrap-gap">
+                      <button onClick={() => openBatchRuleEditor("api_forward")} disabled={!selectedRuleSet || busy}>
+                        新建 API 规则
+                      </button>
+                      <button
+                        className="secondary"
+                        onClick={() => openBatchRuleEditor("asset_redirect")}
+                        disabled={!selectedRuleSet || busy}
+                      >
+                        新建资源规则
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {selectedRules.length > 0 && visibleRules.length === 0 ? (
+                  <div className="empty-state large-empty-state">
+                    <p>没有找到匹配的规则。</p>
+                    <p className="small muted">试着换个关键词，或者清空当前筛选条件。</p>
+                    <div className="row wrap-gap">
+                      <button
+                        className="secondary"
+                        onClick={() => {
+                          setRuleQuery("");
+                          setRuleKindFilter("all");
+                        }}
+                      >
+                        清空筛选
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </section>
           </>
         ) : (
-          <div className="empty-state large-empty-state">
-            <p>还没有站点配置。</p>
-            <p className="small muted">先建一个站点，把 Host 归拢起来，主页面就只会显示这个站点的规则。</p>
-            <div className="row wrap-gap">
-              <button onClick={() => openProjectEditor()}>新建站点</button>
-              <button className="secondary" onClick={() => openSettings("site")}>
-                打开设置
-              </button>
+          <section className="card rule-focus-card">
+            <div className="empty-state large-empty-state">
+              <p>还没有站点配置。</p>
+              <p className="small muted">先建一个站点，把 Host 归拢起来，主页面就会变成对应站点的规则工作台。</p>
+              <div className="row wrap-gap">
+                <button onClick={() => openProjectEditor()}>新建站点</button>
+                <button className="secondary" onClick={() => openSettings("site")}>
+                  打开设置
+                </button>
+              </div>
             </div>
-          </div>
+          </section>
         )}
-      </section>
 
-      <section className="status-footer card compact-card">
-        <div className="row between align-start">
-          <div className="stack compact-gap">
-            <span className="label">当前状态</span>
-            <p>{status}</p>
+        <section className="status-footer card compact-card">
+          <div className="row between align-start">
+            <div className="stack compact-gap">
+              <span className="kicker">运行状态</span>
+              <p>{status}</p>
+            </div>
+            <button className="ghost" onClick={() => openSettings("logs")}>
+              查看日志
+            </button>
           </div>
-          <button className="ghost" onClick={() => openSettings("logs")}>
-            查看日志
-          </button>
-        </div>
-      </section>
+        </section>
+      </main>
 
       {drawerMode ? (
         <div className="modal-backdrop" onClick={() => setDrawerMode(null)}>
@@ -1531,6 +1740,22 @@ function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: Project
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
+}
+
+function buildRuleSearchText(rule: Rule): string {
+  return [
+    rule.name,
+    rule.kind,
+    joinCsv(rule.match.host),
+    rule.match.pathGlob,
+    joinCsv(rule.match.resourceType),
+    joinCsv(rule.match.method),
+    formatRuleTarget(rule),
+    rule.note ?? "",
+    joinCsv(rule.tags),
+  ]
+    .join(" ")
+    .toLowerCase();
 }
 
 function formatKind(kind: Rule["kind"]): string {
