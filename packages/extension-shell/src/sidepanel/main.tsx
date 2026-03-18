@@ -54,6 +54,11 @@ function App() {
     [dashboard, matchedRuleIds],
   );
 
+  const activeRuleCount = useMemo(
+    () => matchedRules.filter((rule) => rule.enabled).length,
+    [matchedRules],
+  );
+
   async function refresh(): Promise<void> {
     setBusy(true);
     try {
@@ -122,12 +127,15 @@ function App() {
 
   return (
     <div className="minimal-panel-shell">
-      <section className="hero minimal-panel-hero">
+      <section className="hero minimal-panel-hero editorial-hero">
         <div className="stack compact-gap">
-          <span className="kicker">当前页面</span>
+          <span className="kicker">Advanced Resource</span>
           <h2>{currentHost || "未识别标签页"}</h2>
-          <p className="muted small mono-line">{currentUrl || "打开一个网页后，这里会显示当前 URL。"}</p>
+          <p className="muted small mono-line">
+            {currentUrl || "打开一个网页后，这里会显示当前 URL。"}
+          </p>
         </div>
+
         <div className="row wrap-gap status-row">
           <span className={`badge ${dashboard?.health ? "success" : "danger"}`}>
             {dashboard?.health ? "服务在线" : "服务离线"}
@@ -136,11 +144,27 @@ function App() {
             {matchedProjects.length > 0 ? `已匹配 ${matchedProjects.length} 个站点` : "未匹配站点"}
           </span>
         </div>
-        <div className="row wrap-gap">
+
+        <div className="preview-metrics panel-metrics">
+          <div className="preview-metric">
+            <span className="label">站点</span>
+            <strong>{matchedProjects.length}</strong>
+          </div>
+          <div className="preview-metric">
+            <span className="label">规则</span>
+            <strong>{matchedRules.length}</strong>
+          </div>
+          <div className="preview-metric">
+            <span className="label">启用</span>
+            <strong>{activeRuleCount}</strong>
+          </div>
+        </div>
+
+        <div className="row wrap-gap panel-actions">
           <button className="secondary" onClick={() => void refresh()} disabled={busy}>
             刷新
           </button>
-          <button className="ghost" onClick={() => void chrome.runtime.openOptionsPage()}>
+          <button onClick={() => void chrome.runtime.openOptionsPage()}>
             打开规则页
           </button>
         </div>
@@ -149,18 +173,19 @@ function App() {
       <section className="card compact-card">
         <div className="row between align-start">
           <div className="stack compact-gap">
-            <h3>匹配站点</h3>
-            <p className="small muted">这里显示当前页面真正命中的站点，而不是全部站点。</p>
+            <span className="kicker">站点</span>
+            <h3>当前页面命中的站点</h3>
+            <p className="small muted">这里只显示真正命中的站点，不展示全部配置。</p>
           </div>
         </div>
 
-        <div className="site-mini-list">
+        <div className="site-rail panel-site-rail">
           {matchedProjects.map((project) => (
-            <article className="item compact-item" key={project.id}>
-              <div className="item-header">
+            <article className="site-spotlight-card" key={project.id}>
+              <div className="stack compact-gap">
                 <div className="stack compact-gap">
                   <div className="row wrap-gap">
-                    <h4>{project.name}</h4>
+                    <strong>{project.name}</strong>
                     <span className={`badge ${project.enabled ? "success" : "warning"}`}>
                       {project.enabled ? "已启用" : "已停用"}
                     </span>
@@ -168,12 +193,27 @@ function App() {
                   </div>
                   <p className="small muted">{joinCsv(project.siteHosts) || "未填写 Host"}</p>
                 </div>
+                <div className="row wrap-gap site-spotlight-meta">
+                  <span className="badge neutral">
+                    {
+                      dashboard?.workspace.ruleSets
+                        .filter((ruleSet) => ruleSet.projectId === project.id)
+                        .reduce((total, ruleSet) => total + ruleSet.ruleIds.length, 0) ?? 0
+                    }{" "}
+                    条规则
+                  </span>
+                </div>
+              </div>
+              <div className="site-spotlight-actions">
                 <button
-                  className={project.enabled ? "secondary" : ""}
+                  className={project.enabled ? "secondary" : "ghost"}
                   onClick={() => void toggleProject(project)}
                   disabled={busy}
                 >
                   {project.enabled ? "停用" : "启用"}
+                </button>
+                <button className="ghost" onClick={() => void chrome.runtime.openOptionsPage()}>
+                  去规则页
                 </button>
               </div>
             </article>
@@ -190,8 +230,9 @@ function App() {
       <section className="card compact-card">
         <div className="row between align-start">
           <div className="stack compact-gap">
-            <h3>当前规则</h3>
-            <p className="small muted">只展示当前页面会命中的规则，不在侧边栏放输入表单。</p>
+            <span className="kicker">规则</span>
+            <h3>当前页面会生效的规则</h3>
+            <p className="small muted">侧边栏只做查看和开关，编辑继续留在规则页。</p>
           </div>
         </div>
 
@@ -206,11 +247,16 @@ function App() {
                 {rule.enabled ? "开" : "关"}
               </button>
               <div className="rule-row-main">
-                <div className="row wrap-gap">
-                  <h4>{rule.name}</h4>
-                  <span className="badge neutral">{formatKind(rule.kind)}</span>
+                <div className="row between align-start">
+                  <div className="stack compact-gap">
+                    <div className="row wrap-gap">
+                      <h4>{rule.name}</h4>
+                      <span className="badge neutral">{formatKind(rule.kind)}</span>
+                    </div>
+                    <p className="small muted">{rule.match.pathGlob}</p>
+                  </div>
+                  <span className="rule-priority">P{rule.priority}</span>
                 </div>
-                <p className="small muted">{rule.match.pathGlob}</p>
                 <p className="target-line">{formatRuleTarget(rule)}</p>
               </div>
             </article>
@@ -227,9 +273,14 @@ function App() {
       </section>
 
       <section className="card compact-card">
-        <div className="stack compact-gap">
-          <span className="label">状态</span>
-          <p>{status}</p>
+        <div className="row between align-start">
+          <div className="stack compact-gap">
+            <span className="kicker">状态</span>
+            <p>{status}</p>
+          </div>
+          <button className="ghost" onClick={() => void chrome.runtime.openOptionsPage()}>
+            打开工作台
+          </button>
         </div>
       </section>
     </div>

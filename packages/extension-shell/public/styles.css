@@ -200,6 +200,10 @@ pre,
   gap: 14px;
 }
 
+.minimal-panel-shell .hero h2 {
+  font-size: clamp(1.55rem, 5.5vw, 2rem);
+}
+
 .hero,
 .card {
   display: grid;
@@ -247,6 +251,10 @@ pre,
 .main-flow {
   display: grid;
   gap: 18px;
+}
+
+.panel-actions {
+  justify-content: flex-start;
 }
 
 .hero-stage {
@@ -362,6 +370,10 @@ pre,
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+.panel-metrics .preview-metric {
+  min-height: 86px;
 }
 
 .preview-metric {
@@ -525,6 +537,10 @@ pre,
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.panel-site-rail {
+  grid-template-columns: 1fr;
 }
 
 .site-spotlight-card {
