@@ -1,8 +1,10 @@
-import React, { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   collectRuleConflicts,
   collectUnsupportedRuleWarnings,
+  parseResourceOverrideExport,
+  serializeWorkspace,
   sortRules,
 } from "@resource-forwarder/rule-core";
 import type {
@@ -22,8 +24,11 @@ import type {
 } from "../shared/messages.js";
 import { runtimeRequest } from "../shared/messages.js";
 
-type DrawerMode = "settings" | "project" | "rule" | "rule-batch" | null;
-type SettingsTab = "site" | "logs" | "share";
+type AppView = "rules" | "import-export" | "settings" | "about";
+type PanelMode = "rule" | "rule-batch" | null;
+type RulePanelTab = "basic" | "advanced";
+type RuleStatusTab = "all" | "enabled" | "disabled";
+type ImportSource = "workspace" | "resource-override";
 
 interface ProjectDraft {
   id: string;
@@ -57,6 +62,19 @@ interface BatchRuleDraft extends RuleDraft {
   localId: string;
 }
 
+interface RuleTemplatePreset {
+  id: string;
+  kind: Rule["kind"];
+  label: string;
+  description: string;
+  patch: Partial<RuleDraft>;
+}
+
+interface ImportFeedback {
+  title: string;
+  details: string[];
+}
+
 const defaultApiTypes: MatchResourceType[] = ["fetch", "xmlhttprequest"];
 const defaultAssetTypes: MatchResourceType[] = ["script", "stylesheet", "image", "font"];
 
@@ -70,19 +88,27 @@ const emptyProjectDraft = (): ProjectDraft => ({
 });
 
 function App() {
+  const [view, setView] = useState<AppView>("rules");
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState("");
-  const [drawerMode, setDrawerMode] = useState<DrawerMode>(null);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("site");
+  const [panelMode, setPanelMode] = useState<PanelMode>(null);
+  const [rulePanelTab, setRulePanelTab] = useState<RulePanelTab>("basic");
+  const [showProjectModal, setShowProjectModal] = useState(false);
   const [projectDraft, setProjectDraft] = useState<ProjectDraft>(emptyProjectDraft());
   const [ruleDraft, setRuleDraft] = useState<RuleDraft>(createRuleDraft());
   const [batchRuleDrafts, setBatchRuleDrafts] = useState<BatchRuleDraft[]>([]);
   const [serviceUrl, setServiceUrl] = useState("");
   const [importText, setImportText] = useState("");
+  const [importSource, setImportSource] = useState<ImportSource>("resource-override");
   const [exportText, setExportText] = useState("");
   const [exportFormat, setExportFormat] = useState<"json" | "yaml">("yaml");
   const [ruleQuery, setRuleQuery] = useState("");
   const [ruleKindFilter, setRuleKindFilter] = useState<"all" | Rule["kind"]>("all");
+  const [ruleStatusTab, setRuleStatusTab] = useState<RuleStatusTab>("all");
+  const [importFeedback, setImportFeedback] = useState<ImportFeedback | null>(null);
+  const [resourceOverridePreview, setResourceOverridePreview] = useState<ReturnType<typeof parseResourceOverrideExport> | null>(null);
+  const [importModalError, setImportModalError] = useState<string | null>(null);
+  const [selectedProjectIds, setSelectedProjectIds] = useState<Set<string>>(new Set());
   const [status, setStatus] = useState("正在加载规则...");
   const [busy, setBusy] = useState(false);
   const deferredRuleQuery = useDeferredValue(ruleQuery.trim().toLowerCase());
@@ -99,95 +125,69 @@ function App() {
 
   const selectedProject = useMemo(
     () =>
-      projects.find((project) => project.id === selectedProjectId) ??
-      projects.find((project) => project.siteHosts.includes(currentHost)) ??
+      projects.find((p) => p.id === selectedProjectId) ??
+      projects.find((p) => p.siteHosts.includes(currentHost)) ??
       projects[0],
     [projects, selectedProjectId, currentHost],
   );
 
   const selectedProjectRuleSets = useMemo(
-    () => ruleSets.filter((ruleSet) => ruleSet.projectId === selectedProject?.id),
+    () => ruleSets.filter((rs) => rs.projectId === selectedProject?.id),
     [ruleSets, selectedProject?.id],
   );
 
   const selectedRuleSet = selectedProjectRuleSets[0];
+
   const selectedRuleIds = useMemo(
-    () => new Set(selectedProjectRuleSets.flatMap((ruleSet) => ruleSet.ruleIds)),
+    () => new Set(selectedProjectRuleSets.flatMap((rs) => rs.ruleIds)),
     [selectedProjectRuleSets],
   );
 
+  // Flat list of all rules with their project info
+  const allRuleRows = useMemo(() => {
+    return sortRules(rules).map((rule) => {
+      const rs = ruleSets.find((r) => r.ruleIds.includes(rule.id));
+      const project = rs ? projects.find((p) => p.id === rs.projectId) : null;
+      return { rule, project };
+    });
+  }, [rules, ruleSets, projects]);
+
+  const filteredRuleRows = useMemo(() => {
+    return allRuleRows.filter(({ rule, project }) => {
+      // Project filter
+      if (selectedProjectId && project?.id !== selectedProjectId) return false;
+      // Status tab
+      if (ruleStatusTab === "enabled" && !rule.enabled) return false;
+      if (ruleStatusTab === "disabled" && rule.enabled) return false;
+      // Kind filter
+      if (ruleKindFilter !== "all" && rule.kind !== ruleKindFilter) return false;
+      // Search
+      if (deferredRuleQuery) {
+        return buildRuleSearchText(rule).includes(deferredRuleQuery);
+      }
+      return true;
+    });
+  }, [allRuleRows, selectedProjectId, ruleStatusTab, ruleKindFilter, deferredRuleQuery]);
+
   const selectedRules = useMemo(
-    () =>
-      sortRules(rules.filter((rule) => selectedRuleIds.has(rule.id))).sort((left, right) => {
-        if (left.enabled !== right.enabled) {
-          return left.enabled ? -1 : 1;
-        }
-        return 0;
-      }),
+    () => sortRules(rules.filter((r) => selectedRuleIds.has(r.id))),
     [rules, selectedRuleIds],
   );
 
-  const filteredLogs = useMemo(
-    () => logs.filter((log) => (selectedProject ? log.projectId === selectedProject.id : true)),
-    [logs, selectedProject],
+  const enabledCount = useMemo(() => allRuleRows.filter(({ rule }) => rule.enabled && (!selectedProjectId || (allRuleRows.find(r => r.rule.id === rule.id)?.project?.id === selectedProjectId))).length, [allRuleRows, selectedProjectId]);
+  const disabledCount = useMemo(() => allRuleRows.filter(({ rule }) => !rule.enabled && (!selectedProjectId || (allRuleRows.find(r => r.rule.id === rule.id)?.project?.id === selectedProjectId))).length, [allRuleRows, selectedProjectId]);
+
+  const projectRuleRows = useMemo(
+    () => selectedProjectId ? allRuleRows.filter(({ project }) => project?.id === selectedProjectId) : allRuleRows,
+    [allRuleRows, selectedProjectId],
   );
 
-  const siteViews = useMemo(
-    () =>
-      projects
-        .map((project) => {
-          const scopedRuleSets = ruleSets.filter((ruleSet) => ruleSet.projectId === project.id);
-          const ruleCount = scopedRuleSets.reduce((sum, ruleSet) => sum + ruleSet.ruleIds.length, 0);
-          const projectLogs = logs.filter((log) => log.projectId === project.id);
-          return {
-            project,
-            ruleCount,
-            hitCount: projectLogs.length,
-            matchesCurrent: project.siteHosts.includes(currentHost),
-          };
-        })
-        .sort((left, right) => {
-          if (left.matchesCurrent !== right.matchesCurrent) {
-            return left.matchesCurrent ? -1 : 1;
-          }
-          if (left.project.enabled !== right.project.enabled) {
-            return left.project.enabled ? -1 : 1;
-          }
-          return left.project.name.localeCompare(right.project.name, "zh-CN");
-        }),
-    [projects, ruleSets, logs, currentHost],
-  );
-
-  const selectedApiRuleCount = useMemo(
-    () => selectedRules.filter((rule) => rule.kind === "api_forward").length,
-    [selectedRules],
-  );
-
-  const selectedAssetRuleCount = useMemo(
-    () => selectedRules.filter((rule) => rule.kind === "asset_redirect").length,
-    [selectedRules],
-  );
-
-  const visibleRules = useMemo(
-    () =>
-      selectedRules.filter((rule) => {
-        if (ruleKindFilter !== "all" && rule.kind !== ruleKindFilter) {
-          return false;
-        }
-        if (!deferredRuleQuery) {
-          return true;
-        }
-        return buildRuleSearchText(rule).includes(deferredRuleQuery);
-      }),
-    [selectedRules, ruleKindFilter, deferredRuleQuery],
-  );
-
-  const previewRules = useMemo(() => visibleRules.slice(0, 3), [visibleRules]);
+  const totalCount = projectRuleRows.length;
+  const tabEnabledCount = projectRuleRows.filter(({ rule }) => rule.enabled).length;
+  const tabDisabledCount = projectRuleRows.filter(({ rule }) => !rule.enabled).length;
 
   const draftRule = useMemo(() => {
-    if (!dashboard || !selectedProject) {
-      return null;
-    }
+    if (!dashboard || !selectedProject) return null;
     try {
       return toRule(ruleDraft, dashboard.workspace, selectedProject);
     } catch {
@@ -196,9 +196,7 @@ function App() {
   }, [dashboard, selectedProject, ruleDraft]);
 
   const ruleConflicts = useMemo(() => {
-    if (!dashboard || !draftRule) {
-      return [];
-    }
+    if (!dashboard || !draftRule) return [];
     return collectRuleConflicts(dashboard.workspace, draftRule);
   }, [dashboard, draftRule]);
 
@@ -206,6 +204,19 @@ function App() {
     () => (draftRule ? collectUnsupportedRuleWarnings(draftRule).map(localizeWarning) : []),
     [draftRule],
   );
+
+  const activeRuleTemplates = useMemo(
+    () => getRuleTemplatePresets(ruleDraft.kind),
+    [ruleDraft.kind],
+  );
+
+  const servicePort = useMemo(() => {
+    try {
+      return new URL(serviceUrl).port || "5178";
+    } catch {
+      return "5178";
+    }
+  }, [serviceUrl]);
 
   async function refresh(): Promise<void> {
     setBusy(true);
@@ -224,70 +235,60 @@ function App() {
     setDashboard(state);
     setServiceUrl(state.serviceUrl);
     setSelectedProjectId((current) => {
-      if (current && state.workspace.projects.some((project) => project.id === current)) {
-        return current;
-      }
-      const matched = state.workspace.projects.find((project) =>
-        project.siteHosts.includes(state.currentTab?.host ?? ""),
+      if (current && state.workspace.projects.some((p) => p.id === current)) return current;
+      const matched = state.workspace.projects.find((p) =>
+        p.siteHosts.includes(state.currentTab?.host ?? ""),
       );
       return matched?.id ?? state.workspace.projects[0]?.id ?? "";
     });
   }
 
-  function openSettings(tab: SettingsTab = "site"): void {
-    setSettingsTab(tab);
-    setDrawerMode("settings");
-  }
-
-  function openProjectEditor(project?: Project): void {
+  function openProjectModal(project?: Project): void {
     setProjectDraft(project ? fromProject(project) : emptyProjectDraft());
-    setDrawerMode("project");
+    setShowProjectModal(true);
   }
 
-  function openRuleEditor(kind: Rule["kind"], rule?: Rule): void {
+  function openRulePanel(kind: Rule["kind"], rule?: Rule): void {
     if (!selectedProject || !selectedRuleSet) {
       setStatus("请先创建一个站点，再添加规则。");
       return;
     }
     setRuleDraft(createRuleDraft({ project: selectedProject, ruleSet: selectedRuleSet, kind, rule }));
-    setDrawerMode("rule");
+    setRulePanelTab("basic");
+    setPanelMode("rule");
   }
 
-  function openBatchRuleEditor(kind: Rule["kind"] = "api_forward"): void {
+  function duplicateRule(rule: Rule): void {
+    if (!selectedProject || !selectedRuleSet) {
+      setStatus("请先选择一个站点，再复制规则。");
+      return;
+    }
+    const base = createRuleDraft({ project: selectedProject, ruleSet: selectedRuleSet, kind: rule.kind, rule });
+    setRuleDraft({ ...base, id: "", name: `${rule.name} 副本` });
+    setRulePanelTab("basic");
+    setPanelMode("rule");
+  }
+
+  function openBatchRulePanel(kind: Rule["kind"] = "api_forward"): void {
     if (!selectedProject || !selectedRuleSet) {
       setStatus("请先创建一个站点，再添加规则。");
       return;
     }
     setBatchRuleDrafts([createBatchRuleDraft({ project: selectedProject, ruleSet: selectedRuleSet, kind })]);
-    setDrawerMode("rule-batch");
-  }
-
-  function openBatchRuleEditorForProject(projectId: string, kind: Rule["kind"] = "api_forward"): void {
-    const project = projects.find((item) => item.id === projectId);
-    const ruleSet = ruleSets.find((item) => item.projectId === projectId);
-    if (!project || !ruleSet) {
-      setStatus("这个站点还没有可用规则组，请先检查站点配置。");
-      return;
-    }
-    setSelectedProjectId(projectId);
-    setBatchRuleDrafts([createBatchRuleDraft({ project, ruleSet, kind })]);
-    setDrawerMode("rule-batch");
+    setPanelMode("rule-batch");
   }
 
   function appendBatchRuleDraft(): void {
-    if (!selectedProject || !selectedRuleSet) {
-      setStatus("请先创建一个站点，再添加规则。");
-      return;
-    }
+    if (!selectedProject || !selectedRuleSet) return;
     setBatchRuleDrafts((current) => {
-      const previous = current[current.length - 1];
+      const prev = current[current.length - 1];
       return [
         ...current,
         createBatchRuleDraft({
           project: selectedProject,
           ruleSet: selectedRuleSet,
-          kind: previous?.kind ?? "api_forward",
-          source: previous,
+          kind: prev?.kind ?? "api_forward",
+          source: prev,
         }),
       ];
     });
@@ -295,12 +296,16 @@ function App() {
 
   function updateBatchRuleDraft(localId: string, patch: Partial<BatchRuleDraft>): void {
     setBatchRuleDrafts((current) =>
-      current.map((draft) => (draft.localId === localId ? { ...draft, ...patch } : draft)),
+      current.map((d) => (d.localId === localId ? { ...d, ...patch } : d)),
     );
   }
 
   function removeBatchRuleDraft(localId: string): void {
-    setBatchRuleDrafts((current) => current.filter((draft) => draft.localId !== localId));
+    setBatchRuleDrafts((current) => current.filter((d) => d.localId !== localId));
+  }
+
+  function applyRuleTemplate(template: RuleTemplatePreset): void {
+    setRuleDraft((current) => mergeRuleDraftByKind(current, template.kind, template.patch));
   }
 
   async function saveServiceUrl(): Promise<void> {
@@ -321,13 +326,12 @@ function App() {
       setStatus("请输入站点名称。");
       return;
     }
-
     setBusy(true);
     try {
       const now = new Date().toISOString();
       const projectId = projectDraft.id || createId("project");
       const existingRuleSets =
-        dashboard?.workspace.ruleSets.filter((ruleSet) => ruleSet.projectId === projectId) ?? [];
+        dashboard?.workspace.ruleSets.filter((rs) => rs.projectId === projectId) ?? [];
       const payload = {
         project: {
           id: projectId,
@@ -338,7 +342,7 @@ function App() {
           note: projectDraft.note.trim() || undefined,
           tags: [],
           createdAt:
-            dashboard?.workspace.projects.find((project) => project.id === projectId)?.createdAt ?? now,
+            dashboard?.workspace.projects.find((p) => p.id === projectId)?.createdAt ?? now,
           updatedAt: now,
         },
         ruleSets:
@@ -356,12 +360,10 @@ function App() {
                 },
               ],
       };
-
       const state = await runtimeRequest<UpsertMutationResponse>({ type: "upsert-project", payload });
       hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
       setSelectedProjectId(projectId);
-      setDrawerMode("settings");
-      setSettingsTab("site");
+      setShowProjectModal(false);
       setProjectDraft(emptyProjectDraft());
       setStatus(`站点「${payload.project.name}」已保存。`);
     } catch (error) {
@@ -376,21 +378,37 @@ function App() {
       setStatus("请先选择站点。");
       return;
     }
-
     setBusy(true);
     try {
       const rule = toRule(ruleDraft, dashboard.workspace, selectedProject);
       const state = await runtimeRequest<UpsertMutationResponse>({
         type: "upsert-rule",
-        payload: {
-          rule,
-          ruleSetId: ruleDraft.ruleSetId,
-        },
+        payload: { rule, ruleSetId: ruleDraft.ruleSetId },
       });
       hydrateDashboard({ ...state, logs: dashboard.logs, currentTab: dashboard.currentTab });
-      setDrawerMode(null);
+      setPanelMode(null);
       setRuleDraft(createRuleDraft({ project: selectedProject, ruleSet: selectedRuleSet, kind: rule.kind }));
       setStatus(`规则「${rule.name}」已保存。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "保存规则失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveRuleAndContinue(): Promise<void> {
+    if (!dashboard || !selectedProject) return;
+    setBusy(true);
+    try {
+      const rule = toRule(ruleDraft, dashboard.workspace, selectedProject);
+      const state = await runtimeRequest<UpsertMutationResponse>({
+        type: "upsert-rule",
+        payload: { rule, ruleSetId: ruleDraft.ruleSetId },
+      });
+      hydrateDashboard({ ...state, logs: dashboard.logs, currentTab: dashboard.currentTab });
+      setRuleDraft(createRuleDraft({ project: selectedProject, ruleSet: selectedRuleSet, kind: rule.kind }));
+      setRulePanelTab("basic");
+      setStatus(`规则「${rule.name}」已保存，继续新建。`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "保存规则失败。");
     } finally {
@@ -403,43 +421,31 @@ function App() {
       setStatus("请先选择站点。");
       return;
     }
-
     if (batchRuleDrafts.length === 0) {
       setStatus("请先添加至少一条规则。");
       return;
     }
-
     setBusy(true);
     let nextState: UpsertMutationResponse | null = null;
     let workspace = dashboard.workspace;
     let savedCount = 0;
-
     try {
-      for (let index = 0; index < batchRuleDrafts.length; index += 1) {
-        const draft = batchRuleDrafts[index];
+      for (let i = 0; i < batchRuleDrafts.length; i++) {
+        const draft = batchRuleDrafts[i];
         const rule = toRule(draft, workspace, selectedProject);
-        try {
-          const state = await runtimeRequest<UpsertMutationResponse>({
-            type: "upsert-rule",
-            payload: {
-              rule,
-              ruleSetId: draft.ruleSetId,
-            },
-          });
-          nextState = state;
-          workspace = state.workspace;
-          savedCount += 1;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "未知错误";
-          throw new Error(`第 ${index + 1} 条规则保存失败：${message}`);
-        }
+        const state = await runtimeRequest<UpsertMutationResponse>({
+          type: "upsert-rule",
+          payload: { rule, ruleSetId: draft.ruleSetId },
+        });
+        nextState = state;
+        workspace = state.workspace;
+        savedCount++;
       }
-
       if (nextState) {
         hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
       }
       setBatchRuleDrafts([]);
-      setDrawerMode(null);
+      setPanelMode(null);
       setStatus(`已连续保存 ${savedCount} 条规则。`);
     } catch (error) {
       if (nextState) {
@@ -458,7 +464,7 @@ function App() {
         type: "upsert-project",
         payload: {
           project: { ...project, enabled: !project.enabled },
-          ruleSets: ruleSets.filter((ruleSet) => ruleSet.projectId === project.id),
+          ruleSets: ruleSets.filter((rs) => rs.projectId === project.id),
         },
       });
       hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
@@ -470,16 +476,113 @@ function App() {
     }
   }
 
+  async function deleteProject(project: Project): Promise<void> {
+    const ruleCount = ruleSets
+      .filter((rs) => rs.projectId === project.id)
+      .reduce((sum, rs) => sum + rs.ruleIds.length, 0);
+    const confirmed = window.confirm(
+      `确认删除分组「${project.name}」？\n将同时删除其下 ${ruleCount} 条规则，此操作不可撤销。`,
+    );
+    if (!confirmed) return;
+
+    setBusy(true);
+    try {
+      const state = await runtimeRequest<UpsertMutationResponse>({
+        type: "delete-project",
+        projectId: project.id,
+      });
+      hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      if (selectedProjectId === project.id) setSelectedProjectId("");
+      setStatus(`分组「${project.name}」已删除。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "删除分组失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleProjectSelection(id: string): void {
+    setSelectedProjectIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAllProjectSelection(): void {
+    setSelectedProjectIds((prev) =>
+      prev.size === projects.length ? new Set() : new Set(projects.map((p) => p.id)),
+    );
+  }
+
+  async function batchToggleProjects(enable: boolean): Promise<void> {
+    const targets = projects.filter((p) => selectedProjectIds.has(p.id) && p.enabled !== enable);
+    if (targets.length === 0) {
+      setStatus(`选中的分组已${enable ? "全部启用" : "全部停用"}。`);
+      return;
+    }
+    setBusy(true);
+    try {
+      let lastState: UpsertMutationResponse | null = null;
+      for (const project of targets) {
+        lastState = await runtimeRequest<UpsertMutationResponse>({
+          type: "upsert-project",
+          payload: {
+            project: { ...project, enabled: enable },
+            ruleSets: ruleSets.filter((rs) => rs.projectId === project.id),
+          },
+        });
+      }
+      if (lastState) hydrateDashboard({ ...lastState, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      setSelectedProjectIds(new Set());
+      setStatus(`已${enable ? "启用" : "停用"} ${targets.length} 个分组。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "批量操作失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function batchDeleteProjects(): Promise<void> {
+    const targets = projects.filter((p) => selectedProjectIds.has(p.id));
+    if (targets.length === 0) return;
+    const totalRules = targets.reduce(
+      (sum, p) => sum + ruleSets.filter((rs) => rs.projectId === p.id).reduce((s, rs) => s + rs.ruleIds.length, 0),
+      0,
+    );
+    const confirmed = window.confirm(
+      `确认删除 ${targets.length} 个分组？\n将同时删除 ${totalRules} 条规则，此操作不可撤销。`,
+    );
+    if (!confirmed) return;
+
+    setBusy(true);
+    try {
+      let lastState: UpsertMutationResponse | null = null;
+      for (const project of targets) {
+        lastState = await runtimeRequest<UpsertMutationResponse>({
+          type: "delete-project",
+          projectId: project.id,
+        });
+      }
+      if (lastState) hydrateDashboard({ ...lastState, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      if (selectedProjectIds.has(selectedProjectId)) setSelectedProjectId("");
+      setSelectedProjectIds(new Set());
+      setStatus(`已删除 ${targets.length} 个分组。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "批量删除失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function toggleRule(rule: Rule): Promise<void> {
     setBusy(true);
     try {
-      const owningRuleSet = ruleSets.find((ruleSet) => ruleSet.ruleIds.includes(rule.id));
+      const owningRuleSet = ruleSets.find((rs) => rs.ruleIds.includes(rule.id));
       const state = await runtimeRequest<UpsertMutationResponse>({
         type: "upsert-rule",
-        payload: {
-          rule: { ...rule, enabled: !rule.enabled },
-          ruleSetId: owningRuleSet?.id,
-        },
+        payload: { rule: { ...rule, enabled: !rule.enabled }, ruleSetId: owningRuleSet?.id },
       });
       hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
       setStatus(`规则「${rule.name}」已${rule.enabled ? "停用" : "启用"}。`);
@@ -495,7 +598,6 @@ function App() {
       setStatus("请先粘贴要导入的 JSON 或 YAML。");
       return;
     }
-
     setBusy(true);
     try {
       const state = await runtimeRequest<UpsertMutationResponse>({
@@ -507,12 +609,274 @@ function App() {
         },
       });
       hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      setImportFeedback(null);
       setStatus(merge ? "规则已合并导入。" : "规则工作区已整体替换。");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "导入失败。");
+      // Even on error, data may have been committed locally — refresh UI
+      try {
+        const freshState = await runtimeRequest<GetDashboardStateResponse>({ type: "get-dashboard-state" });
+        hydrateDashboard(freshState);
+        if (freshState.workspace.rules.length > 0) {
+          setImportFeedback(null);
+          setStatus(merge ? "导入完成（服务离线，数据已保存到本地）。" : "替换完成（服务离线，数据已保存到本地）。");
+          setBusy(false);
+          return;
+        }
+      } catch { /* dashboard refresh also failed */ }
+      const msg = error instanceof Error ? error.message : String(error);
+      setStatus(msg || "导入失败。");
     } finally {
       setBusy(false);
     }
+  }
+
+  async function importResourceOverride(merge: boolean): Promise<void> {
+    if (!resourceOverridePreview) {
+      setStatus("请先预览 Resource Override 导入结果，再确认导入。");
+      return;
+    }
+    setBusy(true);
+    setImportModalError(null);
+    try {
+      const { workspace, report } = resourceOverridePreview;
+      const state = await runtimeRequest<UpsertMutationResponse>({
+        type: "import-workspace",
+        payload: {
+          content: serializeWorkspace(workspace, "json"),
+          format: "json",
+          merge,
+        },
+      });
+      hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      setStatus(
+        merge
+          ? `已合并导入 ${report.importedRuleCount} 条规则，共 ${report.importedProjectCount} 个站点。`
+          : `已替换工作区，导入 ${report.importedRuleCount} 条规则，共 ${report.importedProjectCount} 个站点。`,
+      );
+      setResourceOverridePreview(null);
+      setImportFeedback(null);
+      setView("rules");
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      // Even if push to service failed, data may have been committed locally — refresh UI
+      try {
+        const freshState = await runtimeRequest<GetDashboardStateResponse>({ type: "get-dashboard-state" });
+        hydrateDashboard(freshState);
+        if (freshState.workspace.rules.length > 0) {
+          setResourceOverridePreview(null);
+          setImportFeedback(null);
+          setView("rules");
+          setStatus("导入完成（服务离线，数据已保存到本地）。");
+          return;
+        }
+      } catch { /* dashboard refresh also failed — show original error */ }
+      setImportModalError(msg || "导入失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function previewResourceOverrideImport(): Promise<void> {
+    if (!importText.trim()) {
+      setStatus("请先粘贴 Resource Override 导出的 JSON。");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const preview = parseResourceOverrideExport(importText);
+      setResourceOverridePreview(preview);
+      setImportFeedback(null);
+
+      if (preview.report.importedRuleCount === 0) {
+        setStatus("预览完成：当前没有可导入的规则，请先检查下方跳过原因。");
+        return;
+      }
+
+      setStatus(
+        `预览完成：${preview.report.importedProjectCount} 个站点，${preview.report.importedRuleCount} 条可导入规则，${preview.report.skippedRuleCount} 条跳过。`,
+      );
+    } catch (error) {
+      setResourceOverridePreview(null);
+      setImportFeedback(null);
+      setStatus(error instanceof Error ? error.message : "预览 Resource Override 规则失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function renderResourceOverridePreviewModal() {
+    if (!resourceOverridePreview) {
+      return null;
+    }
+
+    const { workspace, report } = resourceOverridePreview;
+    const ruleSetByProjectId = new Map(workspace.ruleSets.map((rs) => [rs.projectId, rs]));
+    const rulesById = new Map(workspace.rules.map((r) => [r.id, r]));
+    const canImport = report.importedRuleCount > 0;
+
+    function closePreview() {
+      if (busy) return;
+      setResourceOverridePreview(null);
+      setImportFeedback(null);
+      setImportModalError(null);
+    }
+
+    return (
+        <div
+        className="modal-overlay"
+        onClick={(e) => { if (e.target === e.currentTarget && !busy) closePreview(); }}
+      >
+        <div className="modal-box import-preview-modal" onClick={(e) => e.stopPropagation()}>
+          {/* Header */}
+          <div className="modal-box-header">
+            <div>
+              <div className="modal-box-title">导入预览</div>
+              <div className="import-preview-stats">
+                <span className={`import-preview-badge ${canImport ? "success" : "muted"}`}>
+                  {report.importedProjectCount} 个站点
+                </span>
+                <span className={`import-preview-badge ${canImport ? "success" : "muted"}`}>
+                  {report.importedRuleCount} 条可导入规则
+                </span>
+                {report.skippedRuleCount > 0 && (
+                  <span className="import-preview-badge warning">
+                    {report.skippedRuleCount} 条跳过
+                  </span>
+                )}
+              </div>
+            </div>
+            <button className="btn btn-icon" onClick={closePreview} title="关闭">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Body：按站点分组展示规则 */}
+          <div className="modal-box-body import-preview-body">
+            {workspace.projects.map((project) => {
+              const ruleSet = ruleSetByProjectId.get(project.id);
+              const projectRules = (ruleSet?.ruleIds ?? [])
+                .map((id) => rulesById.get(id))
+                .filter((r): r is NonNullable<typeof r> => r !== undefined);
+
+              return (
+                <div className="import-preview-site" key={project.id}>
+                  {/* Site header */}
+                  <div className="import-preview-site-header">
+                    <div className="import-preview-site-name">{project.name}</div>
+                    <div className="import-preview-site-meta">
+                      <span className="import-preview-site-host">
+                        {project.siteHosts.join(", ") || "-"}
+                      </span>
+                      <span className={`import-preview-badge ${project.enabled ? "success" : "muted"}`} style={{ fontSize: 11 }}>
+                        {project.enabled ? "启用" : "停用"}
+                      </span>
+                      <span className="import-preview-badge muted" style={{ fontSize: 11 }}>
+                        {projectRules.length} 条规则
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Rules table */}
+                  {projectRules.length > 0 && (
+                    <div className="import-preview-rules">
+                      <table className="import-preview-table">
+                        <thead>
+                          <tr>
+                            <th>匹配地址</th>
+                            <th>类型</th>
+                            <th>目标地址</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {projectRules.map((rule) => {
+                            const ruleHosts = rule.match.host.filter((h) => h !== "*");
+                            const isSameOrigin = ruleHosts.length > 0 && ruleHosts.every((h) => project.siteHosts.includes(h));
+                            return (
+                            <tr key={rule.id}>
+                              <td className="import-preview-path">
+                                {!isSameOrigin && ruleHosts.length > 0 && <span className="import-preview-cross-origin">{ruleHosts.join(", ")}</span>}
+                                {rule.match.pathGlob}
+                              </td>
+                              <td>
+                                <span className={`match-badge ${rule.kind === "api_forward" ? "api" : "asset"}`}>
+                                  {rule.kind === "api_forward" ? "转发" : "替换"}
+                                </span>
+                              </td>
+                              <td className="import-preview-target">
+                                {rule.kind === "api_forward"
+                                  ? rule.target.forwardProfile?.targetBaseUrl ?? "-"
+                                  : rule.target.redirectUrl ?? "-"}
+                              </td>
+                            </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {report.warnings.length > 0 && (
+              <details className="import-preview-warnings">
+                <summary className="import-preview-warnings-summary">
+                  跳过与提示（{report.warnings.length} 条）
+                </summary>
+                <div className="import-preview-warnings-list">
+                  {report.warnings.map((w, i) => (
+                    <div className="import-preview-warning-item" key={i}>{w}</div>
+                  ))}
+                </div>
+              </details>
+            )}
+
+            {!canImport && (
+              <div className="import-preview-empty">
+                没有可导入的规则，请检查上方跳过提示后重新预览。
+              </div>
+            )}
+          </div>
+
+          {/* Error / loading banner above footer */}
+          {importModalError && (
+            <div className="import-modal-error">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" style={{ flexShrink: 0 }}>
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              {importModalError}
+            </div>
+          )}
+
+          {/* Footer */}
+          <div className="modal-box-footer">
+            <button className="btn btn-ghost" onClick={closePreview} disabled={busy}>
+              取消
+            </button>
+            <button
+              className="btn btn-default"
+              onClick={() => void importResourceOverride(true)}
+              disabled={busy || !canImport}
+            >
+              {busy ? "导入中…" : "合并导入"}
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={() => void importResourceOverride(false)}
+              disabled={busy || !canImport}
+            >
+              {busy ? "导入中…" : "整体替换"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   async function exportWorkspace(projectId: string): Promise<void> {
@@ -524,8 +888,6 @@ function App() {
         format: exportFormat,
       });
       setExportText(response.content);
-      setDrawerMode("settings");
-      setSettingsTab("share");
       setStatus(`已导出站点规则（${response.format.toUpperCase()}）。`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "导出失败。");
@@ -534,1092 +896,1402 @@ function App() {
     }
   }
 
+  // ── RENDER ──────────────────────────────────────────────────────────────
+
   return (
-    <div className="minimal-app-shell">
-      <a className="skip-link" href="#main-content">
-        跳到主要内容
-      </a>
-
-      <section className="hero minimal-hero editorial-hero">
-        <div className="hero-stage">
-          <div className="hero-copy stack">
-            <div className="stack compact-gap">
-              <span className="kicker">Advanced Resource</span>
-              <h1>把每个站点的资源规则，整理成一页安静、可检索的浏览器工作台。</h1>
-              <p className="muted hero-lead">
-                规则优先，站点一眼可见。新增、筛选、切换都停留在第一屏，其余操作继续收进设置。
-              </p>
-            </div>
-
-            <div className="row wrap-gap status-row">
-              <span className={`badge ${dashboard?.health ? "success" : "danger"}`}>
-                {dashboard?.health ? "本地服务已连接" : "本地服务未连接"}
-              </span>
-              <span className="badge neutral">当前标签页 {dashboard?.currentTab?.host || "未检测到"}</span>
-              {selectedProject ? (
-                <span className={`badge ${selectedProject.enabled ? "success" : "warning"}`}>
-                  {selectedProject.enabled ? "站点启用中" : "站点已停用"}
-                </span>
-              ) : null}
-            </div>
-
-            <div className="hero-controls editorial-controls">
-              <label className="stack compact-gap control-block">
-                <span className="label">当前站点</span>
-                <select
-                  value={selectedProject?.id ?? ""}
-                  onChange={(event) => setSelectedProjectId(event.target.value)}
-                  disabled={projects.length === 0}
-                >
-                  {projects.length === 0 ? <option value="">请先创建站点</option> : null}
-                  {siteViews.map((item) => (
-                    <option key={item.project.id} value={item.project.id}>
-                      {item.project.name}
-                      {item.matchesCurrent ? " · 当前页面" : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <div className="row wrap-gap hero-actions">
-                <button onClick={() => openBatchRuleEditor("api_forward")} disabled={busy || !selectedRuleSet}>
-                  新建规则
-                </button>
-                <button className="secondary" onClick={() => openSettings("site")}>
-                  设置
-                </button>
-                <button className="ghost" onClick={() => void refresh()} disabled={busy}>
-                  刷新
-                </button>
-              </div>
-            </div>
+    <div className="options-layout">
+      {/* Sidebar */}
+      <nav className="sidebar">
+        <div className="sidebar-logo">
+          <div className="sidebar-logo-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2L2 7l10 5 10-5-10-5z" />
+              <path d="M2 17l10 5 10-5" />
+              <path d="M2 12l10 5 10-5" />
+            </svg>
           </div>
-
-          <div className="hero-preview">
-            <div className="browser-preview">
-              <div className="browser-bar">
-                <div className="browser-dots">
-                  <span />
-                  <span />
-                  <span />
-                </div>
-                <div className="browser-address">{currentHost || joinCsv(selectedProject?.siteHosts) || "resource.local"}</div>
-              </div>
-
-              <div className="browser-body">
-                <div className="preview-search-card">
-                  <span className="label">Quick View</span>
-                  <strong>{selectedProject?.name || "先创建站点"}</strong>
-                  <p className="small muted">
-                    {selectedProject
-                      ? `${selectedRules.length} 条规则，${filteredLogs.length} 条命中记录`
-                      : "把一个域名归到站点里，再开始维护规则。"}
-                  </p>
-                </div>
-
-                <div className="preview-metrics">
-                  <div className="preview-metric">
-                    <span className="label">API</span>
-                    <strong>{selectedApiRuleCount}</strong>
-                  </div>
-                  <div className="preview-metric">
-                    <span className="label">资源</span>
-                    <strong>{selectedAssetRuleCount}</strong>
-                  </div>
-                  <div className="preview-metric">
-                    <span className="label">站点</span>
-                    <strong>{projects.length}</strong>
-                  </div>
-                </div>
-
-                <div className="preview-rule-list">
-                  {previewRules.map((rule) => (
-                    <article className="preview-rule" key={rule.id}>
-                      <div className="row between align-start">
-                        <strong>{rule.name}</strong>
-                        <span className="badge neutral">{formatKind(rule.kind)}</span>
-                      </div>
-                      <p className="small muted">{rule.match.pathGlob}</p>
-                    </article>
-                  ))}
-                  {previewRules.length === 0 ? (
-                    <div className="preview-empty small muted">规则会在这里形成一组干净的预览卡片。</div>
-                  ) : null}
-                </div>
-              </div>
-            </div>
+          <div className="sidebar-logo-text">
+            <div className="sidebar-logo-name">Resource Proxy</div>
+            <div className="sidebar-logo-sub">本地资源代理插件</div>
           </div>
         </div>
-      </section>
 
-      <main id="main-content" className="main-flow">
-        {selectedProject ? (
-          <>
-            <section className="card site-rail-card">
-              <div className="row between align-start">
-                <div className="stack compact-gap">
-                  <span className="kicker">站点导航</span>
-                  <h2>先看你正在拦截哪个站点</h2>
-                  <p className="small muted">切换站点、查看 Host、直接在对应站点下新增规则。</p>
-                </div>
-                <button className="secondary" onClick={() => openProjectEditor()}>
-                  新建站点
+        <div className="sidebar-nav">
+          <button
+            className={`sidebar-nav-item ${view === "rules" ? "active" : ""}`}
+            onClick={() => setView("rules")}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="7" height="7" />
+              <rect x="14" y="3" width="7" height="7" />
+              <rect x="3" y="14" width="7" height="7" />
+              <rect x="14" y="14" width="7" height="7" />
+            </svg>
+            规则列表
+          </button>
+          <button
+            className={`sidebar-nav-item ${view === "import-export" ? "active" : ""}`}
+            onClick={() => setView("import-export")}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+            导入导出
+          </button>
+          <button
+            className={`sidebar-nav-item ${view === "settings" ? "active" : ""}`}
+            onClick={() => setView("settings")}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.07 4.93l-1.41 1.41M4.93 4.93l1.41 1.41M19.07 19.07l-1.41-1.41M4.93 19.07l1.41-1.41M12 2v2M12 20v2M2 12h2M20 12h2" />
+            </svg>
+            设置
+          </button>
+          <button
+            className={`sidebar-nav-item ${view === "about" ? "active" : ""}`}
+            onClick={() => setView("about")}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            关于
+          </button>
+        </div>
+
+        <div className="sidebar-footer">
+          <div className={`sidebar-status ${dashboard?.health ? "online" : "offline"}`}>
+            <span className="sidebar-status-dot" />
+            {dashboard?.health
+              ? `服务已连接 :${servicePort}`
+              : "离线模式（本地存储）"}
+          </div>
+          {!dashboard?.health && rules.length > 0 && (
+            <div className="sidebar-status-hint">
+              {dashboard?.warnings?.some((w) => w.includes("离线模式"))
+                ? `${rules.length} 条规则已缓存，服务恢复后自动同步`
+                : "启动本地服务后数据将自动同步"}
+            </div>
+          )}
+        </div>
+      </nav>
+
+      {/* Main content area */}
+      <div className="options-content">
+        <div className="options-page">
+          {view === "rules" && renderRulesView()}
+          {view === "import-export" && renderImportExportView()}
+          {view === "settings" && renderSettingsView()}
+          {view === "about" && renderAboutView()}
+        </div>
+
+        {/* Right panel */}
+        {panelMode === "rule" && renderRulePanel()}
+        {panelMode === "rule-batch" && renderBatchRulePanel()}
+      </div>
+
+      {/* Project modal */}
+      {showProjectModal && renderProjectModal()}
+
+      {/* Resource Override import preview modal */}
+      {resourceOverridePreview && renderResourceOverridePreviewModal()}
+    </div>
+  );
+
+  // ── RULES VIEW ────────────────────────────────────────────────────────
+
+  function renderRulesView() {
+    const hasRules = allRuleRows.length > 0;
+
+    return (
+      <>
+        {/* Page header */}
+        <div className="page-header">
+          <div className="page-title">规则列表</div>
+          <div className="page-subtitle">管理和查看所有本地代理规则</div>
+        </div>
+
+        {/* Status tabs */}
+        <div className="status-tabs">
+          <button
+            className={`status-tab ${ruleStatusTab === "all" ? "active" : ""}`}
+            onClick={() => setRuleStatusTab("all")}
+          >
+            全部
+            <span className="status-tab-count">{totalCount}</span>
+          </button>
+          <button
+            className={`status-tab ${ruleStatusTab === "enabled" ? "active" : ""}`}
+            onClick={() => setRuleStatusTab("enabled")}
+          >
+            启用中
+            <span className="status-tab-count">{tabEnabledCount}</span>
+          </button>
+          <button
+            className={`status-tab ${ruleStatusTab === "disabled" ? "active" : ""}`}
+            onClick={() => setRuleStatusTab("disabled")}
+          >
+            已禁用
+            <span className="status-tab-count">{tabDisabledCount}</span>
+          </button>
+        </div>
+
+        {/* Toolbar */}
+        <div className="page-toolbar">
+          <div className="toolbar-filters">
+            <select
+              className="toolbar-select"
+              value={selectedProjectId}
+              onChange={(e) => setSelectedProjectId(e.target.value)}
+            >
+              <option value="">全部分组</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}{p.enabled ? "" : "（已停用）"}
+                </option>
+              ))}
+            </select>
+            {selectedProject && (
+              <div className="toolbar-group-actions">
+                <button
+                  className="btn btn-ghost btn-sm"
+                  title="编辑分组"
+                  onClick={() => openProjectModal(selectedProject)}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+                    <path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5z" />
+                  </svg>
+                </button>
+                <button
+                  className={`btn btn-ghost btn-sm ${!selectedProject.enabled ? "is-off" : ""}`}
+                  title={selectedProject.enabled ? "停用分组" : "启用分组"}
+                  onClick={() => void toggleProject(selectedProject)}
+                  disabled={busy}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="15" y1="9" x2="9" y2="15" />
+                    {!selectedProject.enabled && <line x1="9" y1="9" x2="15" y2="15" />}
+                  </svg>
+                </button>
+                <button
+                  className="btn btn-ghost btn-sm btn-danger"
+                  title="删除分组"
+                  onClick={() => void deleteProject(selectedProject)}
+                  disabled={busy}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                  </svg>
                 </button>
               </div>
+            )}
 
-              <div className="site-rail">
-                {siteViews.map((item) => (
-                  <article className={`site-spotlight-card ${selectedProject.id === item.project.id ? "active" : ""}`} key={item.project.id}>
-                    <button className="site-spotlight-main" onClick={() => setSelectedProjectId(item.project.id)}>
-                      <div className="stack compact-gap">
-                        <div className="row wrap-gap">
-                          <strong>{item.project.name}</strong>
-                          {item.matchesCurrent ? <span className="badge success">当前页面</span> : null}
-                        </div>
-                        <p className="small muted">{joinCsv(item.project.siteHosts) || "未填写 Host"}</p>
-                      </div>
-                      <div className="row wrap-gap site-spotlight-meta">
-                        <span className="badge neutral">{item.ruleCount} 条规则</span>
-                        <span className="badge neutral">{item.hitCount} 次命中</span>
-                      </div>
-                    </button>
-                    <div className="site-spotlight-actions">
-                      <button className="ghost" onClick={() => setSelectedProjectId(item.project.id)}>
-                        查看规则
-                      </button>
-                      <button
-                        className="secondary"
-                        onClick={() => openBatchRuleEditorForProject(item.project.id, "api_forward")}
-                        disabled={busy}
-                      >
-                        在此站点新增
-                      </button>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
+            <select
+              className="toolbar-select"
+              value={ruleKindFilter}
+              onChange={(e) => setRuleKindFilter(e.target.value as "all" | Rule["kind"])}
+            >
+              <option value="all">全部类型</option>
+              <option value="api_forward">API 转发</option>
+              <option value="asset_redirect">资源替换</option>
+            </select>
 
-            <section className="card rule-focus-card">
-              <div className="row between align-start">
-                <div className="stack compact-gap">
-                  <span className="kicker">规则库</span>
-                  <h2>{selectedProject.name}</h2>
-                  <p className="small muted">
-                    {joinCsv(selectedProject.siteHosts)}
-                    {selectedProject.envLabel ? ` · ${selectedProject.envLabel}` : ""}
-                  </p>
-                </div>
-                <div className="row wrap-gap compact-actions">
-                  <span className="badge neutral">全部 {selectedRules.length}</span>
-                  <span className="badge neutral">API {selectedApiRuleCount}</span>
-                  <span className="badge neutral">资源 {selectedAssetRuleCount}</span>
-                  <button className="secondary" onClick={() => openBatchRuleEditor("api_forward")} disabled={!selectedRuleSet || busy}>
-                    新增 API
-                  </button>
-                  <button className="ghost" onClick={() => openBatchRuleEditor("asset_redirect")} disabled={!selectedRuleSet || busy}>
-                    新增资源
-                  </button>
-                </div>
-              </div>
+            <div className="toolbar-divider" />
 
-              <div className="workspace-toolbar">
-                <label className="stack compact-gap search-field">
-                  <span className="label">搜索规则</span>
-                  <input
-                    value={ruleQuery}
-                    onChange={(event) => setRuleQuery(event.target.value)}
-                    placeholder="搜索名称、路径、目标地址、Host"
-                  />
-                </label>
-
-                <div className="stack compact-gap kind-filter">
-                  <span className="label">分类</span>
-                  <div className="segmented-row compact-segmented-row kind-segmented-row">
-                    <button
-                      className={ruleKindFilter === "all" ? "active-segment" : "ghost"}
-                      onClick={() => setRuleKindFilter("all")}
-                    >
-                      全部
-                    </button>
-                    <button
-                      className={ruleKindFilter === "api_forward" ? "active-segment" : "ghost"}
-                      onClick={() => setRuleKindFilter("api_forward")}
-                    >
-                      API
-                    </button>
-                    <button
-                      className={ruleKindFilter === "asset_redirect" ? "active-segment" : "ghost"}
-                      onClick={() => setRuleKindFilter("asset_redirect")}
-                    >
-                      资源
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="row between wrap-gap workspace-summary">
-                <p className="small muted">
-                  {deferredRuleQuery
-                    ? `已筛出 ${visibleRules.length} 条规则`
-                    : `当前站点共有 ${selectedRules.length} 条规则，可直接搜索或按类型筛选。`}
-                </p>
-                {deferredRuleQuery || ruleKindFilter !== "all" ? (
-                  <button
-                    className="ghost"
-                    onClick={() => {
-                      setRuleQuery("");
-                      setRuleKindFilter("all");
-                    }}
-                  >
-                    清空筛选
-                  </button>
-                ) : null}
-              </div>
-
-              <div className="rule-list minimal-rule-list">
-                {visibleRules.map((rule) => (
-                  <article className={`rule-row ${rule.enabled ? "" : "is-muted"}`} key={rule.id}>
-                    <button
-                      className={`toggle-chip ${rule.enabled ? "on" : "off"}`}
-                      onClick={() => void toggleRule(rule)}
-                      disabled={busy}
-                    >
-                      {rule.enabled ? "开" : "关"}
-                    </button>
-                    <div className="rule-row-main">
-                      <div className="row between align-start">
-                        <div className="stack compact-gap">
-                          <div className="row wrap-gap">
-                            <h4>{rule.name}</h4>
-                            <span className="badge neutral">{formatKind(rule.kind)}</span>
-                          </div>
-                          <p className="small muted">
-                            {joinCsv(rule.match.host) || "继承站点 Host"} · {rule.match.pathGlob}
-                          </p>
-                        </div>
-                        <span className="rule-priority">P{rule.priority}</span>
-                      </div>
-                      <p className="target-line">{formatRuleTarget(rule)}</p>
-                    </div>
-                    <div className="rule-row-actions">
-                      <button className="ghost" onClick={() => openRuleEditor(rule.kind, rule)}>
-                        编辑
-                      </button>
-                    </div>
-                  </article>
-                ))}
-
-                {selectedRules.length === 0 ? (
-                  <div className="empty-state large-empty-state">
-                    <p>当前站点还没有规则。</p>
-                    <p className="small muted">从最基础开始，先新建一条规则，只填“匹配路径”和“目标地址”。</p>
-                    <div className="row wrap-gap">
-                      <button onClick={() => openBatchRuleEditor("api_forward")} disabled={!selectedRuleSet || busy}>
-                        新建 API 规则
-                      </button>
-                      <button
-                        className="secondary"
-                        onClick={() => openBatchRuleEditor("asset_redirect")}
-                        disabled={!selectedRuleSet || busy}
-                      >
-                        新建资源规则
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-
-                {selectedRules.length > 0 && visibleRules.length === 0 ? (
-                  <div className="empty-state large-empty-state">
-                    <p>没有找到匹配的规则。</p>
-                    <p className="small muted">试着换个关键词，或者清空当前筛选条件。</p>
-                    <div className="row wrap-gap">
-                      <button
-                        className="secondary"
-                        onClick={() => {
-                          setRuleQuery("");
-                          setRuleKindFilter("all");
-                        }}
-                      >
-                        清空筛选
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            </section>
-          </>
-        ) : (
-          <section className="card rule-focus-card">
-            <div className="empty-state large-empty-state">
-              <p>还没有站点配置。</p>
-              <p className="small muted">先建一个站点，把 Host 归拢起来，主页面就会变成对应站点的规则工作台。</p>
-              <div className="row wrap-gap">
-                <button onClick={() => openProjectEditor()}>新建站点</button>
-                <button className="secondary" onClick={() => openSettings("site")}>
-                  打开设置
-                </button>
-              </div>
+            <div className="toolbar-search-wrap">
+              <svg className="toolbar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+              <input
+                className="toolbar-search-input"
+                value={ruleQuery}
+                onChange={(e) => setRuleQuery(e.target.value)}
+                placeholder="搜索规则名称、路径、目标地址"
+              />
             </div>
-          </section>
-        )}
+          </div>
 
-        <section className="status-footer card compact-card">
-          <div className="row between align-start">
-            <div className="stack compact-gap">
-              <span className="kicker">运行状态</span>
-              <p>{status}</p>
-            </div>
-            <button className="ghost" onClick={() => openSettings("logs")}>
-              查看日志
+          <div className="toolbar-actions">
+            <button className="btn btn-default" onClick={() => void refresh()} disabled={busy}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="23 4 23 10 17 10" />
+                <polyline points="1 20 1 14 7 14" />
+                <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+              </svg>
+              刷新
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={() => openBatchRulePanel("api_forward")}
+              disabled={!selectedProject || !selectedRuleSet}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              新建规则
             </button>
           </div>
-        </section>
-      </main>
+        </div>
 
-      {drawerMode ? (
-        <div className="modal-backdrop" onClick={() => setDrawerMode(null)}>
-          <aside
-            className={`modal-panel ${drawerMode === "rule" || drawerMode === "rule-batch" ? "wide-panel" : ""}`}
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-          >
-            <div className="modal-header">
-              <div className="stack compact-gap">
-                <span className="kicker">{drawerTitle(drawerMode)}</span>
-                <h3>
-                  {drawerHeadline(
-                    drawerMode,
-                    projectDraft.id,
-                    ruleDraft.id,
-                    selectedProject?.name,
-                    batchRuleDrafts.length,
-                  )}
-                </h3>
+        {/* Table */}
+        <div className="rule-table-container">
+          {!hasRules ? (
+            <div className="rule-table-card">
+              <div className="table-empty">
+                <svg className="table-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <path d="M3 9h18M9 21V9" />
+                </svg>
+                <div className="table-empty-title">暂无规则</div>
+                <div className="table-empty-desc">
+                  {projects.length === 0
+                    ? "请先在设置页面创建一个站点，再新建规则。"
+                    : "点击「新建规则」添加第一条规则，或者从导入导出页面导入已有配置。"}
+                </div>
+                {projects.length === 0 ? (
+                  <button className="btn btn-primary" onClick={() => setView("settings")}>
+                    去创建站点
+                  </button>
+                ) : (
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => openBatchRulePanel("api_forward")}
+                    disabled={!selectedProject || !selectedRuleSet}
+                  >
+                    新建规则
+                  </button>
+                )}
               </div>
-              <button className="ghost" onClick={() => setDrawerMode(null)}>
-                关闭
-              </button>
             </div>
-
-            {drawerMode === "settings" ? (
-              <div className="modal-body stack">
-                {selectedProject ? (
-                  <section className="modal-context">
-                    <div className="modal-context-main">
-                      <span className="label">当前站点</span>
-                      <strong>{selectedProject.name}</strong>
-                      <p className="small muted">{joinCsv(selectedProject.siteHosts) || "未填写 Host"}</p>
-                    </div>
-                    <div className="row wrap-gap">
-                      {selectedProject.envLabel ? <span className="badge neutral">{selectedProject.envLabel}</span> : null}
-                      <span className={`badge ${selectedProject.siteHosts.includes(currentHost) ? "success" : "warning"}`}>
-                        {selectedProject.siteHosts.includes(currentHost) ? "当前页面已命中" : "当前页面未命中"}
-                      </span>
-                    </div>
-                  </section>
-                ) : null}
-                <div className="settings-tabs">
-                  <button
-                    className={settingsTab === "site" ? "active-segment" : "ghost"}
-                    onClick={() => setSettingsTab("site")}
-                  >
-                    设置
-                  </button>
-                  <button
-                    className={settingsTab === "logs" ? "active-segment" : "ghost"}
-                    onClick={() => setSettingsTab("logs")}
-                  >
-                    日志
-                  </button>
-                  <button
-                    className={settingsTab === "share" ? "active-segment" : "ghost"}
-                    onClick={() => setSettingsTab("share")}
-                  >
-                    导入导出
-                  </button>
-                </div>
-
-                {settingsTab === "site" ? (
-                  <div className="stack">
-                    <section className="mini-section stack compact-gap">
-                      <span className="label">本地服务地址</span>
-                      <input
-                        value={serviceUrl}
-                        onChange={(event) => setServiceUrl(event.target.value)}
-                        placeholder="http://127.0.0.1:5178"
-                      />
-                      <div className="row wrap-gap">
-                        <button onClick={() => void saveServiceUrl()} disabled={busy}>
-                          保存地址
-                        </button>
-                        <button className="secondary" onClick={() => void refresh()} disabled={busy}>
-                          立即同步
-                        </button>
-                      </div>
-                    </section>
-
-                    <section className="mini-section stack compact-gap">
-                      <div className="row between align-start">
-                        <div className="stack compact-gap">
-                          <span className="label">站点</span>
-                          <p className="small muted">只在这里做站点管理，主页面始终保持规则列表优先。</p>
-                        </div>
-                        <button className="secondary" onClick={() => openProjectEditor()}>
-                          新建站点
-                        </button>
-                      </div>
-
-                      <div className="site-mini-list">
-                        {siteViews.map((item) => (
-                          <article
-                            key={item.project.id}
-                            className={`site-mini-item ${selectedProject?.id === item.project.id ? "active" : ""}`}
+          ) : filteredRuleRows.length === 0 ? (
+            <div className="rule-table-card">
+              <div className="table-empty">
+                <svg className="table-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <circle cx="11" cy="11" r="8" />
+                  <path d="m21 21-4.35-4.35" />
+                </svg>
+                <div className="table-empty-title">没有匹配的规则</div>
+                <div className="table-empty-desc">试着调整搜索关键词或筛选条件。</div>
+                <button
+                  className="btn btn-default"
+                  onClick={() => {
+                    setRuleQuery("");
+                    setRuleKindFilter("all");
+                    setRuleStatusTab("all");
+                  }}
+                >
+                  清除筛选
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="rule-table-card">
+              <table className="rule-table">
+                <thead>
+                  <tr>
+                    <th style={{ width: 48 }}></th>
+                    <th style={{ width: 40 }}>总序</th>
+                    <th>规则名称</th>
+                    <th style={{ width: 96 }}>匹配类型</th>
+                    <th>匹配规则</th>
+                    <th>代理资源</th>
+                    <th style={{ width: 100 }}>分组</th>
+                    <th style={{ width: 140 }}>更新时间</th>
+                    <th style={{ width: 88 }}>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRuleRows.map(({ rule, project }, index) => (
+                    <tr key={rule.id} className={rule.enabled ? "" : "is-disabled"}>
+                      <td>
+                        <label className="toggle-switch">
+                          <input
+                            type="checkbox"
+                            checked={rule.enabled}
+                            onChange={() => void toggleRule(rule)}
+                            disabled={busy}
+                          />
+                          <span className="toggle-track" />
+                        </label>
+                      </td>
+                      <td>
+                        <span className="rule-seq-text">{index + 1}</span>
+                      </td>
+                      <td className="rule-name-cell">
+                        <span className="rule-name-text" title={rule.name}>
+                          {rule.name}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={`match-badge ${rule.kind === "api_forward" ? "api" : "asset"}`}>
+                          {rule.kind === "api_forward" ? "API 转发" : "资源替换"}
+                        </span>
+                      </td>
+                      <td>
+                        <span className="rule-path-text" title={rule.match.pathGlob}>
+                          {rule.match.pathGlob}
+                        </span>
+                      </td>
+                      <td>
+                        <span
+                          className="rule-target-text"
+                          title={formatRuleTarget(rule)}
+                        >
+                          {formatRuleTarget(rule)}
+                        </span>
+                      </td>
+                      <td>
+                        {project ? (
+                          <span
+                            className="rule-group-tag clickable"
+                            title={`筛选「${project.name}」分组`}
+                            onClick={() => setSelectedProjectId(project.id)}
                           >
-                            <button className="site-mini-main" onClick={() => setSelectedProjectId(item.project.id)}>
-                              <div className="stack compact-gap">
-                                <span className="site-title">{item.project.name}</span>
-                                <span className="site-hosts">{joinCsv(item.project.siteHosts) || "未填写 Host"}</span>
-                              </div>
-                              <div className="row wrap-gap site-mini-meta">
-                                <span>{item.ruleCount} 条规则</span>
-                                <span>{item.hitCount} 次命中</span>
-                              </div>
-                            </button>
-                            <div className="site-mini-actions">
-                              <button className="ghost" onClick={() => setSelectedProjectId(item.project.id)}>
-                                查看规则
-                              </button>
-                              <button
-                                className="secondary"
-                                onClick={() => openBatchRuleEditorForProject(item.project.id, "api_forward")}
-                                disabled={busy}
-                              >
-                                在此站点新增
-                              </button>
-                            </div>
-                          </article>
-                        ))}
-                        {siteViews.length === 0 ? <div className="empty-state">还没有站点。</div> : null}
-                      </div>
-
-                      {selectedProject ? (
-                        <div className="row wrap-gap">
-                          <button className="secondary" onClick={() => openProjectEditor(selectedProject)}>
-                            编辑当前站点
-                          </button>
-                          <button className="ghost" onClick={() => void toggleProject(selectedProject)} disabled={busy}>
-                            {selectedProject.enabled ? "停用当前站点" : "启用当前站点"}
-                          </button>
-                        </div>
-                      ) : null}
-                    </section>
-                  </div>
-                ) : null}
-
-                {settingsTab === "logs" ? (
-                  <section className="mini-section stack compact-gap">
-                    <span className="label">最近命中</span>
-                    <div className="log-list">
-                      {filteredLogs.map((log) => (
-                        <article className="item" key={log.id}>
-                          <div className="stack compact-gap">
-                            <div className="row between align-start">
-                              <h4>
-                                {log.method} {shorten(log.requestUrl)}
-                              </h4>
-                              <span className="micro-code">{formatTimestamp(log.occurredAt)}</span>
-                            </div>
-                            <p className="small muted">
-                              {log.outcome === "matched" ? "已命中" : log.outcome === "error" ? "执行失败" : "未处理"}
-                              {` · ${log.statusCode ?? "-"} · ${log.durationMs} ms`}
-                            </p>
-                          </div>
-                        </article>
-                      ))}
-                      {filteredLogs.length === 0 ? <div className="empty-state">当前站点还没有命中记录。</div> : null}
-                    </div>
-                  </section>
-                ) : null}
-
-                {settingsTab === "share" ? (
-                  <div className="stack">
-                    <section className="mini-section stack compact-gap">
-                      <div className="row between align-start">
-                        <div className="stack compact-gap">
-                          <span className="label">导入规则</span>
-                          <p className="small muted">支持 JSON / YAML，适合团队共享或迁移。</p>
-                        </div>
-                        <div className="row wrap-gap">
-                          <button className="ghost" onClick={() => void importWorkspace(true)} disabled={busy}>
-                            合并导入
-                          </button>
-                          <button onClick={() => void importWorkspace(false)} disabled={busy}>
-                            整体替换
-                          </button>
-                        </div>
-                      </div>
-                      <textarea
-                        value={importText}
-                        onChange={(event) => setImportText(event.target.value)}
-                        placeholder="粘贴 JSON 或 YAML 规则配置"
-                      />
-                    </section>
-
-                    <section className="mini-section stack compact-gap">
-                      <div className="row between align-start">
-                        <div className="stack compact-gap">
-                          <span className="label">导出当前站点</span>
-                          <p className="small muted">只导出当前站点与它的规则。</p>
-                        </div>
-                        <div className="row wrap-gap">
-                          <select
-                            value={exportFormat}
-                            onChange={(event) => setExportFormat(event.target.value as "json" | "yaml")}
-                          >
-                            <option value="yaml">YAML</option>
-                            <option value="json">JSON</option>
-                          </select>
+                            {project.name}
+                          </span>
+                        ) : (
+                          <span className="rule-seq-text">—</span>
+                        )}
+                      </td>
+                      <td>
+                        <span className="rule-time-text">{formatTimestamp(rule.updatedAt)}</span>
+                      </td>
+                      <td>
+                        <div className="rule-actions-cell">
                           <button
-                            onClick={() => selectedProject && void exportWorkspace(selectedProject.id)}
-                            disabled={busy || !selectedProject}
+                            className="btn-icon"
+                            title="编辑"
+                            onClick={() => openRulePanel(rule.kind, rule)}
                           >
-                            导出
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                              <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                            </svg>
+                          </button>
+                          <button
+                            className="btn-icon"
+                            title="复制"
+                            onClick={() => duplicateRule(rule)}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <rect x="9" y="9" width="13" height="13" rx="2" />
+                              <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                            </svg>
                           </button>
                         </div>
-                      </div>
-                      <textarea
-                        value={exportText}
-                        onChange={(event) => setExportText(event.target.value)}
-                        placeholder="点击导出后会在这里展示配置文本"
-                      />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
 
-                      <div className="warning-list compact-gap">
-                        {(dashboard?.warnings ?? []).map((warning) => (
-                          <div className="warning-item" key={warning}>
-                            {localizeWarning(warning)}
-                          </div>
-                        ))}
-                        {(dashboard?.warnings ?? []).length === 0 ? (
-                          <p className="small muted">当前没有全局能力告警。</p>
-                        ) : null}
-                      </div>
-                    </section>
-                  </div>
-                ) : null}
+              <div className="table-footer">
+                <span>共 {filteredRuleRows.length} 条规则</span>
+                {(dashboard?.warnings ?? []).length > 0 && (
+                  <span style={{ color: "var(--warning-text)" }}>
+                    {dashboard!.warnings.length} 条配置告警
+                  </span>
+                )}
               </div>
-            ) : null}
+            </div>
+          )}
+        </div>
 
-            {drawerMode === "project" ? (
-              <div className="modal-body stack">
-                <section className="modal-context">
-                  <div className="modal-context-main">
-                    <span className="label">{projectDraft.id ? "正在编辑站点" : "即将创建站点"}</span>
-                    <strong>{projectDraft.name || selectedProject?.name || "未命名站点"}</strong>
-                    <p className="small muted">
-                      {projectDraft.siteHosts || joinCsv(selectedProject?.siteHosts) || "保存后这里会用来匹配页面 Host"}
-                    </p>
-                  </div>
-                  <div className="row wrap-gap">
-                    <span className={`badge ${(projectDraft.enabled || (!projectDraft.id && selectedProject?.enabled)) ? "success" : "warning"}`}>
-                      {(projectDraft.enabled || (!projectDraft.id && selectedProject?.enabled)) ? "默认启用" : "默认停用"}
-                    </span>
-                  </div>
-                </section>
-                <label className="stack compact-gap">
-                  <span className="label">站点名称</span>
-                  <input
-                    value={projectDraft.name}
-                    onChange={(event) =>
-                      setProjectDraft((value) => ({ ...value, name: event.target.value }))
-                    }
-                    placeholder="例如：App 主站"
-                  />
-                </label>
-                <label className="stack compact-gap">
-                  <span className="label">Host 列表</span>
-                  <input
-                    value={projectDraft.siteHosts}
-                    onChange={(event) =>
-                      setProjectDraft((value) => ({ ...value, siteHosts: event.target.value }))
-                    }
-                    placeholder="app.example.com, admin.example.com"
-                  />
-                </label>
-                <div className="grid two compact-grid">
-                  <label className="stack compact-gap">
-                    <span className="label">环境标签</span>
-                    <input
-                      value={projectDraft.envLabel}
-                      onChange={(event) =>
-                        setProjectDraft((value) => ({ ...value, envLabel: event.target.value }))
-                      }
-                      placeholder="staging / local"
-                    />
-                  </label>
-                  <label className="stack compact-gap checkbox-line">
-                    <span className="label">默认状态</span>
-                    <span className="toggle-line">
-                      <input
-                        type="checkbox"
-                        checked={projectDraft.enabled}
-                        onChange={(event) =>
-                          setProjectDraft((value) => ({ ...value, enabled: event.target.checked }))
-                        }
-                      />
-                      启用站点
-                    </span>
-                  </label>
-                </div>
-                <label className="stack compact-gap">
-                  <span className="label">备注</span>
-                  <textarea
-                    value={projectDraft.note}
-                    onChange={(event) =>
-                      setProjectDraft((value) => ({ ...value, note: event.target.value }))
-                    }
-                    placeholder="写清楚这个站点主要用来覆盖哪个环境。"
-                  />
-                </label>
-                <div className="row between wrap-gap">
-                  <button className="ghost" onClick={() => openSettings("site")}>
-                    返回设置
-                  </button>
-                  <button onClick={() => void saveProject()} disabled={busy}>
-                    保存站点
-                  </button>
-                </div>
-              </div>
-            ) : null}
+        {/* Status bar */}
+        <div className="options-statusbar">
+          <span className={`statusbar-dot ${dashboard?.health ? "online" : ""}`} />
+          {status}
+        </div>
+      </>
+    );
+  }
 
-            {drawerMode === "rule" ? (
-              <div className="modal-body stack">
-                {selectedProject ? (
-                  <section className="modal-context strong-context">
-                    <div className="modal-context-main">
-                      <span className="label">所属站点</span>
-                      <strong>{selectedProject.name}</strong>
-                      <p className="small muted">{joinCsv(selectedProject.siteHosts) || "未填写 Host"}</p>
-                    </div>
-                    <div className="modal-context-meta">
-                      <span className={`badge ${selectedProject.siteHosts.includes(currentHost) ? "success" : "warning"}`}>
-                        {selectedProject.siteHosts.includes(currentHost) ? "当前页面命中此站点" : "当前页面未命中此站点"}
-                      </span>
-                      {selectedRuleSet ? <span className="badge neutral">规则组 {selectedRuleSet.name}</span> : null}
-                    </div>
-                  </section>
-                ) : null}
-                <div className="segmented-row compact-segmented-row">
+  // ── RULE PANEL (single rule) ──────────────────────────────────────────
+
+  function renderRulePanel() {
+    const isNew = !ruleDraft.id;
+
+    return (
+      <aside className="rule-panel">
+        <div className="rule-panel-header">
+          <span className="rule-panel-title">{isNew ? "新建规则" : "编辑规则"}</span>
+          <button className="btn-icon" onClick={() => setPanelMode(null)}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="rule-panel-tabs">
+          <button
+            className={`rule-panel-tab ${rulePanelTab === "basic" ? "active" : ""}`}
+            onClick={() => setRulePanelTab("basic")}
+          >
+            基础设置
+          </button>
+          <button
+            className={`rule-panel-tab ${rulePanelTab === "advanced" ? "active" : ""}`}
+            onClick={() => setRulePanelTab("advanced")}
+          >
+            高级设置
+          </button>
+        </div>
+
+        <div className="rule-panel-body">
+          {rulePanelTab === "basic" && (
+            <>
+              {/* Context */}
+              {selectedProject && (
+                <div style={{ padding: "10px 12px", background: "var(--surface-soft)", borderRadius: "var(--radius-md)", border: "1px solid var(--border)", fontSize: 12, color: "var(--muted)" }}>
+                  所属站点：<strong style={{ color: "var(--ink)" }}>{selectedProject.name}</strong>
+                  {selectedRuleSet ? `　规则组：${selectedRuleSet.name}` : ""}
+                </div>
+              )}
+
+              {/* Kind switcher */}
+              <div className="form-group">
+                <span className="form-label">规则类型</span>
+                <div className="kind-segmented">
                   <button
-                    className={ruleDraft.kind === "api_forward" ? "active-segment" : "ghost"}
+                    className={`kind-seg-btn ${ruleDraft.kind === "api_forward" ? "active" : ""}`}
+                    onClick={() => setRuleDraft((v) => mergeRuleDraftByKind(v, "api_forward"))}
+                  >
+                    API 转发
+                  </button>
+                  <button
+                    className={`kind-seg-btn ${ruleDraft.kind === "asset_redirect" ? "active" : ""}`}
+                    onClick={() => setRuleDraft((v) => mergeRuleDraftByKind(v, "asset_redirect"))}
+                  >
+                    资源替换
+                  </button>
+                </div>
+              </div>
+
+              {/* Quick templates */}
+              <div className="form-group">
+                <span className="form-label">快速模板</span>
+                <div className="template-grid">
+                  {activeRuleTemplates.map((tpl) => (
+                    <button
+                      key={tpl.id}
+                      className="template-card"
+                      onClick={() => applyRuleTemplate(tpl)}
+                    >
+                      <strong>{tpl.label}</strong>
+                      <span>{tpl.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Rule name */}
+              <div className="form-group">
+                <label className="form-label">
+                  规则名称 <span className="form-label-required">*</span>
+                </label>
+                <input
+                  className="form-input"
+                  value={ruleDraft.name}
+                  onChange={(e) => setRuleDraft((v) => ({ ...v, name: e.target.value }))}
+                  placeholder="例如：把 /api 指到本地服务"
+                />
+              </div>
+
+              {/* Match path */}
+              <div className="form-group">
+                <label className="form-label">
+                  匹配路径 <span className="form-label-required">*</span>
+                </label>
+                <input
+                  className="form-input"
+                  value={ruleDraft.pathGlob}
+                  onChange={(e) => setRuleDraft((v) => ({ ...v, pathGlob: e.target.value }))}
+                  placeholder="/api/**"
+                />
+              </div>
+
+              {/* Target */}
+              {ruleDraft.kind === "api_forward" ? (
+                <div className="form-group">
+                  <label className="form-label">
+                    目标地址 <span className="form-label-required">*</span>
+                  </label>
+                  <input
+                    className="form-input"
+                    value={ruleDraft.targetBaseUrl}
+                    onChange={(e) => setRuleDraft((v) => ({ ...v, targetBaseUrl: e.target.value }))}
+                    placeholder="http://127.0.0.1:3000"
+                  />
+                </div>
+              ) : (
+                <div className="form-group">
+                  <label className="form-label">
+                    替换到的 HTTPS 地址 <span className="form-label-required">*</span>
+                  </label>
+                  <input
+                    className="form-input"
+                    value={ruleDraft.redirectUrl}
+                    onChange={(e) => setRuleDraft((v) => ({ ...v, redirectUrl: e.target.value }))}
+                    placeholder="https://cdn.example.com/app.js"
+                  />
+                </div>
+              )}
+
+              {/* Note */}
+              <div className="form-group">
+                <label className="form-label">备注</label>
+                <textarea
+                  className="form-textarea"
+                  value={ruleDraft.note}
+                  onChange={(e) => setRuleDraft((v) => ({ ...v, note: e.target.value }))}
+                  placeholder="补充这条规则的适用场景。"
+                />
+              </div>
+
+              {/* Conflicts & Warnings */}
+              {ruleConflicts.length > 0 && (
+                <div className="form-warnings">
+                  {ruleConflicts.map((c) => (
+                    <div className="form-conflict-item" key={c.ruleId}>{c.reason}</div>
+                  ))}
+                </div>
+              )}
+              {ruleWarnings.length > 0 && (
+                <div className="form-warnings">
+                  {ruleWarnings.map((w) => (
+                    <div className="form-warning-item" key={w}>{w}</div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {rulePanelTab === "advanced" && (
+            <>
+              <div className="form-group">
+                <label className="form-label">Host 覆盖（留空则沿用站点 Host）</label>
+                <input
+                  className="form-input"
+                  value={ruleDraft.host}
+                  onChange={(e) => setRuleDraft((v) => ({ ...v, host: e.target.value }))}
+                  placeholder={selectedProject ? joinCsv(selectedProject.siteHosts) : "app.example.com"}
+                />
+              </div>
+
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">资源类型</label>
+                  <input
+                    className="form-input"
+                    value={ruleDraft.resourceType}
+                    onChange={(e) => setRuleDraft((v) => ({ ...v, resourceType: e.target.value }))}
+                    placeholder={ruleDraft.kind === "api_forward" ? "fetch, xmlhttprequest" : "script, stylesheet"}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">HTTP 方法</label>
+                  <input
+                    className="form-input"
+                    value={ruleDraft.method}
+                    onChange={(e) => setRuleDraft((v) => ({ ...v, method: e.target.value }))}
+                    placeholder="GET, POST"
+                  />
+                </div>
+              </div>
+
+              {ruleDraft.kind === "api_forward" && (
+                <>
+                  <div className="form-group">
+                    <label className="form-label">去掉路径前缀</label>
+                    <input
+                      className="form-input"
+                      value={ruleDraft.stripPrefix}
+                      onChange={(e) => setRuleDraft((v) => ({ ...v, stripPrefix: e.target.value }))}
+                      placeholder="/api"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">注入 Header（JSON）</label>
+                    <textarea
+                      className="form-textarea"
+                      value={ruleDraft.headersJson}
+                      onChange={(e) => setRuleDraft((v) => ({ ...v, headersJson: e.target.value }))}
+                      placeholder='{"x-forwarded-by":"resource-forwarder"}'
+                    />
+                  </div>
+                </>
+              )}
+
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">优先级</label>
+                  <input
+                    className="form-input"
+                    type="number"
+                    value={ruleDraft.priority}
+                    onChange={(e) => setRuleDraft((v) => ({ ...v, priority: Number(e.target.value) }))}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">标签</label>
+                  <input
+                    className="form-input"
+                    value={ruleDraft.tags}
+                    onChange={(e) => setRuleDraft((v) => ({ ...v, tags: e.target.value }))}
+                    placeholder="team-a, local"
+                  />
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={ruleDraft.enabled}
+                    onChange={(e) => setRuleDraft((v) => ({ ...v, enabled: e.target.checked }))}
+                    style={{ width: "auto", minHeight: "auto", margin: 0 }}
+                  />
+                  默认启用规则
+                </label>
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="rule-panel-footer">
+          <button className="btn btn-ghost" onClick={() => setPanelMode(null)}>取消</button>
+          <button
+            className="btn btn-default"
+            onClick={() => void saveRuleAndContinue()}
+            disabled={busy || !selectedProject || !ruleDraft.ruleSetId}
+          >
+            保存并继续新建
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={() => void saveRule()}
+            disabled={busy || !selectedProject || !ruleDraft.ruleSetId}
+          >
+            保存
+          </button>
+        </div>
+      </aside>
+    );
+  }
+
+  // ── BATCH RULE PANEL ──────────────────────────────────────────────────
+
+  function renderBatchRulePanel() {
+    return (
+      <aside className="rule-panel">
+        <div className="rule-panel-header">
+          <span className="rule-panel-title">连续新增规则</span>
+          <button className="btn-icon" onClick={() => setPanelMode(null)}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="rule-panel-body">
+          {selectedProject && (
+            <div style={{ padding: "10px 12px", background: "var(--surface-soft)", borderRadius: "var(--radius-md)", border: "1px solid var(--border)", fontSize: 12, color: "var(--muted)" }}>
+              所属站点：<strong style={{ color: "var(--ink)" }}>{selectedProject.name}</strong>
+            </div>
+          )}
+
+          <div style={{ fontSize: 12, color: "var(--muted)" }}>
+            在这里快速录入多条规则的基础字段，保存后可逐一补充高级选项。
+          </div>
+
+          <div className="batch-rule-list">
+            {batchRuleDrafts.map((draft, index) => (
+              <div className="batch-rule-card" key={draft.localId}>
+                <div className="batch-rule-card-header">
+                  <span className="batch-rule-card-label">规则 {index + 1}</span>
+                  <button
+                    className="btn-icon btn-icon-danger"
+                    onClick={() => removeBatchRuleDraft(draft.localId)}
+                    disabled={busy || batchRuleDrafts.length === 1}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="3 6 5 6 21 6" />
+                      <path d="M19 6l-1 14H6L5 6" />
+                      <path d="M10 11v6M14 11v6" />
+                      <path d="M9 6V4h6v2" />
+                    </svg>
+                  </button>
+                </div>
+
+                <div className="kind-segmented">
+                  <button
+                    className={`kind-seg-btn ${draft.kind === "api_forward" ? "active" : ""}`}
                     onClick={() =>
-                      setRuleDraft((value) => ({
-                        ...value,
-                        kind: "api_forward",
-                        resourceType: joinCsv(defaultApiTypes),
-                        method: "GET, POST",
-                      }))
+                      updateBatchRuleDraft(
+                        draft.localId,
+                        mergeRuleDraftByKind(draft, "api_forward", {
+                          pathGlob: draft.pathGlob === "/assets/**" || !draft.pathGlob ? "/api/**" : draft.pathGlob,
+                        }),
+                      )
                     }
                   >
                     API 转发
                   </button>
                   <button
-                    className={ruleDraft.kind === "asset_redirect" ? "active-segment" : "ghost"}
+                    className={`kind-seg-btn ${draft.kind === "asset_redirect" ? "active" : ""}`}
                     onClick={() =>
-                      setRuleDraft((value) => ({
-                        ...value,
-                        kind: "asset_redirect",
-                        resourceType: joinCsv(defaultAssetTypes),
-                        method: "",
-                      }))
+                      updateBatchRuleDraft(
+                        draft.localId,
+                        mergeRuleDraftByKind(draft, "asset_redirect", {
+                          pathGlob: draft.pathGlob === "/api/**" || !draft.pathGlob ? "/assets/**" : draft.pathGlob,
+                        }),
+                      )
                     }
                   >
                     资源替换
                   </button>
                 </div>
 
-                <label className="stack compact-gap">
-                  <span className="label">规则名称</span>
+                <div className="form-group">
+                  <label className="form-label">规则名称</label>
                   <input
-                    value={ruleDraft.name}
-                    onChange={(event) =>
-                      setRuleDraft((value) => ({ ...value, name: event.target.value }))
-                    }
+                    className="form-input"
+                    value={draft.name}
+                    onChange={(e) => updateBatchRuleDraft(draft.localId, { name: e.target.value })}
                     placeholder="例如：把 /api 指到本地服务"
                   />
-                </label>
-                <label className="stack compact-gap">
-                  <span className="label">匹配路径</span>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">匹配路径</label>
                   <input
-                    value={ruleDraft.pathGlob}
-                    onChange={(event) =>
-                      setRuleDraft((value) => ({ ...value, pathGlob: event.target.value }))
-                    }
-                    placeholder="/api/**"
+                    className="form-input"
+                    value={draft.pathGlob}
+                    onChange={(e) => updateBatchRuleDraft(draft.localId, { pathGlob: e.target.value })}
+                    placeholder={draft.kind === "api_forward" ? "/api/**" : "/assets/**"}
                   />
-                </label>
-                {ruleDraft.kind === "api_forward" ? (
-                  <label className="stack compact-gap">
-                    <span className="label">目标地址</span>
+                </div>
+                {draft.kind === "api_forward" ? (
+                  <div className="form-group">
+                    <label className="form-label">目标地址</label>
                     <input
-                      value={ruleDraft.targetBaseUrl}
-                      onChange={(event) =>
-                        setRuleDraft((value) => ({ ...value, targetBaseUrl: event.target.value }))
-                      }
+                      className="form-input"
+                      value={draft.targetBaseUrl}
+                      onChange={(e) => updateBatchRuleDraft(draft.localId, { targetBaseUrl: e.target.value })}
                       placeholder="http://127.0.0.1:3000"
                     />
-                  </label>
+                  </div>
                 ) : (
-                  <label className="stack compact-gap">
-                    <span className="label">替换到的 HTTPS 地址</span>
+                  <div className="form-group">
+                    <label className="form-label">替换到的 HTTPS 地址</label>
                     <input
-                      value={ruleDraft.redirectUrl}
-                      onChange={(event) =>
-                        setRuleDraft((value) => ({ ...value, redirectUrl: event.target.value }))
-                      }
+                      className="form-input"
+                      value={draft.redirectUrl}
+                      onChange={(e) => updateBatchRuleDraft(draft.localId, { redirectUrl: e.target.value })}
                       placeholder="https://cdn.example.com/app.js"
                     />
-                  </label>
+                  </div>
                 )}
-
-                <details className="advanced-panel">
-                  <summary>高级选项</summary>
-                  <div className="stack advanced-body">
-                    <label className="stack compact-gap">
-                      <span className="label">Host 覆盖（留空则沿用站点 Host）</span>
-                      <input
-                        value={ruleDraft.host}
-                        onChange={(event) =>
-                          setRuleDraft((value) => ({ ...value, host: event.target.value }))
-                        }
-                        placeholder={selectedProject ? joinCsv(selectedProject.siteHosts) : "app.example.com"}
-                      />
-                    </label>
-                    <div className="grid two compact-grid">
-                      <label className="stack compact-gap">
-                        <span className="label">资源类型</span>
-                        <input
-                          value={ruleDraft.resourceType}
-                          onChange={(event) =>
-                            setRuleDraft((value) => ({ ...value, resourceType: event.target.value }))
-                          }
-                          placeholder={
-                            ruleDraft.kind === "api_forward"
-                              ? "fetch, xmlhttprequest"
-                              : "script, stylesheet"
-                          }
-                        />
-                      </label>
-                      <label className="stack compact-gap">
-                        <span className="label">HTTP 方法</span>
-                        <input
-                          value={ruleDraft.method}
-                          onChange={(event) =>
-                            setRuleDraft((value) => ({ ...value, method: event.target.value }))
-                          }
-                          placeholder="GET, POST"
-                        />
-                      </label>
-                    </div>
-                    {ruleDraft.kind === "api_forward" ? (
-                      <>
-                        <label className="stack compact-gap">
-                          <span className="label">去掉路径前缀</span>
-                          <input
-                            value={ruleDraft.stripPrefix}
-                            onChange={(event) =>
-                              setRuleDraft((value) => ({ ...value, stripPrefix: event.target.value }))
-                            }
-                            placeholder="/api"
-                          />
-                        </label>
-                        <label className="stack compact-gap">
-                          <span className="label">注入 Header（JSON）</span>
-                          <textarea
-                            value={ruleDraft.headersJson}
-                            onChange={(event) =>
-                              setRuleDraft((value) => ({ ...value, headersJson: event.target.value }))
-                            }
-                            placeholder='{"x-forwarded-by":"resource-forwarder"}'
-                          />
-                        </label>
-                      </>
-                    ) : null}
-                    <div className="grid two compact-grid">
-                      <label className="stack compact-gap">
-                        <span className="label">优先级</span>
-                        <input
-                          type="number"
-                          value={ruleDraft.priority}
-                          onChange={(event) =>
-                            setRuleDraft((value) => ({ ...value, priority: Number(event.target.value) }))
-                          }
-                        />
-                      </label>
-                      <label className="stack compact-gap checkbox-line">
-                        <span className="label">默认状态</span>
-                        <span className="toggle-line">
-                          <input
-                            type="checkbox"
-                            checked={ruleDraft.enabled}
-                            onChange={(event) =>
-                              setRuleDraft((value) => ({ ...value, enabled: event.target.checked }))
-                            }
-                          />
-                          启用规则
-                        </span>
-                      </label>
-                    </div>
-                    <label className="stack compact-gap">
-                      <span className="label">标签</span>
-                      <input
-                        value={ruleDraft.tags}
-                        onChange={(event) =>
-                          setRuleDraft((value) => ({ ...value, tags: event.target.value }))
-                        }
-                        placeholder="team-a, local"
-                      />
-                    </label>
-                    <label className="stack compact-gap">
-                      <span className="label">备注</span>
-                      <textarea
-                        value={ruleDraft.note}
-                        onChange={(event) =>
-                          setRuleDraft((value) => ({ ...value, note: event.target.value }))
-                        }
-                        placeholder="补充这条规则的适用场景。"
-                      />
-                    </label>
-                  </div>
-                </details>
-
-                {ruleConflicts.length > 0 ? (
-                  <div className="warning-list compact-gap">
-                    {ruleConflicts.map((conflict) => (
-                      <div className="warning-item" key={conflict.ruleId}>
-                        {conflict.reason}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-                {ruleWarnings.length > 0 ? (
-                  <div className="warning-list compact-gap">
-                    {ruleWarnings.map((warning) => (
-                      <div className="warning-item" key={warning}>
-                        {warning}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-
-                <div className="row between wrap-gap">
-                  <button className="ghost" onClick={() => setDrawerMode(null)}>
-                    取消
-                  </button>
-                  <button
-                    onClick={() => void saveRule()}
-                    disabled={busy || !selectedProject || !ruleDraft.ruleSetId}
-                  >
-                    保存规则
-                  </button>
-                </div>
               </div>
-            ) : null}
+            ))}
+          </div>
 
-            {drawerMode === "rule-batch" ? (
-              <div className="modal-body stack">
-                {selectedProject ? (
-                  <section className="modal-context strong-context">
-                    <div className="modal-context-main">
-                      <span className="label">所属站点</span>
-                      <strong>{selectedProject.name}</strong>
-                      <p className="small muted">{joinCsv(selectedProject.siteHosts) || "未填写 Host"}</p>
-                    </div>
-                    <div className="modal-context-meta">
-                      <span className={`badge ${selectedProject.siteHosts.includes(currentHost) ? "success" : "warning"}`}>
-                        {selectedProject.siteHosts.includes(currentHost) ? "当前页面命中此站点" : "当前页面未命中此站点"}
-                      </span>
-                      {selectedRuleSet ? <span className="badge neutral">规则组 {selectedRuleSet.name}</span> : null}
-                    </div>
-                  </section>
-                ) : null}
-
-                <section className="mini-section stack compact-gap">
-                  <div className="row between align-start wrap-gap">
-                    <div className="stack compact-gap">
-                      <span className="label">连续新增</span>
-                      <p className="small muted">
-                        先在一个窗口里把基础规则连续录入。Host、优先级、Header 等高级项，保存后再点“编辑”补充。
-                      </p>
-                    </div>
-                    <span className="badge neutral">共 {batchRuleDrafts.length} 条待保存</span>
-                  </div>
-
-                  <div className="batch-rule-list">
-                    {batchRuleDrafts.map((draft, index) => (
-                      <article className="batch-rule-card" key={draft.localId}>
-                        <div className="batch-rule-header">
-                          <div className="stack compact-gap">
-                            <strong>规则 {index + 1}</strong>
-                            <span className="small muted">
-                              默认匹配 Host：{joinCsv(selectedProject?.siteHosts) || "未填写 Host"}
-                            </span>
-                          </div>
-                          <button
-                            className="ghost"
-                            onClick={() => removeBatchRuleDraft(draft.localId)}
-                            disabled={busy || batchRuleDrafts.length === 1}
-                          >
-                            删除
-                          </button>
-                        </div>
-
-                        <div className="segmented-row compact-segmented-row">
-                          <button
-                            className={draft.kind === "api_forward" ? "active-segment" : "ghost"}
-                            onClick={() =>
-                              updateBatchRuleDraft(draft.localId, {
-                                kind: "api_forward",
-                                resourceType: joinCsv(defaultApiTypes),
-                                method: "GET, POST",
-                                pathGlob:
-                                  draft.pathGlob === "/assets/**" || !draft.pathGlob ? "/api/**" : draft.pathGlob,
-                              })
-                            }
-                          >
-                            API 转发
-                          </button>
-                          <button
-                            className={draft.kind === "asset_redirect" ? "active-segment" : "ghost"}
-                            onClick={() =>
-                              updateBatchRuleDraft(draft.localId, {
-                                kind: "asset_redirect",
-                                resourceType: joinCsv(defaultAssetTypes),
-                                method: "",
-                                pathGlob:
-                                  draft.pathGlob === "/api/**" || !draft.pathGlob ? "/assets/**" : draft.pathGlob,
-                              })
-                            }
-                          >
-                            资源替换
-                          </button>
-                        </div>
-
-                        <div className="batch-rule-fields">
-                          <label className="stack compact-gap">
-                            <span className="label">规则名称</span>
-                            <input
-                              value={draft.name}
-                              onChange={(event) =>
-                                updateBatchRuleDraft(draft.localId, { name: event.target.value })
-                              }
-                              placeholder="例如：把 /api 指到本地服务"
-                            />
-                          </label>
-                          <label className="stack compact-gap">
-                            <span className="label">匹配路径</span>
-                            <input
-                              value={draft.pathGlob}
-                              onChange={(event) =>
-                                updateBatchRuleDraft(draft.localId, { pathGlob: event.target.value })
-                              }
-                              placeholder={draft.kind === "api_forward" ? "/api/**" : "/assets/**"}
-                            />
-                          </label>
-                          {draft.kind === "api_forward" ? (
-                            <label className="stack compact-gap">
-                              <span className="label">目标地址</span>
-                              <input
-                                value={draft.targetBaseUrl}
-                                onChange={(event) =>
-                                  updateBatchRuleDraft(draft.localId, { targetBaseUrl: event.target.value })
-                                }
-                                placeholder="http://127.0.0.1:3000"
-                              />
-                            </label>
-                          ) : (
-                            <label className="stack compact-gap">
-                              <span className="label">替换到的 HTTPS 地址</span>
-                              <input
-                                value={draft.redirectUrl}
-                                onChange={(event) =>
-                                  updateBatchRuleDraft(draft.localId, { redirectUrl: event.target.value })
-                                }
-                                placeholder="https://cdn.example.com/app.js"
-                              />
-                            </label>
-                          )}
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                </section>
-
-                <div className="row between wrap-gap">
-                  <div className="row wrap-gap">
-                    <button className="ghost" onClick={() => setDrawerMode(null)}>
-                      取消
-                    </button>
-                    <button className="secondary" onClick={() => appendBatchRuleDraft()} disabled={busy}>
-                      再加一条
-                    </button>
-                  </div>
-                  <button onClick={() => void saveBatchRules()} disabled={busy || !selectedProject || !selectedRuleSet}>
-                    全部保存
-                  </button>
-                </div>
-              </div>
-            ) : null}
-          </aside>
+          <button className="btn btn-default" style={{ width: "100%" }} onClick={appendBatchRuleDraft} disabled={busy}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 14, height: 14 }}>
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            再加一条
+          </button>
         </div>
-      ) : null}
-    </div>
-  );
+
+        <div className="rule-panel-footer">
+          <button className="btn btn-ghost" onClick={() => setPanelMode(null)}>取消</button>
+          <button
+            className="btn btn-primary"
+            onClick={() => void saveBatchRules()}
+            disabled={busy || !selectedProject || !selectedRuleSet}
+          >
+            全部保存（{batchRuleDrafts.length} 条）
+          </button>
+        </div>
+      </aside>
+    );
+  }
+
+  // ── IMPORT/EXPORT VIEW ────────────────────────────────────────────────
+
+  function renderImportExportView() {
+    return (
+      <>
+        <div className="page-header">
+          <div className="page-title">导入导出</div>
+          <div className="page-subtitle">支持 JSON / YAML 格式，也可导入 Resource Override 的配置</div>
+        </div>
+
+        <div className="io-page">
+          {/* Import */}
+          <div className="io-card">
+            <div className="io-card-header">
+              <div className="io-card-title">导入规则</div>
+              <div className="io-card-desc">
+                支持从 Resource Override 导入，或粘贴本工具的 JSON / YAML 快照
+              </div>
+            </div>
+            <div className="io-card-body">
+              <div className="io-source-tabs">
+                <button
+                  className={`io-source-tab ${importSource === "resource-override" ? "active" : ""}`}
+                  onClick={() => {
+                    setImportSource("resource-override");
+                    setResourceOverridePreview(null);
+                    setImportFeedback(null);
+                  }}
+                >
+                  Resource Override
+                </button>
+                <button
+                  className={`io-source-tab ${importSource === "workspace" ? "active" : ""}`}
+                  onClick={() => {
+                    setImportSource("workspace");
+                    setResourceOverridePreview(null);
+                    setImportFeedback(null);
+                  }}
+                >
+                  Workspace 快照
+                </button>
+              </div>
+
+              <textarea
+                className="io-import-textarea"
+                value={importText}
+                onChange={(e) => {
+                  setImportText(e.target.value);
+                  setResourceOverridePreview(null);
+                  setImportFeedback(null);
+                }}
+                placeholder={
+                  importSource === "resource-override"
+                    ? '粘贴 Resource Override 导出的 {"v":1,"data":[...]} JSON'
+                    : "粘贴 JSON 或 YAML 规则配置"
+                }
+              />
+
+              {importFeedback && (
+                <div className="io-feedback">
+                  <div className="io-feedback-title">{importFeedback.title}</div>
+                  {importFeedback.details.slice(0, 4).map((d) => (
+                    <div className="io-feedback-item" key={d}>{d}</div>
+                  ))}
+                </div>
+              )}
+
+              <div className="io-actions">
+                {importSource === "resource-override" ? (
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => void previewResourceOverrideImport()}
+                    disabled={busy}
+                  >
+                    预览导入
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      className="btn btn-default"
+                      onClick={() => void importWorkspace(true)}
+                      disabled={busy}
+                    >
+                      合并导入
+                    </button>
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => void importWorkspace(false)}
+                      disabled={busy}
+                    >
+                      整体替换
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Export */}
+          <div className="io-card">
+            <div className="io-card-header">
+              <div className="io-card-title">导出规则</div>
+              <div className="io-card-desc">导出当前选中站点的规则配置，用于备份或分享</div>
+            </div>
+            <div className="io-card-body">
+              <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
+                <div className="form-group" style={{ flex: 1 }}>
+                  <label className="form-label">站点</label>
+                  <select
+                    className="form-select"
+                    value={selectedProjectId}
+                    onChange={(e) => setSelectedProjectId(e.target.value)}
+                  >
+                    {projects.length === 0 && <option value="">请先创建站点</option>}
+                    {projects.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group" style={{ flex: 1 }}>
+                  <label className="form-label">格式</label>
+                  <select
+                    className="form-select"
+                    value={exportFormat}
+                    onChange={(e) => setExportFormat(e.target.value as "json" | "yaml")}
+                  >
+                    <option value="yaml">YAML</option>
+                    <option value="json">JSON</option>
+                  </select>
+                </div>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => selectedProject && void exportWorkspace(selectedProject.id)}
+                  disabled={busy || !selectedProject}
+                  style={{ marginBottom: 0, alignSelf: "flex-end" }}
+                >
+                  导出
+                </button>
+              </div>
+
+              {exportText && (
+                <textarea
+                  className="io-import-textarea"
+                  style={{ minHeight: 160 }}
+                  value={exportText}
+                  onChange={(e) => setExportText(e.target.value)}
+                  readOnly
+                />
+              )}
+            </div>
+          </div>
+
+          {/* Status */}
+          <div style={{ fontSize: 13, color: "var(--muted)", padding: "4px 0" }}>
+            {status}
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  // ── SETTINGS VIEW ─────────────────────────────────────────────────────
+
+  function renderSettingsView() {
+    const filteredLogs = logs.filter((log) =>
+      selectedProject ? log.projectId === selectedProject.id : true,
+    );
+
+    return (
+      <>
+        <div className="page-header">
+          <div className="page-title">设置</div>
+          <div className="page-subtitle">配置本地服务地址和管理站点</div>
+        </div>
+
+        <div className="settings-page">
+          {/* Service URL */}
+          <div className="settings-card">
+            <div className="settings-card-header">
+              <div className="settings-card-title">通用设置</div>
+              <div className="settings-card-desc">配置本地转发服务地址</div>
+            </div>
+            <div className="settings-card-body">
+              <div className="settings-field-row">
+                <div className="form-group">
+                  <label className="form-label">本地服务地址</label>
+                  <input
+                    className="form-input"
+                    value={serviceUrl}
+                    onChange={(e) => setServiceUrl(e.target.value)}
+                    placeholder="http://127.0.0.1:5178"
+                  />
+                </div>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => void saveServiceUrl()}
+                  disabled={busy}
+                >
+                  保存
+                </button>
+                <button
+                  className="btn btn-default"
+                  onClick={() => void refresh()}
+                  disabled={busy}
+                >
+                  立即同步
+                </button>
+              </div>
+
+              <div className={`service-status-bar ${dashboard?.health ? "online" : "offline"}`}>
+                <span className="service-status-dot" />
+                <span className="service-status-text">
+                  {dashboard?.health ? `服务在线 · 端口 ${servicePort}` : "服务离线 · 数据仅保存在本地"}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Sites */}
+          <div className="settings-card">
+            <div className="settings-card-header site-mgr-header">
+              <div className="site-mgr-title-area">
+                <div className="settings-card-title">站点管理</div>
+                <div className="settings-card-desc">
+                  共 {projects.length} 个站点 · {projects.filter((p) => p.enabled).length} 个启用
+                </div>
+              </div>
+              <div className="site-mgr-header-actions">
+                {selectedProjectIds.size > 0 && (
+                  <>
+                    <span className="site-mgr-selection-count">已选 {selectedProjectIds.size}</span>
+                    <button className="btn btn-default btn-sm" disabled={busy} onClick={() => void batchToggleProjects(true)}>启用</button>
+                    <button className="btn btn-default btn-sm" disabled={busy} onClick={() => void batchToggleProjects(false)}>停用</button>
+                    <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => void batchDeleteProjects()}>删除</button>
+                    <button className="btn btn-ghost btn-sm" onClick={() => setSelectedProjectIds(new Set())}>取消</button>
+                    <div className="site-mgr-divider" />
+                  </>
+                )}
+                <button className="btn btn-primary btn-sm" onClick={() => openProjectModal()}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 12, height: 12 }}>
+                    <line x1="12" y1="5" x2="12" y2="19" />
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  新建
+                </button>
+              </div>
+            </div>
+
+            <div className="site-list">
+              {projects.length > 0 && (
+                <div className="site-list-head">
+                  <label className="site-list-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={selectedProjectIds.size === projects.length && projects.length > 0}
+                      onChange={toggleAllProjectSelection}
+                    />
+                  </label>
+                  <span className="site-list-head-label">全选</span>
+                </div>
+              )}
+              {projects.length === 0 && (
+                <div className="site-list-empty">
+                  还没有站点，点击「新建」开始添加。
+                </div>
+              )}
+              {projects.map((project) => {
+                const ruleCount = ruleSets
+                  .filter((rs) => rs.projectId === project.id)
+                  .reduce((sum, rs) => sum + rs.ruleIds.length, 0);
+                const isActive = project.siteHosts.includes(currentHost);
+                const isChecked = selectedProjectIds.has(project.id);
+                return (
+                  <div className={`site-list-item${isChecked ? " is-selected" : ""}${!project.enabled ? " is-disabled" : ""}`} key={project.id}>
+                    <label className="site-list-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => toggleProjectSelection(project.id)}
+                      />
+                    </label>
+                    <div className="site-list-info">
+                      <div className="site-list-name-row">
+                        <span className="site-list-name">{project.name}</span>
+                        {!project.enabled && (
+                          <span className="site-list-badge disabled">已停用</span>
+                        )}
+                        {isActive && (
+                          <span className="site-list-badge active">当前页面</span>
+                        )}
+                      </div>
+                      <div className="site-list-meta">
+                        <span className="site-list-hosts">{joinCsv(project.siteHosts) || "未填写 Host"}</span>
+                        <span className="site-list-dot">·</span>
+                        <span>{ruleCount} 条规则</span>
+                      </div>
+                    </div>
+                    <div className="site-list-actions">
+                      <button
+                        className="btn-icon"
+                        title="查看规则"
+                        onClick={() => { setSelectedProjectId(project.id); setView("rules"); }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18M9 21V9" /></svg>
+                      </button>
+                      <button
+                        className="btn-icon"
+                        title="编辑"
+                        onClick={() => openProjectModal(project)}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15"><path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5z" /></svg>
+                      </button>
+                      <button
+                        className={`btn-icon${project.enabled ? "" : " is-off"}`}
+                        title={project.enabled ? "停用" : "启用"}
+                        onClick={() => void toggleProject(project)}
+                        disabled={busy}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15"><path d="M18.36 6.64A9 9 0 1 1 5.64 6.64" /><line x1="12" y1="2" x2="12" y2="12" /></svg>
+                      </button>
+                      <button
+                        className="btn-icon btn-icon-danger"
+                        title="删除"
+                        onClick={() => void deleteProject(project)}
+                        disabled={busy}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Hit logs */}
+          {filteredLogs.length > 0 && (
+            <div className="settings-card">
+              <div className="settings-card-header">
+                <div className="settings-card-title">命中日志</div>
+                <div className="settings-card-desc">最近 {filteredLogs.length} 条命中记录</div>
+              </div>
+              <div className="settings-card-body" style={{ gap: 8 }}>
+                {filteredLogs.slice(0, 8).map((log) => (
+                  <div
+                    key={log.id}
+                    style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "8px 12px", background: "var(--surface-soft)", borderRadius: "var(--radius-md)", border: "1px solid var(--border)", fontSize: 12 }}
+                  >
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {log.method} {log.requestUrl}
+                      </div>
+                      <div style={{ color: "var(--muted)", marginTop: 2 }}>
+                        {log.outcome === "matched" ? "已命中" : log.outcome === "error" ? "执行失败" : "未处理"}
+                        {` · ${log.statusCode ?? "-"} · ${log.durationMs} ms`}
+                      </div>
+                    </div>
+                    <span style={{ color: "var(--muted)", marginLeft: 12, flexShrink: 0 }}>
+                      {formatTimestamp(log.occurredAt)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Warnings */}
+          {(dashboard?.warnings ?? []).length > 0 && (
+            <div className="settings-card">
+              <div className="settings-card-header">
+                <div className="settings-card-title">配置告警</div>
+              </div>
+              <div className="settings-card-body" style={{ gap: 8 }}>
+                {(dashboard?.warnings ?? []).map((w) => (
+                  <div className="form-warning-item" key={w}>{localizeWarning(w)}</div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </>
+    );
+  }
+
+  // ── ABOUT VIEW ────────────────────────────────────────────────────────
+
+  function renderAboutView() {
+    return (
+      <>
+        <div className="page-header">
+          <div className="page-title">关于</div>
+          <div className="page-subtitle">查看插件信息、文档与反馈渠道</div>
+        </div>
+
+        <div className="about-page">
+          <div className="about-logo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2L2 7l10 5 10-5-10-5z" />
+              <path d="M2 17l10 5 10-5" />
+              <path d="M2 12l10 5 10-5" />
+            </svg>
+          </div>
+
+          <div>
+            <div className="about-app-name">Resource Proxy</div>
+            <div className="about-app-desc">本地资源代理插件，更友好地管理你的本地规则，高效调试、预览与协作。</div>
+          </div>
+
+          <div className="about-links">
+            <a
+              className="about-link-item"
+              href="https://github.com/your/resource-proxy"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <span>GitHub 源码</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
+                <polyline points="15 3 21 3 21 9" />
+                <line x1="10" y1="14" x2="21" y2="3" />
+              </svg>
+            </a>
+            <a
+              className="about-link-item"
+              href="https://docs.resource-proxy.dev"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <span>使用文档</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
+                <polyline points="15 3 21 3 21 9" />
+                <line x1="10" y1="14" x2="21" y2="3" />
+              </svg>
+            </a>
+            <a
+              className="about-link-item"
+              href="https://github.com/your/resource-proxy/issues"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <span>提交反馈</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
+                <polyline points="15 3 21 3 21 9" />
+                <line x1="10" y1="14" x2="21" y2="3" />
+              </svg>
+            </a>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  // ── PROJECT MODAL ─────────────────────────────────────────────────────
+
+  function renderProjectModal() {
+    const isEdit = !!projectDraft.id;
+    return (
+      <div className="modal-overlay" onClick={() => setShowProjectModal(false)}>
+        <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-box-header">
+            <span className="modal-box-title">{isEdit ? "编辑站点" : "新建站点"}</span>
+            <button className="btn-icon" onClick={() => setShowProjectModal(false)}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+
+          <div className="modal-box-body">
+            <div className="form-group">
+              <label className="form-label">
+                站点名称 <span className="form-label-required">*</span>
+              </label>
+              <input
+                className="form-input"
+                value={projectDraft.name}
+                onChange={(e) => setProjectDraft((v) => ({ ...v, name: e.target.value }))}
+                placeholder="例如：App 主站"
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Host 列表</label>
+              <input
+                className="form-input"
+                value={projectDraft.siteHosts}
+                onChange={(e) => setProjectDraft((v) => ({ ...v, siteHosts: e.target.value }))}
+                placeholder="app.example.com, admin.example.com"
+              />
+              <span className="form-hint">多个 Host 用逗号分隔</span>
+            </div>
+
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">环境标签</label>
+                <input
+                  className="form-input"
+                  value={projectDraft.envLabel}
+                  onChange={(e) => setProjectDraft((v) => ({ ...v, envLabel: e.target.value }))}
+                  placeholder="staging / local"
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 24 }}>
+                  <input
+                    type="checkbox"
+                    checked={projectDraft.enabled}
+                    onChange={(e) => setProjectDraft((v) => ({ ...v, enabled: e.target.checked }))}
+                    style={{ width: "auto", minHeight: "auto", margin: 0 }}
+                  />
+                  默认启用
+                </label>
+              </div>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">备注</label>
+              <textarea
+                className="form-textarea"
+                value={projectDraft.note}
+                onChange={(e) => setProjectDraft((v) => ({ ...v, note: e.target.value }))}
+                placeholder="写清楚这个站点主要用来覆盖哪个环境。"
+              />
+            </div>
+          </div>
+
+          <div className="modal-box-footer">
+            <button className="btn btn-ghost" onClick={() => setShowProjectModal(false)}>取消</button>
+            <button
+              className="btn btn-primary"
+              onClick={() => void saveProject()}
+              disabled={busy}
+            >
+              {isEdit ? "保存修改" : "创建站点"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 }
 
-function drawerTitle(mode: DrawerMode): string {
-  if (mode === "settings") {
-    return "设置";
-  }
-  if (mode === "project") {
-    return "站点";
-  }
-  if (mode === "rule") {
-    return "规则";
-  }
-  if (mode === "rule-batch") {
-    return "规则";
-  }
-  return "";
-}
+// ── PURE HELPERS ────────────────────────────────────────────────────────
 
-function drawerHeadline(
-  mode: DrawerMode,
-  projectId: string,
-  ruleId: string,
-  selectedProjectName?: string,
-  batchSize = 0,
-): string {
-  if (mode === "settings") {
-    return selectedProjectName ? `设置 · ${selectedProjectName}` : "把不常用的操作都收在这里。";
-  }
-  if (mode === "project") {
-    return projectId ? "编辑站点" : "新建站点";
-  }
-  if (mode === "rule") {
-    return selectedProjectName
-      ? `${ruleId ? "编辑规则" : "新建规则"} · ${selectedProjectName}`
-      : ruleId
-        ? "编辑规则"
-        : "新建规则";
-  }
-  if (mode === "rule-batch") {
-    return selectedProjectName
-      ? `连续新增 ${batchSize || 1} 条规则 · ${selectedProjectName}`
-      : `连续新增 ${batchSize || 1} 条规则`;
-  }
-  return "";
+function mergeRuleDraftByKind<T extends RuleDraft | BatchRuleDraft>(
+  draft: T,
+  kind: Rule["kind"],
+  patch: Partial<T> = {},
+): T {
+  const base = {
+    ...draft,
+    kind,
+    resourceType:
+      patch.resourceType ?? (kind === draft.kind ? draft.resourceType : defaultResourceTypeText(kind)),
+    method: patch.method ?? (kind === draft.kind ? draft.method : defaultMethodText(kind)),
+    redirectUrl: kind === "asset_redirect" ? (patch.redirectUrl ?? draft.redirectUrl) : "",
+    targetBaseUrl: kind === "api_forward" ? (patch.targetBaseUrl ?? draft.targetBaseUrl) : "",
+    stripPrefix: kind === "api_forward" ? (patch.stripPrefix ?? draft.stripPrefix) : "",
+    headersJson: kind === "api_forward" ? (patch.headersJson ?? draft.headersJson ?? "{}") : "",
+  };
+  return { ...base, ...patch } as T;
 }
 
 function createRuleDraft(options?: {
@@ -1663,7 +2335,6 @@ function createBatchRuleDraft(options?: {
     kind: options?.source?.kind ?? options?.kind,
   });
   const source = options?.source;
-
   return {
     localId: createId("draft"),
     ...base,
@@ -1696,8 +2367,7 @@ function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: Project
   if (!draft.ruleSetId) {
     throw new Error("当前站点还没有规则组，请先保存站点后再添加规则。");
   }
-
-  const existing = workspace.rules.find((rule) => rule.id === draft.id);
+  const existing = workspace.rules.find((r) => r.id === draft.id);
   const now = new Date().toISOString();
   const host = splitCsv(draft.host);
   const resourceType = splitCsv(draft.resourceType) as MatchResourceType[];
@@ -1758,10 +2428,6 @@ function buildRuleSearchText(rule: Rule): string {
     .toLowerCase();
 }
 
-function formatKind(kind: Rule["kind"]): string {
-  return kind === "api_forward" ? "API 转发" : "资源替换";
-}
-
 function formatRuleTarget(rule: Rule): string {
   if (rule.kind === "asset_redirect") {
     return rule.target.redirectUrl || "未填写 HTTPS 地址";
@@ -1770,11 +2436,9 @@ function formatRuleTarget(rule: Rule): string {
 }
 
 function formatTimestamp(value?: string): string {
-  return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "暂无";
-}
-
-function shorten(value: string): string {
-  return value.length > 90 ? `${value.slice(0, 87)}...` : value;
+  if (!value) return "—";
+  const d = new Date(value);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 function localizeWarning(value: string): string {
@@ -1786,6 +2450,81 @@ function localizeWarning(value: string): string {
   }
   return value;
 }
+
+function defaultResourceTypeText(kind: Rule["kind"]): string {
+  return joinCsv(kind === "api_forward" ? defaultApiTypes : defaultAssetTypes);
+}
+
+function defaultMethodText(kind: Rule["kind"]): string {
+  return kind === "api_forward" ? "GET, POST" : "";
+}
+
+function getRuleTemplatePresets(kind: Rule["kind"]): RuleTemplatePreset[] {
+  return ruleTemplatePresets.filter((t) => t.kind === kind);
+}
+
+const ruleTemplatePresets: RuleTemplatePreset[] = [
+  {
+    id: "api-local",
+    kind: "api_forward",
+    label: "本地 API 联调",
+    description: "把 /api 请求转给本地服务",
+    patch: {
+      kind: "api_forward",
+      name: "本地 API 转发",
+      pathGlob: "/api/**",
+      targetBaseUrl: "http://127.0.0.1:3000",
+      stripPrefix: "",
+      headersJson: "{}",
+      resourceType: defaultResourceTypeText("api_forward"),
+      method: defaultMethodText("api_forward"),
+    },
+  },
+  {
+    id: "api-bff",
+    kind: "api_forward",
+    label: "BFF / 网关转发",
+    description: "替换目标网关地址，适合切 staging",
+    patch: {
+      kind: "api_forward",
+      name: "网关 API 转发",
+      pathGlob: "/gateway/**",
+      targetBaseUrl: "https://staging.example.com",
+      stripPrefix: "",
+      headersJson: "{}",
+      resourceType: defaultResourceTypeText("api_forward"),
+      method: defaultMethodText("api_forward"),
+    },
+  },
+  {
+    id: "asset-bundle",
+    kind: "asset_redirect",
+    label: "静态资源替换",
+    description: "替换脚本、样式或图片到 CDN",
+    patch: {
+      kind: "asset_redirect",
+      name: "静态资源替换",
+      pathGlob: "/assets/**",
+      redirectUrl: "https://cdn.example.com/assets/app.js",
+      resourceType: defaultResourceTypeText("asset_redirect"),
+      method: defaultMethodText("asset_redirect"),
+    },
+  },
+  {
+    id: "asset-single-file",
+    kind: "asset_redirect",
+    label: "单文件覆盖",
+    description: "替换一条精确文件路径",
+    patch: {
+      kind: "asset_redirect",
+      name: "单文件资源替换",
+      pathGlob: "/static/app.js",
+      redirectUrl: "https://cdn.example.com/static/app.js",
+      resourceType: "script",
+      method: defaultMethodText("asset_redirect"),
+    },
+  },
+];
 
 const rootElement = document.getElementById("app");
 if (!rootElement) {

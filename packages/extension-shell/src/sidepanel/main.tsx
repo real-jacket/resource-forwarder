@@ -125,164 +125,117 @@ function App() {
     }
   }
 
+  const projectRuleCount = (projectId: string) =>
+    dashboard?.workspace.ruleSets
+      .filter((rs) => rs.projectId === projectId)
+      .reduce((sum, rs) => sum + rs.ruleIds.length, 0) ?? 0;
+
   return (
-    <div className="minimal-panel-shell">
-      <section className="hero minimal-panel-hero editorial-hero">
-        <div className="stack compact-gap">
-          <span className="kicker">Advanced Resource</span>
-          <h2>{currentHost || "未识别标签页"}</h2>
-          <p className="muted small mono-line">
-            {currentUrl || "打开一个网页后，这里会显示当前 URL。"}
-          </p>
+    <div className="sp">
+      {/* Hero */}
+      <div className="sp-hero">
+        <div className="sp-hero-top">
+          <div className="sp-hero-info">
+            <span className="sp-hero-label">当前站点</span>
+            <span className="sp-hero-host">{currentHost || "未识别"}</span>
+          </div>
+          <div className="sp-hero-actions">
+            <button className="btn btn-default btn-sm" onClick={() => void refresh()} disabled={busy}>刷新</button>
+            <button className="btn btn-primary btn-sm" onClick={() => void chrome.runtime.openOptionsPage()}>规则页</button>
+          </div>
         </div>
-
-        <div className="row wrap-gap status-row">
-          <span className={`badge ${dashboard?.health ? "success" : "danger"}`}>
-            {dashboard?.health ? "服务在线" : "服务离线"}
+        <div className="sp-hero-url">{currentUrl || "打开一个网页后显示"}</div>
+        <div className="sp-hero-badges">
+          <span className={`sp-badge ${dashboard?.health ? "online" : "offline"}`}>
+            <span className="sp-badge-dot" />
+            {dashboard?.health ? "服务在线" : "离线"}
           </span>
-          <span className={`badge ${matchedProjects.length > 0 ? "success" : "warning"}`}>
-            {matchedProjects.length > 0 ? `已匹配 ${matchedProjects.length} 个站点` : "未匹配站点"}
+          <span className={`sp-badge ${matchedProjects.length > 0 ? "matched" : "unmatched"}`}>
+            {matchedProjects.length > 0 ? `${matchedProjects.length} 个站点` : "未匹配"}
           </span>
+          <span className="sp-badge neutral">{activeRuleCount} / {matchedRules.length} 条规则生效</span>
         </div>
+      </div>
 
-        <div className="preview-metrics panel-metrics">
-          <div className="preview-metric">
-            <span className="label">站点</span>
-            <strong>{matchedProjects.length}</strong>
+      {/* Matched sites */}
+      <div className="sp-section">
+        <div className="sp-section-title">命中站点</div>
+        {matchedProjects.length === 0 ? (
+          <div className="sp-empty">
+            当前页面未匹配到任何站点，请在规则页添加 Host。
           </div>
-          <div className="preview-metric">
-            <span className="label">规则</span>
-            <strong>{matchedRules.length}</strong>
-          </div>
-          <div className="preview-metric">
-            <span className="label">启用</span>
-            <strong>{activeRuleCount}</strong>
-          </div>
-        </div>
-
-        <div className="row wrap-gap panel-actions">
-          <button className="secondary" onClick={() => void refresh()} disabled={busy}>
-            刷新
-          </button>
-          <button onClick={() => void chrome.runtime.openOptionsPage()}>
-            打开规则页
-          </button>
-        </div>
-      </section>
-
-      <section className="card compact-card">
-        <div className="row between align-start">
-          <div className="stack compact-gap">
-            <span className="kicker">站点</span>
-            <h3>当前页面命中的站点</h3>
-            <p className="small muted">这里只显示真正命中的站点，不展示全部配置。</p>
-          </div>
-        </div>
-
-        <div className="site-rail panel-site-rail">
-          {matchedProjects.map((project) => (
-            <article className="site-spotlight-card" key={project.id}>
-              <div className="stack compact-gap">
-                <div className="stack compact-gap">
-                  <div className="row wrap-gap">
-                    <strong>{project.name}</strong>
-                    <span className={`badge ${project.enabled ? "success" : "warning"}`}>
-                      {project.enabled ? "已启用" : "已停用"}
+        ) : (
+          <div className="sp-site-list">
+            {matchedProjects.map((project) => (
+              <div className={`sp-site-item${!project.enabled ? " is-off" : ""}`} key={project.id}>
+                <div className="sp-site-info">
+                  <div className="sp-site-name-row">
+                    <span className="sp-site-name">{project.name}</span>
+                    <span className={`site-list-badge ${project.enabled ? "active" : "disabled"}`}>
+                      {project.enabled ? "启用" : "停用"}
                     </span>
-                    {project.envLabel ? <span className="badge neutral">{project.envLabel}</span> : null}
+                    {project.envLabel && <span className="site-list-badge disabled">{project.envLabel}</span>}
                   </div>
-                  <p className="small muted">{joinCsv(project.siteHosts) || "未填写 Host"}</p>
-                </div>
-                <div className="row wrap-gap site-spotlight-meta">
-                  <span className="badge neutral">
-                    {
-                      dashboard?.workspace.ruleSets
-                        .filter((ruleSet) => ruleSet.projectId === project.id)
-                        .reduce((total, ruleSet) => total + ruleSet.ruleIds.length, 0) ?? 0
-                    }{" "}
-                    条规则
-                  </span>
-                </div>
-              </div>
-              <div className="site-spotlight-actions">
-                <button
-                  className={project.enabled ? "secondary" : "ghost"}
-                  onClick={() => void toggleProject(project)}
-                  disabled={busy}
-                >
-                  {project.enabled ? "停用" : "启用"}
-                </button>
-                <button className="ghost" onClick={() => void chrome.runtime.openOptionsPage()}>
-                  去规则页
-                </button>
-              </div>
-            </article>
-          ))}
-
-          {matchedProjects.length === 0 ? (
-            <div className="empty-state">
-              当前页面 `{currentHost || "未知 host"}` 还没有匹配到任何站点。去规则页新增一个 Host 后，这里会第一时间显示。
-            </div>
-          ) : null}
-        </div>
-      </section>
-
-      <section className="card compact-card">
-        <div className="row between align-start">
-          <div className="stack compact-gap">
-            <span className="kicker">规则</span>
-            <h3>当前页面会生效的规则</h3>
-            <p className="small muted">侧边栏只做查看和开关，编辑继续留在规则页。</p>
-          </div>
-        </div>
-
-        <div className="rule-list minimal-rule-list">
-          {matchedRules.map((rule) => (
-            <article className={`rule-row ${rule.enabled ? "" : "is-muted"}`} key={rule.id}>
-              <button
-                className={`toggle-chip ${rule.enabled ? "on" : "off"}`}
-                onClick={() => void toggleRule(rule)}
-                disabled={busy}
-              >
-                {rule.enabled ? "开" : "关"}
-              </button>
-              <div className="rule-row-main">
-                <div className="row between align-start">
-                  <div className="stack compact-gap">
-                    <div className="row wrap-gap">
-                      <h4>{rule.name}</h4>
-                      <span className="badge neutral">{formatKind(rule.kind)}</span>
-                    </div>
-                    <p className="small muted">{rule.match.pathGlob}</p>
+                  <div className="sp-site-meta">
+                    {joinCsv(project.siteHosts) || "未填写 Host"} · {projectRuleCount(project.id)} 条规则
                   </div>
-                  <span className="rule-priority">P{rule.priority}</span>
                 </div>
-                <p className="target-line">{formatRuleTarget(rule)}</p>
+                <div className="sp-site-actions">
+                  <button
+                    className={`btn btn-ghost btn-sm${!project.enabled ? " is-off" : ""}`}
+                    onClick={() => void toggleProject(project)}
+                    disabled={busy}
+                  >
+                    {project.enabled ? "停用" : "启用"}
+                  </button>
+                </div>
               </div>
-            </article>
-          ))}
-
-          {matchedRules.length === 0 ? (
-            <div className="empty-state">
-              {matchedProjects.length > 0
-                ? "当前页面虽然匹配到了站点，但还没有可用规则。去规则页补一条规则即可。"
-                : "先让当前页面匹配到站点，随后这里才会展示规则。"}
-            </div>
-          ) : null}
-        </div>
-      </section>
-
-      <section className="card compact-card">
-        <div className="row between align-start">
-          <div className="stack compact-gap">
-            <span className="kicker">状态</span>
-            <p>{status}</p>
+            ))}
           </div>
-          <button className="ghost" onClick={() => void chrome.runtime.openOptionsPage()}>
-            打开工作台
-          </button>
-        </div>
-      </section>
+        )}
+      </div>
+
+      {/* Active rules */}
+      <div className="sp-section">
+        <div className="sp-section-title">生效规则</div>
+        {matchedRules.length === 0 ? (
+          <div className="sp-empty">
+            {matchedProjects.length > 0 ? "匹配到站点但暂无规则。" : "先匹配站点后显示规则。"}
+          </div>
+        ) : (
+          <div className="sp-rule-list">
+            {matchedRules.map((rule) => (
+              <div className={`sp-rule-item${rule.enabled ? "" : " is-off"}`} key={rule.id}>
+                <label className="toggle-switch toggle-switch-sm">
+                  <input
+                    type="checkbox"
+                    checked={rule.enabled}
+                    onChange={() => void toggleRule(rule)}
+                    disabled={busy}
+                  />
+                  <span className="toggle-track" />
+                </label>
+                <div className="sp-rule-info">
+                  <div className="sp-rule-name-row">
+                    <span className="sp-rule-name">{rule.name}</span>
+                    <span className={`match-badge ${rule.kind === "api_forward" ? "api" : "asset"}`}>
+                      {formatKind(rule.kind)}
+                    </span>
+                  </div>
+                  <div className="sp-rule-path">{rule.match.pathGlob}</div>
+                  <div className="sp-rule-target">{formatRuleTarget(rule)}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Status footer */}
+      <div className="sp-footer">
+        <span className="sp-footer-status">{status}</span>
+        <button className="btn btn-ghost btn-sm" onClick={() => void chrome.runtime.openOptionsPage()}>打开工作台</button>
+      </div>
     </div>
   );
 }

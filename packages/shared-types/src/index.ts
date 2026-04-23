@@ -213,7 +213,9 @@ export interface DynamicRedirectRule {
     };
   };
   condition: {
-    regexFilter: string;
+    regexFilter?: string;
+    urlFilter?: string;
+    requestDomains?: string[];
     resourceTypes?: Array<"script" | "stylesheet" | "image" | "font">;
   };
 }

@@ -25,6 +25,7 @@ export type RuntimeRequest =
   | { type: "sync-workspace" }
   | { type: "set-service-url"; serviceUrl: string }
   | { type: "upsert-project"; payload: UpsertProjectPayload }
+  | { type: "delete-project"; projectId: string }
   | { type: "upsert-rule"; payload: UpsertRulePayload }
   | { type: "get-logs"; limit?: number; projectId?: string }
   | { type: "import-workspace"; payload: ImportWorkspacePayload }
