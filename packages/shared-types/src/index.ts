@@ -209,7 +209,8 @@ export interface DynamicRedirectRule {
   action: {
     type: "redirect";
     redirect: {
-      url: string;
+      url?: string;
+      regexSubstitution?: string;
     };
   };
   condition: {

@@ -7,6 +7,7 @@ import {
   pickMatchingRule,
   serializeWorkspace,
   toDynamicNetRequestRules,
+  toDynamicRule,
 } from "./index.js";
 
 const apiRule: Rule = {
@@ -106,6 +107,51 @@ describe("rule-core", () => {
     const rules = toDynamicNetRequestRules(workspace);
     expect(rules).toHaveLength(1);
     expect(rules[0]?.action.redirect.url).toContain("https://cdn.example.com");
+  });
+
+  it("creates regexFilter + regexSubstitution for wildcard redirectUrl", () => {
+    const rule: Rule = {
+      ...assetRule,
+      match: {
+        host: ["co-dev-18.shimorelease.com"],
+        pathGlob: "/minio/shimo-assets/table/*.chunk.js",
+        resourceType: ["script"],
+        tabScope: { mode: "all" },
+      },
+      target: { redirectUrl: "http://localhost:8000/*.chunk.js" },
+    };
+
+    const dnr = toDynamicRule(rule);
+    expect(dnr.action.redirect.url).toBeUndefined();
+    expect(dnr.action.redirect.regexSubstitution).toBe("http://localhost:8000/\\1.chunk.js");
+    expect(dnr.condition.regexFilter).toBe(
+      "^https?://[^/]+/minio/shimo-assets/table/([^/?]*)\\.chunk\\.js",
+    );
+    expect(dnr.condition.requestDomains).toEqual(["co-dev-18.shimorelease.com"]);
+    expect(dnr.condition.urlFilter).toBeUndefined();
+  });
+
+  it("creates regexFilter + regexSubstitution for ** wildcard", () => {
+    const rule: Rule = {
+      ...assetRule,
+      match: {
+        host: ["example.com"],
+        pathGlob: "/assets/**",
+        resourceType: ["script"],
+        tabScope: { mode: "all" },
+      },
+      target: { redirectUrl: "http://localhost:3000/**" },
+    };
+
+    const dnr = toDynamicRule(rule);
+    expect(dnr.action.redirect.regexSubstitution).toBe("http://localhost:3000/\\1");
+    expect(dnr.condition.regexFilter).toBe("^https?://[^/]+/assets/(.*)");
+  });
+
+  it("uses static url for non-wildcard redirectUrl", () => {
+    const dnr = toDynamicRule(assetRule);
+    expect(dnr.action.redirect.url).toBe("https://cdn.example.com/assets/app.js");
+    expect(dnr.action.redirect.regexSubstitution).toBeUndefined();
   });
 
   it("reports unsupported asset targets for non-HTTPS non-localhost URLs", () => {
@@ -238,7 +284,7 @@ describe("rule-core", () => {
     expect(report.skippedRuleCount).toBe(0);
   });
 
-  it("imports localhost wildcard overrides as api_forward rules with stripPrefix", () => {
+  it("imports localhost wildcard overrides as asset_redirect rules with wildcard redirectUrl", () => {
     const payload = JSON.stringify({
       v: 2,
       data: [
@@ -248,14 +294,12 @@ describe("rule-core", () => {
           on: true,
           rules: [
             {
-              // match dir: /assets/table  →  replace dir: /  →  stripPrefix = /assets/table
               type: "normalOverride",
               match: "https://app.example.com/assets/table/*.chunk.js",
               replace: "http://localhost:8000/*.chunk.js",
               on: true,
             },
             {
-              // same dir structure → no stripPrefix
               type: "normalOverride",
               match: "https://app.example.com/images/*.svg",
               replace: "http://localhost:8000/images/*.svg",
@@ -268,11 +312,12 @@ describe("rule-core", () => {
 
     const { workspace: imported, report } = parseResourceOverrideExport(payload);
     expect(imported.rules).toHaveLength(2);
-    expect(imported.rules[0]?.kind).toBe("api_forward");
-    expect(imported.rules[0]?.target.forwardProfile?.targetBaseUrl).toBe("http://localhost:8000");
-    expect(imported.rules[0]?.target.forwardProfile?.stripPrefix).toBe("/assets/table");
-    expect(imported.rules[1]?.kind).toBe("api_forward");
-    expect(imported.rules[1]?.target.forwardProfile?.stripPrefix).toBeUndefined();
+    expect(imported.rules[0]?.kind).toBe("asset_redirect");
+    expect(imported.rules[0]?.target.redirectUrl).toBe("http://localhost:8000/*.chunk.js");
+    expect(imported.rules[0]?.match.resourceType).toEqual(["script"]);
+    expect(imported.rules[1]?.kind).toBe("asset_redirect");
+    expect(imported.rules[1]?.target.redirectUrl).toBe("http://localhost:8000/images/*.svg");
+    expect(imported.rules[1]?.match.resourceType).toEqual(["image"]);
     expect(report.importedRuleCount).toBe(2);
     expect(report.skippedRuleCount).toBe(0);
   });

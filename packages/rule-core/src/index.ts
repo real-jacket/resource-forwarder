@@ -339,20 +339,95 @@ export function toDynamicRule(rule: Rule): DynamicRedirectRule {
     .filter((type) => ASSET_RESOURCE_TYPES.includes(type))
     .flatMap((type) => DNR_RESOURCE_TYPES[type] ?? []);
 
+  const redirectUrl = rule.target.redirectUrl ?? "";
+
+  if (redirectUrl.includes("*")) {
+    const wildcard = buildWildcardRedirect(rule.match, redirectUrl);
+    return {
+      id: stablePositiveHash(rule.id),
+      priority: rule.priority,
+      action: {
+        type: "redirect",
+        redirect: { regexSubstitution: wildcard.regexSubstitution },
+      },
+      condition: {
+        regexFilter: wildcard.regexFilter,
+        ...(wildcard.requestDomains ? { requestDomains: wildcard.requestDomains } : {}),
+        resourceTypes,
+      },
+    };
+  }
+
   const condition = buildDnrCondition(rule.match);
   return {
     id: stablePositiveHash(rule.id),
     priority: rule.priority,
     action: {
       type: "redirect",
-      redirect: {
-        url: rule.target.redirectUrl ?? "",
-      },
+      redirect: { url: redirectUrl },
     },
     condition: {
       ...condition,
       resourceTypes,
     },
+  };
+}
+
+/**
+ * Build regexFilter + regexSubstitution for a wildcard redirect.
+ * Each `*` / `**` in pathGlob becomes a capture group in regexFilter, and
+ * each corresponding `*` / `**` in redirectUrl references it via \1, \2, etc.
+ *
+ * Chrome DNR applies find-and-replace: the matched portion of the URL is
+ * replaced by regexSubstitution while the unmatched suffix (e.g. query params)
+ * is preserved.
+ */
+function buildWildcardRedirect(
+  match: MatchCondition,
+  redirectUrl: string,
+): { regexFilter: string; regexSubstitution: string; requestDomains?: string[] } {
+  const pathGlob = match.pathGlob || "**";
+
+  let pathRegex = "";
+  for (let i = 0; i < pathGlob.length; i += 1) {
+    const ch = pathGlob[i];
+    if (ch === "*" && pathGlob[i + 1] === "*") {
+      pathRegex += "(.*)";
+      i += 1;
+    } else if (ch === "*") {
+      pathRegex += "([^/?]*)";
+    } else {
+      pathRegex += escapeRegex(ch);
+    }
+  }
+
+  if (!pathRegex.startsWith("/")) {
+    pathRegex = `/${pathRegex}`;
+  }
+
+  const regexFilter = `^https?://[^/]+${pathRegex}`;
+
+  let captureIndex = 0;
+  let substitution = "";
+  for (let i = 0; i < redirectUrl.length; i += 1) {
+    if (redirectUrl[i] === "*" && redirectUrl[i + 1] === "*") {
+      captureIndex += 1;
+      substitution += `\\${captureIndex}`;
+      i += 1;
+    } else if (redirectUrl[i] === "*") {
+      captureIndex += 1;
+      substitution += `\\${captureIndex}`;
+    } else {
+      substitution += redirectUrl[i];
+    }
+  }
+
+  const concreteHosts = match.host.filter((h) => h !== "*" && !h.includes("*"));
+
+  return {
+    regexFilter,
+    regexSubstitution: substitution,
+    ...(concreteHosts.length > 0 ? { requestDomains: concreteHosts } : {}),
   };
 }
 
@@ -642,12 +717,31 @@ function convertResourceOverrideRule(
     };
   }
 
-  // localhost / 127.0.0.1 target WITH wildcards in replace path (or root base URL) →
-  // convert to api_forward so the local service handles path rewriting.
-  // e.g. match /some/path/*.chunk.js → replace http://localhost:8000/*.chunk.js
-  //   targetBaseUrl = http://localhost:8000
-  //   stripPrefix   = /some/path  (the extra prefix the local server doesn't have)
-  if (isLocalhost && (hasWildcardInReplace || isRootPath)) {
+  // localhost / 127.0.0.1 target WITH wildcards in replace path →
+  // asset_redirect with wildcard redirectUrl. toDynamicRule will convert the
+  // aligned wildcards into regexFilter + regexSubstitution for Chrome DNR,
+  // so the redirect works for <script> tags and other browser-initiated loads
+  // that page-bridge (fetch/XHR patching) cannot intercept.
+  if (isLocalhost && hasWildcardInReplace) {
+    return {
+      rule: {
+        ...baseRule,
+        name: `RO 资源替换 ${pathGlob}`,
+        kind: "asset_redirect",
+        match: {
+          ...baseRule.match,
+          resourceType: inferResourceTypesFromPath(pathGlob),
+        },
+        target: {
+          redirectUrl: replacement.trim(),
+        },
+      },
+    };
+  }
+
+  // localhost / 127.0.0.1 target with root base URL (no wildcard, no specific file) →
+  // api_forward so the local service handles path rewriting for all sub-paths.
+  if (isLocalhost && isRootPath) {
     const stripPrefix = inferLocalhostStripPrefix(pathGlob, target.pathname);
     return {
       rule: {
