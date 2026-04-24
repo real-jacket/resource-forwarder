@@ -335,9 +335,12 @@ export function toDynamicNetRequestRules(workspace: WorkspaceSnapshot): DynamicR
 }
 
 export function toDynamicRule(rule: Rule): DynamicRedirectRule {
-  const resourceTypes = (rule.match.resourceType ?? ASSET_RESOURCE_TYPES)
-    .filter((type) => ASSET_RESOURCE_TYPES.includes(type))
-    .flatMap((type) => DNR_RESOURCE_TYPES[type] ?? []);
+  const hasSpecificTypes = rule.match.resourceType && rule.match.resourceType.length > 0;
+  const resourceTypes = hasSpecificTypes
+    ? rule.match.resourceType!
+        .filter((type) => ASSET_RESOURCE_TYPES.includes(type))
+        .flatMap((type) => DNR_RESOURCE_TYPES[type] ?? [])
+    : undefined;
 
   const redirectUrl = rule.target.redirectUrl ?? "";
 
@@ -353,7 +356,7 @@ export function toDynamicRule(rule: Rule): DynamicRedirectRule {
       condition: {
         regexFilter: wildcard.regexFilter,
         ...(wildcard.requestDomains ? { requestDomains: wildcard.requestDomains } : {}),
-        resourceTypes,
+        ...(resourceTypes && resourceTypes.length > 0 ? { resourceTypes } : {}),
       },
     };
   }
@@ -368,7 +371,7 @@ export function toDynamicRule(rule: Rule): DynamicRedirectRule {
     },
     condition: {
       ...condition,
-      resourceTypes,
+      ...(resourceTypes && resourceTypes.length > 0 ? { resourceTypes } : {}),
     },
   };
 }
@@ -628,7 +631,7 @@ function convertResourceOverrideRule(
   }
 
   const pathGlob = extractResourceOverridePathGlob(rule.match ?? "");
-  const replacement = rule.replace?.trim() ?? "";
+  const replacement = sanitizeResourceOverrideUrl(rule.replace?.trim() ?? "");
   if (!pathGlob || !replacement) {
     return {
       rule: null,
@@ -808,7 +811,7 @@ function collectResourceOverrideHosts(domain: ResourceOverrideDomain): string[] 
 }
 
 function extractResourceOverrideRuleHost(rule: ResourceOverrideRule): string | null {
-  const matchValue = "match" in rule ? rule.match?.trim() ?? "" : "";
+  const matchValue = "match" in rule ? sanitizeResourceOverrideUrl(rule.match?.trim() ?? "") : "";
   if (!matchValue) {
     return null;
   }
@@ -843,16 +846,24 @@ function extractResourceOverrideHosts(matchUrl: string): string[] {
   return [];
 }
 
+/**
+ * Fix common typos found in Resource Override exports, e.g. "http: //host" → "http://host".
+ */
+function sanitizeResourceOverrideUrl(url: string): string {
+  return url.replace(/^(https?)\s*:\s*\/\//i, "$1://");
+}
+
 function normalizeImportedHost(host: string): string {
   if (host === "*" || host === ".*") {
     return "*";
   }
 
-  return host.replace(/\.$/, "");
+  // Strip trailing dot and port — Chrome DNR requestDomains doesn't support ports
+  return host.replace(/\.$/, "").replace(/:\d+$/, "");
 }
 
 function extractResourceOverridePathGlob(match: string): string | null {
-  const trimmed = match.trim();
+  const trimmed = sanitizeResourceOverrideUrl(match.trim());
   if (!trimmed) {
     return null;
   }
@@ -875,21 +886,43 @@ function extractResourceOverridePathGlob(match: string): string | null {
   return sanitized.replace(/\/\*$/, "/**");
 }
 
-function inferResourceTypesFromPath(pathGlob: string): MatchResourceType[] {
+function inferResourceTypesFromPath(pathGlob: string): MatchResourceType[] | undefined {
+  // Strip trailing wildcards so "*.css*" → "*.css", "/images/**" → "/images/"
+  const stripped = pathGlob.toLowerCase().replace(/\*+$/, "");
   const normalized = pathGlob.toLowerCase();
-  if (normalized.endsWith(".js") || normalized.endsWith(".mjs") || normalized.endsWith(".cjs")) {
+
+  if (
+    stripped.endsWith(".js") || stripped.endsWith(".mjs") || stripped.endsWith(".cjs") ||
+    normalized.endsWith(".js") || normalized.endsWith(".mjs") || normalized.endsWith(".cjs")
+  ) {
     return ["script"];
   }
-  if (normalized.endsWith(".css")) {
+  if (stripped.endsWith(".css") || normalized.endsWith(".css")) {
     return ["stylesheet"];
   }
-  if (/\.(png|jpe?g|gif|svg|webp|avif|ico)$/.test(normalized)) {
+  if (/\.(png|jpe?g|gif|svg|webp|avif|ico)$/.test(stripped) || /\.(png|jpe?g|gif|svg|webp|avif|ico)$/.test(normalized)) {
     return ["image"];
   }
-  if (/\.(woff2?|ttf|otf|eot)$/.test(normalized)) {
+  if (/\.(woff2?|ttf|otf|eot)$/.test(stripped) || /\.(woff2?|ttf|otf|eot)$/.test(normalized)) {
     return ["font"];
   }
-  return ASSET_RESOURCE_TYPES;
+  // Check if the directory name hints at a resource type (e.g. /images/**)
+  const dirSegment = stripped.replace(/\/+$/, "").split("/").pop() ?? "";
+  if (/^images?$/i.test(dirSegment) || /^icons?$/i.test(dirSegment) || /^img$/i.test(dirSegment)) {
+    return ["image"];
+  }
+  if (/^fonts?$/i.test(dirSegment)) {
+    return ["font"];
+  }
+  if (/^styles?$/i.test(dirSegment) || /^css$/i.test(dirSegment)) {
+    return ["stylesheet"];
+  }
+  if (/^scripts?$/i.test(dirSegment) || /^js$/i.test(dirSegment)) {
+    return ["script"];
+  }
+  // Return undefined for unrecognized types (.json, .xml, etc.) —
+  // toDynamicRule will omit resourceTypes from the DNR condition so Chrome matches all types.
+  return undefined;
 }
 
 function looksLikeApiPath(pathGlob: string): boolean {
