@@ -77,6 +77,8 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
       return handleDeleteProject(message.projectId);
     case "upsert-rule":
       return handleUpsertRule(message.payload);
+    case "delete-rule":
+      return handleDeleteRule(message.ruleId);
     case "get-logs":
       return serviceJson<LogsResponse>(
         `/logs?limit=${message.limit ?? 50}${message.projectId ? `&projectId=${encodeURIComponent(message.projectId)}` : ""}`,
@@ -84,7 +86,7 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
     case "import-workspace":
       return handleImportWorkspace(message.payload);
     case "export-workspace":
-      return handleExportWorkspace(message.projectId, message.format);
+      return handleExportWorkspace(message.projectIds, message.format);
     case "get-site-context":
       return buildSiteContext(message.url, message.tabId ?? sender.tab?.id);
     case "proxy-request":
@@ -367,21 +369,49 @@ async function handleUpsertRule(payload: UpsertRulePayload): Promise<RuntimeStat
   return result;
 }
 
-async function handleExportWorkspace(projectId: string, format: "json" | "yaml"): Promise<ExportWorkspaceResponse> {
-  // Try service first
-  try {
-    return await serviceJson<ExportWorkspaceResponse>(
-      `/export/${encodeURIComponent(projectId)}?format=${encodeURIComponent(format)}`,
-    );
-  } catch { /* service unavailable, fall back to local */ }
+async function handleDeleteRule(ruleId: string): Promise<RuntimeState & { warnings: string[] }> {
+  const localWorkspace = await readLocalWorkspace();
+  const nextWorkspace: WorkspaceSnapshot = {
+    ...localWorkspace,
+    ruleSets: localWorkspace.ruleSets.map((rs) => ({
+      ...rs,
+      ruleIds: rs.ruleIds.filter((id) => id !== ruleId),
+    })),
+    rules: localWorkspace.rules.filter((r) => r.id !== ruleId),
+    updatedAt: new Date().toISOString(),
+  };
 
+  const serviceUrl = await getServiceUrl();
+  const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
+
+  void pushWorkspaceReplace(serviceUrl, nextWorkspace).then(async (health) => {
+    if (!health) { await markDirty(); } else { await clearDirty(); runtimeState.health = health; }
+  }).catch(() => markDirty());
+
+  return result;
+}
+
+async function handleExportWorkspace(projectIds: string[], format: "json" | "yaml"): Promise<ExportWorkspaceResponse> {
   const workspace = await readLocalWorkspace();
-  const scopedRuleSets = workspace.ruleSets.filter((rs) => rs.projectId === projectId);
+  const exportAll = projectIds.length === 0;
+
+  if (!exportAll && projectIds.length === 1) {
+    try {
+      return await serviceJson<ExportWorkspaceResponse>(
+        `/export/${encodeURIComponent(projectIds[0])}?format=${encodeURIComponent(format)}`,
+      );
+    } catch { /* service unavailable, fall back to local */ }
+  }
+
+  const projectIdSet = new Set(projectIds);
+  const scopedProjects = exportAll ? workspace.projects : workspace.projects.filter((p) => projectIdSet.has(p.id));
+  const scopedProjectIds = new Set(scopedProjects.map((p) => p.id));
+  const scopedRuleSets = workspace.ruleSets.filter((rs) => scopedProjectIds.has(rs.projectId));
   const allowedRuleIds = new Set(scopedRuleSets.flatMap((rs) => rs.ruleIds));
   const scopedWorkspace: WorkspaceSnapshot = {
     version: workspace.version,
     updatedAt: workspace.updatedAt,
-    projects: workspace.projects.filter((p) => p.id === projectId),
+    projects: scopedProjects,
     ruleSets: scopedRuleSets,
     rules: workspace.rules.filter((r) => allowedRuleIds.has(r.id)),
   };

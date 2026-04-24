@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   collectRuleConflicts,
@@ -87,6 +87,131 @@ const emptyProjectDraft = (): ProjectDraft => ({
   enabled: true,
 });
 
+interface SelectOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+function CustomSelect({
+  value,
+  options,
+  onChange,
+  className = "",
+}: {
+  value: string;
+  options: SelectOption[];
+  onChange: (value: string) => void;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [focusIdx, setFocusIdx] = useState(-1);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const selected = options.find((o) => o.value === value);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  useEffect(() => {
+    if (open) {
+      const idx = options.findIndex((o) => o.value === value);
+      setFocusIdx(idx >= 0 ? idx : 0);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (open && listRef.current && focusIdx >= 0) {
+      const el = listRef.current.children[focusIdx] as HTMLElement | undefined;
+      el?.scrollIntoView({ block: "nearest" });
+    }
+  }, [focusIdx, open]);
+
+  const handleKey = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (!open) {
+        if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
+          e.preventDefault();
+          setOpen(true);
+        }
+        return;
+      }
+      switch (e.key) {
+        case "ArrowDown":
+          e.preventDefault();
+          setFocusIdx((i) => Math.min(i + 1, options.length - 1));
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          setFocusIdx((i) => Math.max(i - 1, 0));
+          break;
+        case "Enter":
+        case " ":
+          e.preventDefault();
+          if (focusIdx >= 0 && !options[focusIdx].disabled) {
+            onChange(options[focusIdx].value);
+            setOpen(false);
+          }
+          break;
+        case "Escape":
+          e.preventDefault();
+          setOpen(false);
+          break;
+      }
+    },
+    [open, focusIdx, options, onChange],
+  );
+
+  return (
+    <div className={`cs-wrap ${className}`} ref={wrapRef} onKeyDown={handleKey} tabIndex={0}>
+      <button
+        type="button"
+        className={`cs-trigger ${open ? "is-open" : ""}`}
+        onClick={() => setOpen(!open)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span className="cs-trigger-text">{selected?.label ?? ""}</span>
+        <svg className="cs-chevron" viewBox="0 0 20 20" fill="currentColor">
+          <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
+        </svg>
+      </button>
+      {open && (
+        <div className="cs-menu" role="listbox" ref={listRef}>
+          {options.map((opt, i) => (
+            <div
+              key={opt.value}
+              role="option"
+              aria-selected={opt.value === value}
+              className={`cs-option ${opt.value === value ? "is-selected" : ""} ${i === focusIdx ? "is-focused" : ""} ${opt.disabled ? "is-disabled" : ""}`}
+              onMouseEnter={() => setFocusIdx(i)}
+              onClick={() => {
+                if (opt.disabled) return;
+                onChange(opt.value);
+                setOpen(false);
+              }}
+            >
+              {opt.label}
+              {opt.value === value && (
+                <svg className="cs-check" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                </svg>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [view, setView] = useState<AppView>("rules");
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
@@ -102,6 +227,8 @@ function App() {
   const [importSource, setImportSource] = useState<ImportSource>("resource-override");
   const [exportText, setExportText] = useState("");
   const [exportFormat, setExportFormat] = useState<"json" | "yaml">("yaml");
+  const [exportScope, setExportScope] = useState<"all" | "selected">("all");
+  const [exportSelectedIds, setExportSelectedIds] = useState<Set<string>>(new Set());
   const [ruleQuery, setRuleQuery] = useState("");
   const [ruleKindFilter, setRuleKindFilter] = useState<"all" | Rule["kind"]>("all");
   const [ruleStatusTab, setRuleStatusTab] = useState<RuleStatusTab>("all");
@@ -576,6 +703,22 @@ function App() {
     }
   }
 
+  async function deleteRule(rule: Rule): Promise<void> {
+    const confirmed = window.confirm(`确认删除规则「${rule.name}」？此操作不可撤销。`);
+    if (!confirmed) return;
+
+    setBusy(true);
+    try {
+      const state = await runtimeRequest<UpsertMutationResponse>({ type: "delete-rule", ruleId: rule.id });
+      hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      setStatus(`规则「${rule.name}」已删除。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "删除规则失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function toggleRule(rule: Rule): Promise<void> {
     setBusy(true);
     try {
@@ -879,21 +1022,47 @@ function App() {
     );
   }
 
-  async function exportWorkspace(projectId: string): Promise<void> {
+  async function exportWorkspace(projectIds: string[]): Promise<void> {
     setBusy(true);
     try {
       const response = await runtimeRequest<ExportWorkspaceRuntimeResponse>({
         type: "export-workspace",
-        projectId,
+        projectIds,
         format: exportFormat,
       });
       setExportText(response.content);
-      setStatus(`已导出站点规则（${response.format.toUpperCase()}）。`);
+      const label = projectIds.length === 0
+        ? "全部站点"
+        : projectIds.length === 1
+          ? `站点「${projects.find((p) => p.id === projectIds[0])?.name ?? ""}」`
+          : `${projectIds.length} 个站点`;
+      setStatus(`已导出${label}的规则（${response.format.toUpperCase()}）。`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "导出失败。");
     } finally {
       setBusy(false);
     }
+  }
+
+  function copyExportToClipboard(): void {
+    if (!exportText) return;
+    void navigator.clipboard.writeText(exportText).then(
+      () => setStatus("已复制到剪贴板。"),
+      () => setStatus("复制失败，请手动选择并复制。"),
+    );
+  }
+
+  function downloadExportFile(): void {
+    if (!exportText) return;
+    const ext = exportFormat === "json" ? "json" : "yaml";
+    const blob = new Blob([exportText], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `resource-proxy-export-${new Date().toISOString().slice(0, 10)}.${ext}`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setStatus(`已下载导出文件。`);
   }
 
   // ── RENDER ──────────────────────────────────────────────────────────────
@@ -1043,18 +1212,18 @@ function App() {
         {/* Toolbar */}
         <div className="page-toolbar">
           <div className="toolbar-filters">
-            <select
-              className="toolbar-select"
+            <CustomSelect
+              className="cs-wide"
               value={selectedProjectId}
-              onChange={(e) => setSelectedProjectId(e.target.value)}
-            >
-              <option value="">全部分组</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}{p.enabled ? "" : "（已停用）"}
-                </option>
-              ))}
-            </select>
+              options={[
+                { value: "", label: "全部分组" },
+                ...projects.map((p) => ({
+                  value: p.id,
+                  label: `${p.name}${p.enabled ? "" : "（已停用）"}`,
+                })),
+              ]}
+              onChange={setSelectedProjectId}
+            />
             {selectedProject && (
               <div className="toolbar-group-actions">
                 <button
@@ -1092,15 +1261,15 @@ function App() {
               </div>
             )}
 
-            <select
-              className="toolbar-select"
+            <CustomSelect
               value={ruleKindFilter}
-              onChange={(e) => setRuleKindFilter(e.target.value as "all" | Rule["kind"])}
-            >
-              <option value="all">全部类型</option>
-              <option value="api_forward">API 转发</option>
-              <option value="asset_redirect">资源替换</option>
-            </select>
+              options={[
+                { value: "all", label: "全部类型" },
+                { value: "api_forward", label: "API 转发" },
+                { value: "asset_redirect", label: "资源替换" },
+              ]}
+              onChange={(v) => setRuleKindFilter(v as "all" | Rule["kind"])}
+            />
 
             <div className="toolbar-divider" />
 
@@ -1205,7 +1374,7 @@ function App() {
                     <th>代理资源</th>
                     <th style={{ width: 100 }}>分组</th>
                     <th style={{ width: 140 }}>更新时间</th>
-                    <th style={{ width: 88 }}>操作</th>
+                    <th style={{ width: 112 }}>操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1284,6 +1453,17 @@ function App() {
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                               <rect x="9" y="9" width="13" height="13" rx="2" />
                               <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                            </svg>
+                          </button>
+                          <button
+                            className="btn-icon btn-icon-danger"
+                            title="删除"
+                            onClick={() => void deleteRule(rule)}
+                            disabled={busy}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <polyline points="3 6 5 6 21 6" />
+                              <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
                             </svg>
                           </button>
                         </div>
@@ -1830,52 +2010,130 @@ function App() {
           <div className="io-card">
             <div className="io-card-header">
               <div className="io-card-title">导出规则</div>
-              <div className="io-card-desc">导出当前选中站点的规则配置，用于备份或分享</div>
+              <div className="io-card-desc">导出全部或选中站点的规则配置，用于备份或分享</div>
             </div>
             <div className="io-card-body">
-              <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
-                <div className="form-group" style={{ flex: 1 }}>
-                  <label className="form-label">站点</label>
-                  <select
-                    className="form-select"
-                    value={selectedProjectId}
-                    onChange={(e) => setSelectedProjectId(e.target.value)}
-                  >
-                    {projects.length === 0 && <option value="">请先创建站点</option>}
-                    {projects.map((p) => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="form-group" style={{ flex: 1 }}>
-                  <label className="form-label">格式</label>
-                  <select
-                    className="form-select"
-                    value={exportFormat}
-                    onChange={(e) => setExportFormat(e.target.value as "json" | "yaml")}
-                  >
-                    <option value="yaml">YAML</option>
-                    <option value="json">JSON</option>
-                  </select>
-                </div>
+              {/* Scope selector */}
+              <div className="io-source-tabs">
                 <button
-                  className="btn btn-primary"
-                  onClick={() => selectedProject && void exportWorkspace(selectedProject.id)}
-                  disabled={busy || !selectedProject}
-                  style={{ marginBottom: 0, alignSelf: "flex-end" }}
+                  className={`io-source-tab ${exportScope === "all" ? "active" : ""}`}
+                  onClick={() => setExportScope("all")}
                 >
-                  导出
+                  全部站点
+                </button>
+                <button
+                  className={`io-source-tab ${exportScope === "selected" ? "active" : ""}`}
+                  onClick={() => setExportScope("selected")}
+                >
+                  选择站点
                 </button>
               </div>
 
+              {/* Site checklist when scope=selected */}
+              {exportScope === "selected" && (
+                <div className="export-site-checklist">
+                  {projects.length === 0 ? (
+                    <div className="export-site-empty">暂无可导出的站点，请先创建。</div>
+                  ) : (
+                    <>
+                      <label className="export-site-check-item export-site-check-all">
+                        <input
+                          type="checkbox"
+                          checked={exportSelectedIds.size === projects.length && projects.length > 0}
+                          onChange={() =>
+                            setExportSelectedIds((prev) =>
+                              prev.size === projects.length ? new Set() : new Set(projects.map((p) => p.id)),
+                            )
+                          }
+                        />
+                        <span>全选（{projects.length} 个站点）</span>
+                      </label>
+                      {projects.map((p) => {
+                        const ruleCount = ruleSets
+                          .filter((rs) => rs.projectId === p.id)
+                          .reduce((sum, rs) => sum + rs.ruleIds.length, 0);
+                        return (
+                          <label className="export-site-check-item" key={p.id}>
+                            <input
+                              type="checkbox"
+                              checked={exportSelectedIds.has(p.id)}
+                              onChange={() =>
+                                setExportSelectedIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(p.id)) next.delete(p.id);
+                                  else next.add(p.id);
+                                  return next;
+                                })
+                              }
+                            />
+                            <span className="export-site-check-name">{p.name}</span>
+                            <span className="export-site-check-meta">{ruleCount} 条规则</span>
+                          </label>
+                        );
+                      })}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Format + export button */}
+              <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
+                <div className="form-group" style={{ flex: 1 }}>
+                  <label className="form-label">格式</label>
+                  <CustomSelect
+                    className="cs-form"
+                    value={exportFormat}
+                    options={[
+                      { value: "yaml", label: "YAML" },
+                      { value: "json", label: "JSON" },
+                    ]}
+                    onChange={(v) => setExportFormat(v as "json" | "yaml")}
+                  />
+                </div>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => {
+                    const ids = exportScope === "all" ? [] : [...exportSelectedIds];
+                    if (exportScope === "selected" && ids.length === 0) {
+                      setStatus("请至少选择一个站点再导出。");
+                      return;
+                    }
+                    void exportWorkspace(ids);
+                  }}
+                  disabled={busy || projects.length === 0}
+                  style={{ marginBottom: 0, alignSelf: "flex-end" }}
+                >
+                  {exportScope === "all" ? "导出全部" : `导出选中（${exportSelectedIds.size}）`}
+                </button>
+              </div>
+
+              {/* Export result */}
               {exportText && (
-                <textarea
-                  className="io-import-textarea"
-                  style={{ minHeight: 160 }}
-                  value={exportText}
-                  onChange={(e) => setExportText(e.target.value)}
-                  readOnly
-                />
+                <>
+                  <textarea
+                    className="io-import-textarea"
+                    style={{ minHeight: 160 }}
+                    value={exportText}
+                    readOnly
+                  />
+                  <div className="io-actions">
+                    <button className="btn btn-default" onClick={copyExportToClipboard}>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 14, height: 14 }}>
+                        <rect x="9" y="9" width="13" height="13" rx="2" />
+                        <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                      </svg>
+                      复制到剪贴板
+                    </button>
+                    <button className="btn btn-default" onClick={downloadExportFile}>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 14, height: 14 }}>
+                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      下载文件
+                    </button>
+                  </div>
+                </>
               )}
             </div>
           </div>
@@ -2115,70 +2373,456 @@ function App() {
   // ── ABOUT VIEW ────────────────────────────────────────────────────────
 
   function renderAboutView() {
+    const extIcon = (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
+        <polyline points="15 3 21 3 21 9" />
+        <line x1="10" y1="14" x2="21" y2="3" />
+      </svg>
+    );
+
+    const chevronIcon = (
+      <svg className="acc-icon" viewBox="0 0 20 20" fill="currentColor">
+        <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clipRule="evenodd" />
+      </svg>
+    );
+
     return (
       <>
         <div className="page-header">
           <div className="page-title">关于</div>
-          <div className="page-subtitle">查看插件信息、文档与反馈渠道</div>
+          <div className="page-subtitle">插件信息与使用指南</div>
         </div>
 
         <div className="about-page">
-          <div className="about-logo">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 2L2 7l10 5 10-5-10-5z" />
-              <path d="M2 17l10 5 10-5" />
-              <path d="M2 12l10 5 10-5" />
-            </svg>
+          {/* ── Compact hero bar ── */}
+          <div className="about-hero">
+            <div className="about-logo">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                <path d="M2 17l10 5 10-5" />
+                <path d="M2 12l10 5 10-5" />
+              </svg>
+            </div>
+            <div className="about-hero-text">
+              <div className="about-app-name">Resource Proxy</div>
+              <div className="about-app-desc">本地资源代理插件，高效调试、预览与协作</div>
+            </div>
+            <div className="about-hero-links">
+              <a className="about-hero-link" href="https://github.com/your/resource-proxy" target="_blank" rel="noopener noreferrer">
+                源码{extIcon}
+              </a>
+              <a className="about-hero-link" href="https://github.com/your/resource-proxy/issues" target="_blank" rel="noopener noreferrer">
+                反馈{extIcon}
+              </a>
+            </div>
           </div>
 
-          <div>
-            <div className="about-app-name">Resource Proxy</div>
-            <div className="about-app-desc">本地资源代理插件，更友好地管理你的本地规则，高效调试、预览与协作。</div>
-          </div>
+          {/* ── Accordion sections ── */}
+          <div className="about-guide">
 
-          <div className="about-links">
-            <a
-              className="about-link-item"
-              href="https://github.com/your/resource-proxy"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <span>GitHub 源码</span>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
-                <polyline points="15 3 21 3 21 9" />
-                <line x1="10" y1="14" x2="21" y2="3" />
-              </svg>
-            </a>
-            <a
-              className="about-link-item"
-              href="https://docs.resource-proxy.dev"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <span>使用文档</span>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
-                <polyline points="15 3 21 3 21 9" />
-                <line x1="10" y1="14" x2="21" y2="3" />
-              </svg>
-            </a>
-            <a
-              className="about-link-item"
-              href="https://github.com/your/resource-proxy/issues"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <span>提交反馈</span>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
-                <polyline points="15 3 21 3 21 9" />
-                <line x1="10" y1="14" x2="21" y2="3" />
-              </svg>
-            </a>
+            {/* ─── 1. 核心概念 (默认展开) ─── */}
+            <details className="about-accordion" open>
+              <summary>
+                {chevronIcon}
+                <span className="acc-title">核心概念</span>
+                <span className="acc-badge">快速了解</span>
+              </summary>
+              <div className="about-accordion-body">
+                <p>插件支持两种规则类型：</p>
+                <table className="guide-table">
+                  <thead><tr><th>类型</th><th>适用场景</th><th>工作原理</th></tr></thead>
+                  <tbody>
+                    <tr><td><code>资源替换</code></td><td>JS、CSS、图片、字体等静态资源</td><td>Chrome DNR 网络层直接重定向，支持通配符</td></tr>
+                    <tr><td><code>API 转发</code></td><td>fetch / XHR 接口请求</td><td>拦截请求 → 本地服务转发 → 返回响应</td></tr>
+                  </tbody>
+                </table>
+                <div className="guide-tip">
+                  <strong>如何选择？</strong> 浏览器直接加载的资源（<code>&lt;script&gt;</code>、<code>&lt;link&gt;</code>、<code>&lt;img&gt;</code>）选<strong>资源替换</strong>；JS 代码发起的 <code>fetch</code> / <code>XHR</code> 请求选<strong>API 转发</strong>。
+                </div>
+                <h3>路径匹配语法 (pathGlob)</h3>
+                <table className="guide-table">
+                  <thead><tr><th>通配符</th><th>含义</th><th>示例</th></tr></thead>
+                  <tbody>
+                    <tr><td><code>*</code></td><td>匹配单层任意字符（不跨 <code>/</code>）</td><td><code>/assets/*.js</code> ✓ <code>app.js</code>　✗ <code>js/app.js</code></td></tr>
+                    <tr><td><code>**</code></td><td>匹配任意层级路径（跨 <code>/</code>）</td><td><code>/api/**</code> ✓ <code>users</code>　✓ <code>v2/users/list</code></td></tr>
+                  </tbody>
+                </table>
+                <h3>Host 的两个层级</h3>
+                <table className="guide-table">
+                  <thead><tr><th></th><th>资源替换</th><th>API 转发</th></tr></thead>
+                  <tbody>
+                    <tr><td><strong>规则级 Host</strong></td><td>生成 DNR <code>requestDomains</code>，只有来自这些域名的请求才触发</td><td><code>matchesHost</code> 比对请求目标域名</td></tr>
+                    <tr><td><strong>项目级 siteHosts</strong></td><td colSpan={2}>仅用于管理界面分组和新规则默认值，<strong>不参与实际请求匹配</strong></td></tr>
+                  </tbody>
+                </table>
+                <div className="guide-warn">
+                  <strong>注意：</strong>Host 匹配的是<strong>请求目标的域名</strong>，不是当前页面域名。如页面在 <code>shimodev.com</code>，JS 来自 CDN <code>as.smgv.cn</code>，则 Host 应填 <code>as.smgv.cn</code>。
+                </div>
+              </div>
+            </details>
+
+            {/* ─── 2. 工作流程 ─── */}
+            <details className="about-accordion">
+              <summary>
+                {chevronIcon}
+                <span className="acc-title">工作流程</span>
+                <span className="acc-badge">流程图</span>
+              </summary>
+              <div className="about-accordion-body">
+                <p>插件通过两条不同链路拦截和转发请求。</p>
+                {renderAssetRedirectFlow()}
+                {renderApiForwardFlow()}
+                <div className="guide-tip">
+                  <strong>关键区别：</strong>资源替换在 Chrome 网络层生效，能拦截所有类型请求（包括 <code>&lt;script&gt;</code>、<code>&lt;link&gt;</code> 标签）；API 转发在 JS 层生效，只能拦截 <code>fetch</code> / <code>XMLHttpRequest</code>。
+                </div>
+              </div>
+            </details>
+
+            {/* ─── 3. 资源替换示例 ─── */}
+            <details className="about-accordion">
+              <summary>
+                {chevronIcon}
+                <span className="acc-title">资源替换示例</span>
+                <span className="acc-badge">6 个场景</span>
+              </summary>
+              <div className="about-accordion-body">
+                <h3>1. 精确替换单个文件</h3>
+                <div className="guide-example-block">
+                  <div className="guide-example-label"><span className="example-badge badge-asset">资源替换</span>精确匹配</div>
+                  <div className="guide-example-rows">
+                    <div className="guide-example-row"><span className="guide-field">Host</span><span className="guide-value">co-dev-18.shimorelease.com</span></div>
+                    <div className="guide-example-row"><span className="guide-field">路径匹配</span><span className="guide-value">/minio/shimo-assets/table/grid-view.chunk.js</span></div>
+                    <div className="guide-example-row"><span className="guide-field">重定向 URL</span><span className="guide-value">http://localhost:8000/grid-view.chunk.js</span></div>
+                  </div>
+                  <div className="guide-note">请求精确匹配到该路径时，直接重定向到本地文件。</div>
+                </div>
+
+                <h3>2. 通配符替换一批文件（常用）</h3>
+                <div className="guide-example-block">
+                  <div className="guide-example-label"><span className="example-badge badge-asset">资源替换</span>通配符 — 批量 chunk</div>
+                  <div className="guide-example-rows">
+                    <div className="guide-example-row"><span className="guide-field">Host</span><span className="guide-value">co-dev-18.shimorelease.com</span></div>
+                    <div className="guide-example-row"><span className="guide-field">路径匹配</span><span className="guide-value">/minio/shimo-assets/table/*.chunk.js</span></div>
+                    <div className="guide-example-row"><span className="guide-field">重定向 URL</span><span className="guide-value">http://localhost:8000/*.chunk.js</span></div>
+                  </div>
+                  <div className="guide-note"><code>*</code> 在路径匹配和重定向 URL 中一一对应。请求 <code>p20.chunk.js</code> → 重定向到 <code>http://localhost:8000/p20.chunk.js</code>。</div>
+                </div>
+
+                <h3>3. 带 hash 的资源文件</h3>
+                <div className="guide-example-block">
+                  <div className="guide-example-label"><span className="example-badge badge-asset">资源替换</span>hash 文件名</div>
+                  <div className="guide-example-rows">
+                    <div className="guide-example-row"><span className="guide-field">路径匹配</span><span className="guide-value">/minio/shimo-assets/table/zebra.*.js</span></div>
+                    <div className="guide-example-row"><span className="guide-field">重定向 URL</span><span className="guide-value">http://localhost:8000/zebra.js</span></div>
+                  </div>
+                  <div className="guide-note">重定向 URL 无通配符，所有匹配都指向同一个本地文件。适合 hash 每次构建变化的场景。</div>
+                </div>
+
+                <h3>4. 替换 CSS 文件</h3>
+                <div className="guide-example-block">
+                  <div className="guide-example-label"><span className="example-badge badge-asset">资源替换</span>样式文件</div>
+                  <div className="guide-example-rows">
+                    <div className="guide-example-row"><span className="guide-field">路径匹配</span><span className="guide-value">/minio/shimo-assets/table/main.*.css</span></div>
+                    <div className="guide-example-row"><span className="guide-field">重定向 URL</span><span className="guide-value">http://localhost:8000/main.css</span></div>
+                    <div className="guide-example-row"><span className="guide-field">资源类型</span><span className="guide-value">stylesheet</span></div>
+                  </div>
+                </div>
+
+                <h3>5. 替换整个目录（** 通配）</h3>
+                <div className="guide-example-block">
+                  <div className="guide-example-label"><span className="example-badge badge-asset">资源替换</span>目录级通配</div>
+                  <div className="guide-example-rows">
+                    <div className="guide-example-row"><span className="guide-field">路径匹配</span><span className="guide-value">/static/js/**</span></div>
+                    <div className="guide-example-row"><span className="guide-field">重定向 URL</span><span className="guide-value">http://localhost:3000/static/js/**</span></div>
+                  </div>
+                  <div className="guide-note"><code>**</code> 匹配任意层级子路径。</div>
+                </div>
+
+                <h3>6. 跨 CDN 域名替换</h3>
+                <div className="guide-example-block">
+                  <div className="guide-example-label"><span className="example-badge badge-asset">资源替换</span>CDN → 本地</div>
+                  <div className="guide-example-rows">
+                    <div className="guide-example-row"><span className="guide-field">Host</span><span className="guide-value">as.smgv.cn</span></div>
+                    <div className="guide-example-row"><span className="guide-field">路径匹配</span><span className="guide-value">/table/zebra.*.js</span></div>
+                    <div className="guide-example-row"><span className="guide-field">重定向 URL</span><span className="guide-value">http://localhost:8000/zebra.js</span></div>
+                  </div>
+                  <div className="guide-note">CDN 资源也支持替换。Host 填写 CDN 域名即可。</div>
+                </div>
+              </div>
+            </details>
+
+            {/* ─── 4. API 转发示例 ─── */}
+            <details className="about-accordion">
+              <summary>
+                {chevronIcon}
+                <span className="acc-title">API 转发示例</span>
+                <span className="acc-badge">4 个场景</span>
+              </summary>
+              <div className="about-accordion-body">
+                <h3>1. 将接口转发到本地服务</h3>
+                <div className="guide-example-block">
+                  <div className="guide-example-label"><span className="example-badge badge-api">API 转发</span>基础转发</div>
+                  <div className="guide-example-rows">
+                    <div className="guide-example-row"><span className="guide-field">Host</span><span className="guide-value">app.example.com</span></div>
+                    <div className="guide-example-row"><span className="guide-field">路径匹配</span><span className="guide-value">/api/**</span></div>
+                    <div className="guide-example-row"><span className="guide-field">目标地址</span><span className="guide-value">http://localhost:3000</span></div>
+                    <div className="guide-example-row"><span className="guide-field">请求方法</span><span className="guide-value">GET, POST, PUT, DELETE</span></div>
+                  </div>
+                  <div className="guide-note"><code>/api/users/list</code> → <code>http://localhost:3000/api/users/list</code>，路径完整保留。</div>
+                </div>
+
+                <h3>2. 转发并去除路径前缀 (stripPrefix)</h3>
+                <div className="guide-example-block">
+                  <div className="guide-example-label"><span className="example-badge badge-api">API 转发</span>去除前缀</div>
+                  <div className="guide-example-rows">
+                    <div className="guide-example-row"><span className="guide-field">路径匹配</span><span className="guide-value">/gateway/user-service/**</span></div>
+                    <div className="guide-example-row"><span className="guide-field">目标地址</span><span className="guide-value">http://localhost:4000</span></div>
+                    <div className="guide-example-row"><span className="guide-field">去除前缀</span><span className="guide-value">/gateway/user-service</span></div>
+                  </div>
+                  <div className="guide-note"><code>/gateway/user-service/profile</code> → <code>http://localhost:4000/profile</code></div>
+                </div>
+
+                <h3>3. 转发到不同端口的微服务</h3>
+                <div className="guide-example-block">
+                  <div className="guide-example-label"><span className="example-badge badge-api">API 转发</span>微服务拆分</div>
+                  <div className="guide-example-rows">
+                    <div className="guide-example-row"><span className="guide-field">规则 A</span><span className="guide-value">/api/auth/** → http://localhost:4001</span></div>
+                    <div className="guide-example-row"><span className="guide-field">规则 B</span><span className="guide-value">/api/files/** → http://localhost:4002</span></div>
+                    <div className="guide-example-row"><span className="guide-field">规则 C</span><span className="guide-value">/api/collab/** → http://localhost:4003</span></div>
+                  </div>
+                  <div className="guide-note">按路径前缀分别转发到各自的本地端口。</div>
+                </div>
+
+                <h3>4. 注入自定义请求头</h3>
+                <div className="guide-example-block">
+                  <div className="guide-example-label"><span className="example-badge badge-api">API 转发</span>自定义 Headers</div>
+                  <div className="guide-example-rows">
+                    <div className="guide-example-row"><span className="guide-field">路径匹配</span><span className="guide-value">/api/internal/**</span></div>
+                    <div className="guide-example-row"><span className="guide-field">目标地址</span><span className="guide-value">http://localhost:3000</span></div>
+                    <div className="guide-example-row"><span className="guide-field">自定义头</span><span className="guide-value">{`{"X-Debug": "true", "X-User-Id": "test-123"}`}</span></div>
+                  </div>
+                  <div className="guide-note">转发时自动附加额外 Header，方便调试权限、灰度等逻辑。</div>
+                </div>
+              </div>
+            </details>
+
+            {/* ─── 5. 通配符对照表 ─── */}
+            <details className="about-accordion">
+              <summary>
+                {chevronIcon}
+                <span className="acc-title">通配符重定向对照表</span>
+                <span className="acc-badge">参考</span>
+              </summary>
+              <div className="about-accordion-body">
+                <p>资源替换的重定向 URL 中的 <code>*</code> / <code>**</code> 与路径匹配中的通配符一一对应：</p>
+                <table className="guide-table">
+                  <thead><tr><th>线上请求 URL</th><th>路径匹配</th><th>重定向 URL</th><th>实际结果</th></tr></thead>
+                  <tbody>
+                    <tr><td><code>.../table/p20.chunk.js</code></td><td><code>/.../table/*.chunk.js</code></td><td><code>http://localhost:8000/*.chunk.js</code></td><td><code>http://localhost:8000/p20.chunk.js</code></td></tr>
+                    <tr><td><code>.../table/grid.chunk.js</code></td><td><code>/.../table/*.chunk.js</code></td><td><code>http://localhost:8000/*.chunk.js</code></td><td><code>http://localhost:8000/grid.chunk.js</code></td></tr>
+                    <tr><td><code>.../table/zebra.a1b2c3.js</code></td><td><code>/.../table/zebra.*.js</code></td><td><code>http://localhost:8000/zebra.js</code></td><td><code>http://localhost:8000/zebra.js</code></td></tr>
+                    <tr><td><code>.../js/vendor/react.js</code></td><td><code>/static/js/**</code></td><td><code>http://localhost:3000/static/js/**</code></td><td><code>http://localhost:3000/static/js/vendor/react.js</code></td></tr>
+                  </tbody>
+                </table>
+                <div className="guide-tip">
+                  <strong>规律：</strong>重定向 URL 中不含通配符 → 所有匹配指向同一个固定地址；包含通配符 → 匹配内容原样填入对应位置。
+                </div>
+              </div>
+            </details>
+
+            {/* ─── 6. 常见问题 ─── */}
+            <details className="about-accordion">
+              <summary>
+                {chevronIcon}
+                <span className="acc-title">常见问题</span>
+                <span className="acc-badge">FAQ</span>
+              </summary>
+              <div className="about-accordion-body">
+                <h3>资源替换和 API 转发应该怎么选？</h3>
+                <p>
+                  浏览器通过 <code>&lt;script&gt;</code>、<code>&lt;link&gt;</code>、<code>&lt;img&gt;</code> 标签加载的资源只能用<strong>资源替换</strong>。JS 代码中 <code>fetch()</code> 或 <code>XMLHttpRequest</code> 发起的请求两种都行，但需要转发请求体或注入 Header 时选<strong>API 转发</strong>。
+                </p>
+
+                <h3>为什么我的资源规则不生效（404）？</h3>
+                <ul>
+                  <li>检查规则类型：<code>.chunk.js</code> 等脚本文件必须用<strong>资源替换</strong></li>
+                  <li>检查 Host：规则的 Host 必须与资源实际域名一致（CDN 域名可能与页面域名不同）</li>
+                  <li>检查路径匹配：在 DevTools Network 面板复制资源完整 URL 路径对照</li>
+                  <li>检查本地服务是否启动：确认 <code>localhost:端口</code> 可正常访问</li>
+                </ul>
+
+                <h3>如何调试 webpack 的动态 chunk？</h3>
+                <p>使用通配符规则：路径匹配 <code>/assets/table/*.chunk.js</code>，重定向 URL <code>http://localhost:8000/*.chunk.js</code>。所有 chunk 文件自动映射到本地。</p>
+
+                <h3>优先级怎么设置？</h3>
+                <p>数字越大优先级越高。建议：精确匹配 100、通配符 50、兜底 <code>/**</code> 设 10。</p>
+
+                <h3>从 Resource Override 导入的规则</h3>
+                <p>导入时自动识别：localhost 静态资源 → <strong>资源替换</strong>，API 路径 → <strong>API 转发</strong>。导入后可在规则列表查看和调整。</p>
+              </div>
+            </details>
+
           </div>
         </div>
       </>
+    );
+  }
+
+  // ── FLOW DIAGRAMS ───────────────────────────────────────────────────
+
+  function flowArrowRight(label?: string) {
+    return (
+      <div className="flow-arrow">
+        <div className="flow-arrow-line">
+          <svg viewBox="0 0 32 12"><line x1="0" y1="6" x2="26" y2="6" stroke="currentColor" strokeWidth="1.5" /><polygon points="26,2 32,6 26,10" fill="currentColor" /></svg>
+        </div>
+        {label && <div className="flow-arrow-text">{label}</div>}
+      </div>
+    );
+  }
+
+  function flowArrowLeft(label?: string) {
+    return (
+      <div className="flow-arrow">
+        <div className="flow-arrow-line">
+          <svg viewBox="0 0 32 12"><line x1="6" y1="6" x2="32" y2="6" stroke="currentColor" strokeWidth="1.5" strokeDasharray="3,2" /><polygon points="6,2 0,6 6,10" fill="currentColor" /></svg>
+        </div>
+        {label && <div className="flow-arrow-text">{label}</div>}
+      </div>
+    );
+  }
+
+  function renderAssetRedirectFlow() {
+    return (
+      <div className="flow-container">
+        <div className="flow-container-title">
+          <span className="flow-tag flow-tag-asset">资源替换</span>
+          asset_redirect 链路
+        </div>
+        <div className="flow-diagram">
+          <div className="flow-row">
+            <div className="flow-node node-ext">
+              <div className="flow-node-label">规则注册</div>
+              <div className="flow-node-text">match.host</div>
+              <div className="flow-node-sub">写入 requestDomains</div>
+            </div>
+            {flowArrowRight()}
+            <div className="flow-node node-ext">
+              <div className="flow-node-label">规则注册</div>
+              <div className="flow-node-text">pathGlob</div>
+              <div className="flow-node-sub">写入 urlFilter / regexFilter</div>
+            </div>
+            {flowArrowRight("注册到")}
+            <div className="flow-node node-chrome">
+              <div className="flow-node-label">Chrome</div>
+              <div className="flow-node-text">DNR 规则</div>
+              <div className="flow-node-sub">全局生效，跨标签页</div>
+            </div>
+          </div>
+          <div style={{ height: 10 }} />
+          <div className="flow-row">
+            <div className="flow-node node-browser">
+              <div className="flow-node-label">浏览器</div>
+              <div className="flow-node-text">发起请求</div>
+              <div className="flow-node-sub">&lt;script&gt; / &lt;link&gt; / &lt;img&gt;</div>
+            </div>
+            {flowArrowRight()}
+            <div className="flow-node node-chrome">
+              <div className="flow-node-label">Chrome 网络层</div>
+              <div className="flow-node-text">Host 匹配</div>
+              <div className="flow-node-sub">requestDomains 过滤</div>
+            </div>
+            {flowArrowRight("域名命中")}
+            <div className="flow-node node-chrome">
+              <div className="flow-node-label">Chrome 网络层</div>
+              <div className="flow-node-text">路径 + 类型匹配</div>
+              <div className="flow-node-sub">urlFilter + resourceTypes</div>
+            </div>
+            {flowArrowRight("全部命中")}
+            <div className="flow-node node-ext">
+              <div className="flow-node-label">重定向</div>
+              <div className="flow-node-text">替换 URL</div>
+              <div className="flow-node-sub">redirect / regexSub</div>
+            </div>
+            {flowArrowRight()}
+            <div className="flow-node node-target">
+              <div className="flow-node-label">目标</div>
+              <div className="flow-node-text">localhost</div>
+              <div className="flow-node-sub">本地开发服务</div>
+            </div>
+          </div>
+        </div>
+        <p className="about-guide" style={{ margin: 0, fontSize: 12 }}>
+          规则的 <code>match.host</code> 和 <code>pathGlob</code> 在注册时转为 Chrome DNR 条件，全局生效。
+          浏览器每次请求都会经过 Chrome 网络层，依次检查 <strong>域名</strong>（requestDomains）→
+          <strong>路径</strong>（urlFilter / regexFilter）→ <strong>资源类型</strong>（script / stylesheet / image / font），
+          全部通过才执行重定向。
+        </p>
+      </div>
+    );
+  }
+
+  function renderApiForwardFlow() {
+    return (
+      <div className="flow-container">
+        <div className="flow-container-title">
+          <span className="flow-tag flow-tag-api">API 转发</span>
+          api_forward 链路
+        </div>
+        <div className="flow-diagram">
+          <div className="flow-row">
+            <div className="flow-node node-page">
+              <div className="flow-node-label">进入页面时</div>
+              <div className="flow-node-text">按 Host 筛选</div>
+              <div className="flow-node-sub">trimWorkspaceForUrl</div>
+            </div>
+            {flowArrowRight("下发规则")}
+            <div className="flow-node node-page">
+              <div className="flow-node-label">Page Bridge</div>
+              <div className="flow-node-text">patch fetch/XHR</div>
+              <div className="flow-node-sub">只注入匹配的规则</div>
+            </div>
+          </div>
+          <div style={{ height: 10 }} />
+          <div className="flow-row">
+            <div className="flow-node node-browser">
+              <div className="flow-node-label">页面 JS</div>
+              <div className="flow-node-text">fetch / XHR</div>
+              <div className="flow-node-sub">发起接口请求</div>
+            </div>
+            {flowArrowRight("拦截")}
+            <div className="flow-node node-page">
+              <div className="flow-node-label">Page Bridge</div>
+              <div className="flow-node-text">Host + 路径匹配</div>
+              <div className="flow-node-sub">matchesHost + matchesPath</div>
+            </div>
+            {flowArrowRight("命中规则")}
+            <div className="flow-node node-ext">
+              <div className="flow-node-label">Content Script</div>
+              <div className="flow-node-text">消息中转</div>
+              <div className="flow-node-sub">→ Background</div>
+            </div>
+            {flowArrowRight("runtime")}
+            <div className="flow-node node-service">
+              <div className="flow-node-label">本地服务</div>
+              <div className="flow-node-text">/forward</div>
+              <div className="flow-node-sub">stripPrefix + 转发</div>
+            </div>
+            {flowArrowRight()}
+            <div className="flow-node node-target">
+              <div className="flow-node-label">目标</div>
+              <div className="flow-node-text">上游服务</div>
+              <div className="flow-node-sub">localhost:端口</div>
+            </div>
+          </div>
+        </div>
+        <p className="about-guide" style={{ margin: 0, fontSize: 12 }}>
+          进入页面时，Background 先按当前页面的 Host 筛选出相关规则，只下发匹配的规则给 Page Bridge。
+          随后 Page Bridge 对每个 <code>fetch</code> / <code>XHR</code> 请求再做一次 <code>matchesHost</code> + 路径匹配。
+          <strong>注意：</strong>此链路无法拦截 <code>&lt;script&gt;</code> 等浏览器直接加载的资源。
+        </p>
+      </div>
     );
   }
 

@@ -27,9 +27,10 @@ export type RuntimeRequest =
   | { type: "upsert-project"; payload: UpsertProjectPayload }
   | { type: "delete-project"; projectId: string }
   | { type: "upsert-rule"; payload: UpsertRulePayload }
+  | { type: "delete-rule"; ruleId: string }
   | { type: "get-logs"; limit?: number; projectId?: string }
   | { type: "import-workspace"; payload: ImportWorkspacePayload }
-  | { type: "export-workspace"; projectId: string; format: "json" | "yaml" }
+  | { type: "export-workspace"; projectIds: string[]; format: "json" | "yaml" }
   | { type: "get-site-context"; url: string; tabId?: number }
   | { type: "proxy-request"; payload: ForwardRequestPayload };
 
