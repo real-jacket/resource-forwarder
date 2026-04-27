@@ -139,6 +139,7 @@ summary {
   background: var(--surface);
   border-right: 1px solid var(--border);
   overflow: hidden;
+  transition: width 200ms ease;
 }
 
 .sidebar-logo {
@@ -278,6 +279,66 @@ summary {
   line-height: 1.4;
   margin-top: 4px;
   padding-left: 14px;
+}
+
+.sidebar-collapse-btn {
+  margin-top: 8px;
+  width: 100%;
+  justify-content: center;
+}
+
+.sidebar-collapse-icon {
+  transition: transform 200ms;
+}
+
+/* ── Sidebar collapsed state ── */
+
+.sidebar-collapsed .sidebar {
+  width: 56px;
+}
+
+.sidebar-collapsed .sidebar-logo-text,
+.sidebar-collapsed .sidebar-nav-label,
+.sidebar-collapsed .sidebar-status-hint {
+  display: none;
+}
+
+.sidebar-collapsed .sidebar-logo {
+  justify-content: center;
+  padding: 16px 0 14px;
+}
+
+.sidebar-collapsed .sidebar-nav {
+  padding: 10px 6px;
+  align-items: center;
+}
+
+.sidebar-collapsed .sidebar-nav-item {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  justify-content: center;
+  border-radius: var(--radius-lg);
+}
+
+.sidebar-collapsed .sidebar-nav-item svg {
+  width: 18px;
+  height: 18px;
+}
+
+.sidebar-collapsed .sidebar-footer {
+  padding: 10px 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.sidebar-collapsed .sidebar-status {
+  justify-content: center;
+}
+
+.sidebar-collapsed .sidebar-collapse-icon {
+  transform: rotate(180deg);
 }
 
 /* ===================== MAIN CONTENT ===================== */
@@ -795,6 +856,96 @@ summary {
 
 /* ===================== RULE TABLE ===================== */
 
+.site-scope-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 24px;
+  background: var(--primary-soft);
+  border-bottom: 1px solid color-mix(in srgb, var(--primary) 12%, transparent);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.site-scope-banner.is-disabled {
+  background: var(--surface-soft);
+  border-bottom-color: var(--border);
+}
+
+.site-scope-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--primary);
+  white-space: nowrap;
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.site-scope-banner.is-disabled .site-scope-label {
+  color: var(--muted);
+}
+
+.site-scope-label svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.site-scope-patterns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+}
+
+.site-scope-pattern {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid color-mix(in srgb, var(--primary) 15%, transparent);
+  border-radius: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--primary-active);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 18px;
+}
+
+.site-scope-banner.is-disabled .site-scope-pattern {
+  background: var(--bg);
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.site-scope-empty {
+  color: var(--muted);
+  font-style: italic;
+  font-size: 11px;
+}
+
+.site-scope-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  background: var(--danger-soft);
+  color: var(--danger-text);
+  border: 1px solid color-mix(in srgb, var(--danger) 15%, transparent);
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+  line-height: 18px;
+}
+
 .rule-table-container {
   flex: 1;
   overflow: auto;
@@ -813,6 +964,7 @@ summary {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
+  table-layout: fixed;
 }
 
 .rule-table th {
@@ -830,6 +982,7 @@ summary {
   padding-left: 16px;
 }
 
+
 .rule-table td {
   padding: 11px 14px;
   border-bottom: 1px solid var(--border);
@@ -840,6 +993,7 @@ summary {
 .rule-table td:first-child {
   padding-left: 16px;
 }
+
 
 .rule-table tr:last-child td {
   border-bottom: none;
@@ -930,7 +1084,6 @@ summary {
 
 /* Table cell helpers */
 .rule-name-cell {
-  max-width: 180px;
 }
 
 .rule-name-text {
@@ -989,6 +1142,7 @@ summary {
   font-size: 12px;
   color: var(--muted);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .rule-seq-text {
@@ -1000,7 +1154,13 @@ summary {
 .rule-actions-cell {
   display: flex;
   align-items: center;
-  gap: 2px;
+  justify-content: flex-end;
+  gap: 0;
+}
+
+.col-time {
+  padding-left: 8px !important;
+  padding-right: 8px !important;
 }
 
 /* ===================== TABLE FOOTER / PAGINATION ===================== */
@@ -3322,6 +3482,16 @@ details[open] .import-preview-warnings-summary::before {
 @media (max-width: 1100px) {
   :root {
     --panel-width: 360px;
+  }
+
+  .rule-table .col-time {
+    display: none;
+  }
+}
+
+@media (max-width: 960px) {
+  .rule-table .col-seq {
+    display: none;
   }
 }
 

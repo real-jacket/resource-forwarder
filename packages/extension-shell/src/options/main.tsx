@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client";
 import {
   collectRuleConflicts,
   collectUnsupportedRuleWarnings,
+  deriveSiteHosts,
+  matchesProjectSite,
   parseResourceOverrideExport,
   serializeWorkspace,
   sortRules,
@@ -33,7 +35,7 @@ type ImportSource = "workspace" | "resource-override";
 interface ProjectDraft {
   id: string;
   name: string;
-  siteHosts: string;
+  siteMatchPatterns: string;
   envLabel: string;
   note: string;
   enabled: boolean;
@@ -81,7 +83,7 @@ const defaultAssetTypes: MatchResourceType[] = ["script", "stylesheet", "image",
 const emptyProjectDraft = (): ProjectDraft => ({
   id: "",
   name: "",
-  siteHosts: "",
+  siteMatchPatterns: "",
   envLabel: "",
   note: "",
   enabled: true,
@@ -281,6 +283,7 @@ function App() {
   const [selectedProjectIds, setSelectedProjectIds] = useState<Set<string>>(new Set());
   const [siteStatusFilter, setSiteStatusFilter] = useState<"all" | "enabled" | "disabled">("all");
   const [siteQuery, setSiteQuery] = useState("");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [status, setStatus] = useState("正在加载规则...");
   const [busy, setBusy] = useState(false);
   const deferredRuleQuery = useDeferredValue(ruleQuery.trim().toLowerCase());
@@ -296,12 +299,13 @@ function App() {
   const logs = dashboard?.logs ?? [];
   const currentHost = dashboard?.currentTab?.host ?? "";
 
+  const currentUrl = dashboard?.currentTab?.url ?? "";
   const selectedProject = useMemo(
     () =>
       projects.find((p) => p.id === selectedProjectId) ??
-      projects.find((p) => p.siteHosts.includes(currentHost)) ??
+      (currentUrl ? projects.find((p) => matchesProjectSite(p, currentUrl)) : undefined) ??
       projects[0],
-    [projects, selectedProjectId, currentHost],
+    [projects, selectedProjectId, currentUrl],
   );
 
   const selectedProjectRuleSets = useMemo(
@@ -355,7 +359,7 @@ function App() {
       if (siteStatusFilter === "enabled" && !project.enabled) return false;
       if (siteStatusFilter === "disabled" && project.enabled) return false;
       if (deferredSiteQuery) {
-        const text = [project.name, ...project.siteHosts, project.envLabel ?? ""].join(" ").toLowerCase();
+        const text = [project.name, ...project.siteHosts, ...(project.siteMatchPatterns ?? []), project.envLabel ?? ""].join(" ").toLowerCase();
         return text.includes(deferredSiteQuery);
       }
       return true;
@@ -424,9 +428,8 @@ function App() {
     setServiceUrl(state.serviceUrl);
     setSelectedProjectId((current) => {
       if (current && state.workspace.projects.some((p) => p.id === current)) return current;
-      const matched = state.workspace.projects.find((p) =>
-        p.siteHosts.includes(state.currentTab?.host ?? ""),
-      );
+      const tabUrl = state.currentTab?.url ?? "";
+      const matched = tabUrl ? state.workspace.projects.find((p) => matchesProjectSite(p, tabUrl)) : undefined;
       return matched?.id ?? state.workspace.projects[0]?.id ?? "";
     });
   }
@@ -520,12 +523,14 @@ function App() {
       const projectId = projectDraft.id || createId("project");
       const existingRuleSets =
         dashboard?.workspace.ruleSets.filter((rs) => rs.projectId === projectId) ?? [];
+      const siteMatchPatterns = splitCsv(projectDraft.siteMatchPatterns);
       const payload = {
         project: {
           id: projectId,
           name: projectDraft.name.trim(),
           enabled: projectDraft.enabled,
-          siteHosts: splitCsv(projectDraft.siteHosts),
+          siteHosts: deriveSiteHosts(siteMatchPatterns),
+          siteMatchPatterns,
           envLabel: projectDraft.envLabel.trim() || undefined,
           note: projectDraft.note.trim() || undefined,
           tags: [],
@@ -974,7 +979,7 @@ function App() {
                     <div className="import-preview-site-name">{project.name}</div>
                     <div className="import-preview-site-meta">
                       <span className="import-preview-site-host">
-                        {project.siteHosts.join(", ") || "-"}
+                        {(project.siteMatchPatterns ?? project.siteHosts).join(", ") || "-"}
                       </span>
                       <span className={`import-preview-badge ${project.enabled ? "success" : "muted"}`} style={{ fontSize: 11 }}>
                         {project.enabled ? "启用" : "停用"}
@@ -999,7 +1004,7 @@ function App() {
                         <tbody>
                           {projectRules.map((rule) => {
                             const ruleHosts = rule.match.host.filter((h) => h !== "*");
-                            const isSameOrigin = ruleHosts.length > 0 && ruleHosts.every((h) => project.siteHosts.includes(h));
+                            const isSameOrigin = ruleHosts.length > 0 && ruleHosts.every((h) => project.siteHosts.includes(h) || (project.siteMatchPatterns ?? []).some((p) => p.includes(h)));
                             return (
                             <tr key={rule.id}>
                               <td className="import-preview-path">
@@ -1130,7 +1135,7 @@ function App() {
   // ── RENDER ──────────────────────────────────────────────────────────────
 
   return (
-    <div className="options-layout">
+    <div className={`options-layout ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       {/* Sidebar */}
       <nav className="sidebar">
         <div className="sidebar-logo">
@@ -1151,6 +1156,7 @@ function App() {
           <button
             className={`sidebar-nav-item ${view === "rules" ? "active" : ""}`}
             onClick={() => setView("rules")}
+            title="规则列表"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="3" y="3" width="7" height="7" />
@@ -1158,56 +1164,71 @@ function App() {
               <rect x="3" y="14" width="7" height="7" />
               <rect x="14" y="14" width="7" height="7" />
             </svg>
-            规则列表
+            <span className="sidebar-nav-label">规则列表</span>
           </button>
           <button
             className={`sidebar-nav-item ${view === "import-export" ? "active" : ""}`}
             onClick={() => setView("import-export")}
+            title="导入导出"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
               <polyline points="17 8 12 3 7 8" />
               <line x1="12" y1="3" x2="12" y2="15" />
             </svg>
-            导入导出
+            <span className="sidebar-nav-label">导入导出</span>
           </button>
           <button
             className={`sidebar-nav-item ${view === "settings" ? "active" : ""}`}
             onClick={() => setView("settings")}
+            title="设置"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="3" />
               <path d="M19.07 4.93l-1.41 1.41M4.93 4.93l1.41 1.41M19.07 19.07l-1.41-1.41M4.93 19.07l1.41-1.41M12 2v2M12 20v2M2 12h2M20 12h2" />
             </svg>
-            设置
+            <span className="sidebar-nav-label">设置</span>
           </button>
           <button
             className={`sidebar-nav-item ${view === "about" ? "active" : ""}`}
             onClick={() => setView("about")}
+            title="关于"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10" />
               <line x1="12" y1="8" x2="12" y2="12" />
               <line x1="12" y1="16" x2="12.01" y2="16" />
             </svg>
-            关于
+            <span className="sidebar-nav-label">关于</span>
           </button>
         </div>
 
         <div className="sidebar-footer">
           <div className={`sidebar-status ${dashboard?.health ? "online" : "offline"}`}>
             <span className="sidebar-status-dot" />
-            {dashboard?.health
-              ? `服务已连接 :${servicePort}`
-              : "离线模式（本地存储）"}
+            <span className="sidebar-nav-label">
+              {dashboard?.health
+                ? `服务已连接 :${servicePort}`
+                : "离线模式（本地存储）"}
+            </span>
           </div>
           {!dashboard?.health && rules.length > 0 && (
-            <div className="sidebar-status-hint">
+            <div className="sidebar-status-hint sidebar-nav-label">
               {dashboard?.warnings?.some((w) => w.includes("离线模式"))
                 ? `${rules.length} 条规则已缓存，服务恢复后自动同步`
                 : "启动本地服务后数据将自动同步"}
             </div>
           )}
+          <button
+            className="btn-icon sidebar-collapse-btn"
+            onClick={() => setSidebarCollapsed((v) => !v)}
+            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="sidebar-collapse-icon">
+              <polyline points="11 17 6 12 11 7" />
+              <polyline points="18 17 13 12 18 7" />
+            </svg>
+          </button>
         </div>
       </nav>
 
@@ -1384,6 +1405,29 @@ function App() {
           </div>
         </div>
 
+        {/* Site scope banner */}
+        {selectedProject && (
+          <div className={`site-scope-banner${selectedProject.enabled ? "" : " is-disabled"}`}>
+            <div className="site-scope-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10A15.3 15.3 0 0 1 12 2z" />
+              </svg>
+              站点匹配
+            </div>
+            <div className="site-scope-patterns">
+              {(selectedProject.siteMatchPatterns ?? []).length > 0
+                ? (selectedProject.siteMatchPatterns ?? []).map((p, i) => (
+                    <span className="site-scope-pattern" key={i}>{p}</span>
+                  ))
+                : <span className="site-scope-empty">未设置（全局生效）</span>}
+            </div>
+            {!selectedProject.enabled && (
+              <span className="site-scope-status">已停用</span>
+            )}
+          </div>
+        )}
+
         {/* Table */}
         <div className="rule-table-container">
           {!hasRules ? (
@@ -1441,14 +1485,13 @@ function App() {
                 <thead>
                   <tr>
                     <th style={{ width: 48 }}></th>
-                    <th style={{ width: 40 }}>总序</th>
-                    <th>规则名称</th>
-                    <th style={{ width: 96 }}>匹配类型</th>
-                    <th>匹配规则</th>
+                    <th className="col-seq" style={{ width: 40 }}>总序</th>
+                    <th style={{ width: "15%" }}>规则名称</th>
+                    <th style={{ width: 80 }}>匹配类型</th>
+                    <th style={{ width: "22%" }}>匹配规则</th>
                     <th>代理资源</th>
-                    <th style={{ width: 100 }}>分组</th>
-                    <th style={{ width: 140 }}>更新时间</th>
-                    <th style={{ width: 112 }}>操作</th>
+                    <th className="col-time" style={{ width: 110 }}>更新时间</th>
+                    <th className="col-actions" style={{ width: 120 }}>操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1465,7 +1508,7 @@ function App() {
                           <span className="toggle-track" />
                         </label>
                       </td>
-                      <td>
+                      <td className="col-seq">
                         <span className="rule-seq-text">{index + 1}</span>
                       </td>
                       <td className="rule-name-cell">
@@ -1491,23 +1534,10 @@ function App() {
                           {formatRuleTarget(rule)}
                         </span>
                       </td>
-                      <td>
-                        {project ? (
-                          <span
-                            className="rule-group-tag clickable"
-                            title={`筛选「${project.name}」分组`}
-                            onClick={() => setSelectedProjectId(project.id)}
-                          >
-                            {project.name}
-                          </span>
-                        ) : (
-                          <span className="rule-seq-text">—</span>
-                        )}
+                      <td className="col-time">
+                        <span className="rule-time-text" title={formatTimestamp(rule.updatedAt)}>{formatTimestamp(rule.updatedAt, true)}</span>
                       </td>
-                      <td>
-                        <span className="rule-time-text">{formatTimestamp(rule.updatedAt)}</span>
-                      </td>
-                      <td>
+                      <td className="col-actions">
                         <div className="rule-actions-cell">
                           <button
                             className="btn-icon"
@@ -1737,7 +1767,7 @@ function App() {
                   className="form-input"
                   value={ruleDraft.host}
                   onChange={(e) => setRuleDraft((v) => ({ ...v, host: e.target.value }))}
-                  placeholder={selectedProject ? joinCsv(selectedProject.siteHosts) : "app.example.com"}
+                  placeholder={selectedProject ? joinCsv(selectedProject.siteHosts) : "as.smgv.cn, cdn.example.com"}
                 />
               </div>
 
@@ -2375,7 +2405,7 @@ function App() {
                 const ruleCount = ruleSets
                   .filter((rs) => rs.projectId === project.id)
                   .reduce((sum, rs) => sum + rs.ruleIds.length, 0);
-                const isActive = project.siteHosts.includes(currentHost);
+                const isActive = currentUrl ? matchesProjectSite(project, currentUrl) : false;
                 const isChecked = selectedProjectIds.has(project.id);
                 return (
                   <div className={`site-list-item${isChecked ? " is-selected" : ""}${!project.enabled ? " is-disabled" : ""}`} key={project.id}>
@@ -2397,7 +2427,7 @@ function App() {
                         )}
                       </div>
                       <div className="site-list-meta">
-                        <span className="site-list-hosts">{joinCsv(project.siteHosts) || "未填写 Host"}</span>
+                        <span className="site-list-hosts">{joinCsv(project.siteMatchPatterns ?? project.siteHosts) || "未填写站点匹配"}</span>
                         <span className="site-list-dot">·</span>
                         <span>{ruleCount} 条规则</span>
                       </div>
@@ -2567,16 +2597,16 @@ function App() {
                     <tr><td><code>**</code></td><td>匹配任意层级路径（跨 <code>/</code>）</td><td><code>/api/**</code> ✓ <code>users</code>　✓ <code>v2/users/list</code></td></tr>
                   </tbody>
                 </table>
-                <h3>Host 的两个层级</h3>
+                <h3>站点匹配 vs 规则 Host</h3>
                 <table className="guide-table">
-                  <thead><tr><th></th><th>资源替换</th><th>API 转发</th></tr></thead>
+                  <thead><tr><th></th><th>作用</th><th>示例</th></tr></thead>
                   <tbody>
-                    <tr><td><strong>规则级 Host</strong></td><td>生成 DNR <code>requestDomains</code>，只有来自这些域名的请求才触发</td><td><code>matchesHost</code> 比对请求目标域名</td></tr>
-                    <tr><td><strong>项目级 siteHosts</strong></td><td colSpan={2}>仅用于管理界面分组和新规则默认值，<strong>不参与实际请求匹配</strong></td></tr>
+                    <tr><td><strong>站点匹配</strong></td><td>控制<strong>在哪些页面上</strong>生效（页面 URL 匹配时才激活规则）</td><td><code>https://shimo.im/tables/*</code></td></tr>
+                    <tr><td><strong>规则级 Host</strong></td><td>控制<strong>拦截哪个域名</strong>的请求（请求目标域名）</td><td><code>as.smgv.cn</code></td></tr>
                   </tbody>
                 </table>
                 <div className="guide-warn">
-                  <strong>注意：</strong>Host 匹配的是<strong>请求目标的域名</strong>，不是当前页面域名。如页面在 <code>shimodev.com</code>，JS 来自 CDN <code>as.smgv.cn</code>，则 Host 应填 <code>as.smgv.cn</code>。
+                  <strong>注意：</strong>站点匹配的是<strong>当前页面的 URL</strong>，规则 Host 匹配的是<strong>请求目标的域名</strong>。例如：页面在 <code>shimo.im</code>，JS 来自 CDN <code>as.smgv.cn</code>，则站点匹配填 <code>https://shimo.im/*</code>，规则 Host 填 <code>as.smgv.cn</code>。
                 </div>
               </div>
             </details>
@@ -2976,14 +3006,14 @@ function App() {
             </div>
 
             <div className="form-group">
-              <label className="form-label">Host 列表</label>
+              <label className="form-label">站点匹配</label>
               <input
                 className="form-input"
-                value={projectDraft.siteHosts}
-                onChange={(e) => setProjectDraft((v) => ({ ...v, siteHosts: e.target.value }))}
-                placeholder="app.example.com, admin.example.com"
+                value={projectDraft.siteMatchPatterns}
+                onChange={(e) => setProjectDraft((v) => ({ ...v, siteMatchPatterns: e.target.value }))}
+                placeholder="https://shimo.im/tables/*, https://shimodev.com/*"
               />
-              <span className="form-hint">多个 Host 用逗号分隔</span>
+              <span className="form-hint">规则仅在当前页面匹配此模式时生效，多个用逗号分隔。支持 * 通配符</span>
             </div>
 
             <div className="form-row">
@@ -3119,7 +3149,7 @@ function fromProject(project: Project): ProjectDraft {
   return {
     id: project.id,
     name: project.name,
-    siteHosts: joinCsv(project.siteHosts),
+    siteMatchPatterns: joinCsv(project.siteMatchPatterns ?? project.siteHosts.map((h) => `https://${h}/*`)),
     envLabel: project.envLabel ?? "",
     note: project.note ?? "",
     enabled: project.enabled,
@@ -3198,10 +3228,15 @@ function formatRuleTarget(rule: Rule): string {
   return rule.target.forwardProfile?.targetBaseUrl || "未填写目标地址";
 }
 
-function formatTimestamp(value?: string): string {
+function formatTimestamp(value?: string, short = false): string {
   if (!value) return "—";
   const d = new Date(value);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  if (short) return `${mm}-${dd} ${hh}:${mi}`;
+  return `${d.getFullYear()}-${mm}-${dd} ${hh}:${mi}`;
 }
 
 function localizeWarning(value: string): string {

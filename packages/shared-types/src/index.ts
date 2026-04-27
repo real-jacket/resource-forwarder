@@ -25,6 +25,7 @@ export interface Project {
   name: string;
   enabled: boolean;
   siteHosts: string[];
+  siteMatchPatterns?: string[];
   envLabel?: string;
   tags: string[];
   note?: string;
@@ -217,6 +218,8 @@ export interface DynamicRedirectRule {
     regexFilter?: string;
     urlFilter?: string;
     requestDomains?: string[];
+    initiatorDomains?: string[];
+    tabIds?: number[];
     resourceTypes?: Array<"script" | "stylesheet" | "image" | "font">;
   };
 }

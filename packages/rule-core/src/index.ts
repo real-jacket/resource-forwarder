@@ -159,11 +159,14 @@ export function parseResourceOverrideExport(content: string): {
     const ruleSetId = `ro-ruleset-${stablePositiveHash(`${domain.id ?? domainLabel}-ruleset`)}`;
     const ruleIds: string[] = [];
 
+    const siteMatchPatterns = domainScope ? [domainScope] : [];
+
     workspace.projects.push({
       id: projectId,
       name: buildImportedProjectName(siteHosts[0] ?? domainLabel),
       enabled: domain.on !== false,
       siteHosts,
+      siteMatchPatterns,
       envLabel: "resource-override",
       note: `Imported from Resource Override domain ${domainLabel}`,
       tags: ["resource-override-import"],
@@ -225,11 +228,16 @@ export function assertWorkspace(value: unknown): WorkspaceSnapshot {
   return {
     version: typeof candidate.version === "number" ? candidate.version : 1,
     updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : new Date().toISOString(),
-    projects: candidate.projects.map((project) => ({
-      ...project,
-      tags: Array.isArray(project.tags) ? project.tags : [],
-      siteHosts: Array.isArray(project.siteHosts) ? project.siteHosts : [],
-    })),
+    projects: candidate.projects.map((project) => {
+      const tags = Array.isArray(project.tags) ? project.tags : [];
+      const siteHosts = Array.isArray(project.siteHosts) ? project.siteHosts : [];
+      const siteMatchPatterns = Array.isArray(project.siteMatchPatterns) && project.siteMatchPatterns.length > 0
+        ? project.siteMatchPatterns
+        : siteHosts.length > 0
+          ? siteHosts.map((h: string) => h === "*" ? "*" : `https://${h}/*`)
+          : [];
+      return { ...project, tags, siteHosts, siteMatchPatterns };
+    }),
     ruleSets: candidate.ruleSets.map((ruleSet) => ({
       ...ruleSet,
       ruleIds: Array.isArray(ruleSet.ruleIds) ? ruleSet.ruleIds : [],
@@ -331,10 +339,10 @@ export function collectWorkspaceWarnings(workspace: WorkspaceSnapshot): string[]
 export function toDynamicNetRequestRules(workspace: WorkspaceSnapshot): DynamicRedirectRule[] {
   return getEnabledRuleBindings(workspace, "asset_redirect")
     .filter((binding) => Boolean(binding.rule.target.redirectUrl))
-    .map((binding) => toDynamicRule(binding.rule));
+    .map((binding) => toDynamicRule(binding.rule, binding.project?.siteHosts));
 }
 
-export function toDynamicRule(rule: Rule): DynamicRedirectRule {
+export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicRedirectRule {
   const hasSpecificTypes = rule.match.resourceType && rule.match.resourceType.length > 0;
   const resourceTypes = hasSpecificTypes
     ? rule.match.resourceType!
@@ -343,6 +351,7 @@ export function toDynamicRule(rule: Rule): DynamicRedirectRule {
     : undefined;
 
   const redirectUrl = rule.target.redirectUrl ?? "";
+  const initiatorDomains = resolveInitiatorDomains(projectSiteHosts, rule.match.host);
 
   if (redirectUrl.includes("*")) {
     const wildcard = buildWildcardRedirect(rule.match, redirectUrl);
@@ -356,6 +365,7 @@ export function toDynamicRule(rule: Rule): DynamicRedirectRule {
       condition: {
         regexFilter: wildcard.regexFilter,
         ...(wildcard.requestDomains ? { requestDomains: wildcard.requestDomains } : {}),
+        ...(initiatorDomains ? { initiatorDomains } : {}),
         ...(resourceTypes && resourceTypes.length > 0 ? { resourceTypes } : {}),
       },
     };
@@ -371,9 +381,43 @@ export function toDynamicRule(rule: Rule): DynamicRedirectRule {
     },
     condition: {
       ...condition,
+      ...(initiatorDomains ? { initiatorDomains } : {}),
       ...(resourceTypes && resourceTypes.length > 0 ? { resourceTypes } : {}),
     },
   };
+}
+
+/**
+ * Derive `initiatorDomains` for a DNR rule from the project's siteHosts.
+ *
+ * `initiatorDomains` limits the rule to only intercept requests initiated by
+ * pages on these domains — mirroring Resource Override's matchUrl behaviour
+ * where rules are scoped to the page you're browsing, not every page.
+ *
+ * Returns undefined (no restriction) when:
+ * - siteHosts is not provided or empty
+ * - siteHosts contains the wildcard "*"
+ * - siteHosts only lists the same hosts as the rule's own match.host
+ *   (self-referential: the rule targets the same domain the page is on)
+ */
+function resolveInitiatorDomains(
+  projectSiteHosts: string[] | undefined,
+  ruleMatchHosts: string[],
+): string[] | undefined {
+  if (!projectSiteHosts || projectSiteHosts.length === 0) {
+    return undefined;
+  }
+
+  if (projectSiteHosts.includes("*")) {
+    return undefined;
+  }
+
+  const concrete = projectSiteHosts.filter((h) => h !== "*" && !h.startsWith("*."));
+  if (concrete.length === 0) {
+    return undefined;
+  }
+
+  return concrete;
 }
 
 /**
@@ -544,6 +588,88 @@ export function matchesTabScope(match: MatchCondition, tabId?: number): boolean 
   }
 
   return match.tabScope.tabIds.includes(tabId);
+}
+
+/**
+ * Derive `siteHosts` from `siteMatchPatterns`.
+ *
+ * Extracts the host portion from each URL pattern so downstream consumers
+ * (DNR `initiatorDomains`, UI display, fallback matching) always stay in
+ * sync with the canonical patterns the user edits.
+ */
+export function deriveSiteHosts(patterns: string[]): string[] {
+  const hosts = new Set<string>();
+  for (const pattern of patterns) {
+    const trimmed = pattern.trim();
+    if (!trimmed || trimmed === "*" || trimmed === "<all_urls>") {
+      hosts.add("*");
+      continue;
+    }
+    const m = trimmed.match(/^(?:\*|https?):\/\/([^/]+)/i);
+    if (m?.[1]) {
+      hosts.add(normalizeImportedHost(m[1]));
+    }
+  }
+  return Array.from(hosts);
+}
+
+/**
+ * Check whether a page URL matches a project's site scope.
+ *
+ * Match logic (mirrors Resource Override's matchUrl semantics):
+ * 1. If siteMatchPatterns is non-empty, at least one pattern must match the URL.
+ * 2. Otherwise fall back to siteHosts — page host must be in the list.
+ * 3. If both are empty/wildcard, the project matches all pages.
+ */
+export function matchesProjectSite(project: { siteHosts: string[]; siteMatchPatterns?: string[] }, pageUrl: string): boolean {
+  const patterns = project.siteMatchPatterns ?? [];
+  if (patterns.length > 0) {
+    return patterns.some((pattern) => matchesSitePattern(pattern, pageUrl));
+  }
+
+  if (project.siteHosts.length === 0 || project.siteHosts.includes("*")) {
+    return true;
+  }
+
+  try {
+    const host = new URL(pageUrl).host;
+    return matchesHost(project.siteHosts, host);
+  } catch {
+    return false;
+  }
+}
+
+function matchesSitePattern(pattern: string, pageUrl: string): boolean {
+  const trimmed = pattern.trim();
+  if (!trimmed || trimmed === "*" || trimmed === "<all_urls>") {
+    return true;
+  }
+
+  const patternUrlMatch = trimmed.match(/^(\*|https?):\/\/([^/]*)(\/.*)?$/i);
+  if (!patternUrlMatch) {
+    return false;
+  }
+
+  const [, patternScheme, patternHost, patternPath] = patternUrlMatch;
+
+  let url: URL;
+  try {
+    url = new URL(pageUrl);
+  } catch {
+    return false;
+  }
+
+  if (patternScheme !== "*" && url.protocol !== `${patternScheme}:`) {
+    return false;
+  }
+
+  if (patternHost !== "*" && !matchesHost([patternHost!], url.host)) {
+    return false;
+  }
+
+  const pathGlob = patternPath || "/**";
+  const normalizedGlob = pathGlob.endsWith("*") ? pathGlob : `${pathGlob}**`;
+  return matchesPath(normalizedGlob, url.pathname);
 }
 
 export function trimWorkspaceForUrl(workspace: WorkspaceSnapshot, urlString: string, tabId?: number): WorkspaceSnapshot {

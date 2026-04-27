@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Rule, WorkspaceSnapshot } from "@resource-forwarder/shared-types";
 import {
   collectUnsupportedRuleWarnings,
+  matchesProjectSite,
   parseWorkspace,
   parseResourceOverrideExport,
   pickMatchingRule,
@@ -62,6 +63,7 @@ const workspace: WorkspaceSnapshot = {
       name: "App",
       enabled: true,
       siteHosts: ["app.example.com"],
+      siteMatchPatterns: ["https://app.example.com/*"],
       tags: [],
       createdAt: "2024-01-01T00:00:00.000Z",
       updatedAt: "2024-01-01T00:00:00.000Z",
@@ -103,10 +105,11 @@ describe("rule-core", () => {
     expect(parseWorkspace(yaml)).toEqual(workspace);
   });
 
-  it("creates dynamic DNR rules for asset redirects", () => {
+  it("creates dynamic DNR rules for asset redirects with initiatorDomains from project siteHosts", () => {
     const rules = toDynamicNetRequestRules(workspace);
     expect(rules).toHaveLength(1);
     expect(rules[0]?.action.redirect.url).toContain("https://cdn.example.com");
+    expect(rules[0]?.condition.initiatorDomains).toEqual(["app.example.com"]);
   });
 
   it("creates regexFilter + regexSubstitution for wildcard redirectUrl", () => {
@@ -352,5 +355,115 @@ describe("rule-core", () => {
     expect(imported.rules).toHaveLength(2);
     expect(imported.rules[0]?.match.host).toEqual(["cdn.example.com"]);
     expect(imported.rules[1]?.match.host).toEqual(["shimodev.com"]);
+  });
+
+  it("preserves siteMatchPatterns from matchUrl during import", () => {
+    const payload = JSON.stringify({
+      v: 2,
+      data: [
+        {
+          id: "scoped",
+          matchUrl: "https://shimo.im/tables/*",
+          on: true,
+          rules: [
+            {
+              type: "normalOverride",
+              match: "https://as.smgv.cn/table/zebra.*.js",
+              replace: "http://localhost:8000/zebra.js",
+              on: true,
+            },
+          ],
+        },
+      ],
+    });
+
+    const { workspace: imported } = parseResourceOverrideExport(payload);
+    expect(imported.projects[0]?.siteMatchPatterns).toEqual(["https://shimo.im/tables/*"]);
+    expect(imported.projects[0]?.siteHosts).toEqual(["shimo.im"]);
+  });
+
+  it("generates initiatorDomains from project siteHosts for cross-origin CDN rules", () => {
+    const crossOriginWorkspace: WorkspaceSnapshot = {
+      version: 1,
+      updatedAt: "2024-01-01T00:00:00.000Z",
+      projects: [
+        {
+          id: "p1",
+          name: "shimo.im",
+          enabled: true,
+          siteHosts: ["shimo.im"],
+          siteMatchPatterns: ["https://shimo.im/tables/*"],
+          tags: [],
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        },
+      ],
+      ruleSets: [
+        {
+          id: "rs1",
+          projectId: "p1",
+          name: "Default",
+          enabled: true,
+          ruleIds: ["r1"],
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        },
+      ],
+      rules: [
+        {
+          id: "r1",
+          name: "Zebra redirect",
+          enabled: true,
+          kind: "asset_redirect",
+          priority: 100,
+          match: {
+            host: ["as.smgv.cn"],
+            pathGlob: "/table/zebra.*.js",
+            resourceType: ["script"],
+            tabScope: { mode: "all" },
+          },
+          target: { redirectUrl: "http://localhost:8000/zebra.js" },
+          tags: [],
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+
+    const rules = toDynamicNetRequestRules(crossOriginWorkspace);
+    expect(rules).toHaveLength(1);
+    expect(rules[0]?.condition.requestDomains).toEqual(["as.smgv.cn"]);
+    expect(rules[0]?.condition.initiatorDomains).toEqual(["shimo.im"]);
+  });
+
+  it("omits initiatorDomains when project siteHosts contains wildcard", () => {
+    const globalWorkspace: WorkspaceSnapshot = {
+      ...workspace,
+      projects: [{ ...workspace.projects[0]!, siteHosts: ["*"] }],
+    };
+    const rules = toDynamicNetRequestRules(globalWorkspace);
+    expect(rules[0]?.condition.initiatorDomains).toBeUndefined();
+  });
+
+  it("matchesProjectSite uses siteMatchPatterns for path-level matching", () => {
+    const project = {
+      siteHosts: ["shimo.im"],
+      siteMatchPatterns: ["https://shimo.im/tables/*"],
+    };
+    expect(matchesProjectSite(project, "https://shimo.im/tables/abc")).toBe(true);
+    expect(matchesProjectSite(project, "https://shimo.im/sheets/abc")).toBe(false);
+    expect(matchesProjectSite(project, "https://other.com/tables/abc")).toBe(false);
+  });
+
+  it("matchesProjectSite falls back to siteHosts when siteMatchPatterns is empty", () => {
+    const project = { siteHosts: ["shimo.im"], siteMatchPatterns: [] };
+    expect(matchesProjectSite(project, "https://shimo.im/tables/abc")).toBe(true);
+    expect(matchesProjectSite(project, "https://shimo.im/sheets/abc")).toBe(true);
+    expect(matchesProjectSite(project, "https://other.com/abc")).toBe(false);
+  });
+
+  it("matchesProjectSite matches all URLs when both siteHosts and siteMatchPatterns are empty", () => {
+    const project = { siteHosts: [], siteMatchPatterns: [] };
+    expect(matchesProjectSite(project, "https://any.site.com/path")).toBe(true);
   });
 });

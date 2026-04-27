@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { sortRules } from "@resource-forwarder/rule-core";
+import { matchesProjectSite, sortRules } from "@resource-forwarder/rule-core";
 import type { Project, Rule } from "@resource-forwarder/shared-types";
 import { joinCsv } from "../shared/helpers.js";
 import type { GetDashboardStateResponse, UpsertMutationResponse } from "../shared/messages.js";
@@ -19,11 +19,11 @@ function App() {
   const currentUrl = dashboard?.currentTab?.url ?? "";
 
   const matchedProjects = useMemo(() => {
-    if (!dashboard || !currentHost) {
+    if (!dashboard || !currentUrl) {
       return [];
     }
-    return dashboard.workspace.projects.filter((project) => project.siteHosts.includes(currentHost));
-  }, [dashboard, currentHost]);
+    return dashboard.workspace.projects.filter((project) => matchesProjectSite(project, currentUrl));
+  }, [dashboard, currentUrl]);
 
   const matchedProjectIds = useMemo(
     () => new Set(matchedProjects.map((project) => project.id)),
@@ -177,7 +177,7 @@ function App() {
                     {project.envLabel && <span className="site-list-badge disabled">{project.envLabel}</span>}
                   </div>
                   <div className="sp-site-meta">
-                    {joinCsv(project.siteHosts) || "未填写 Host"} · {projectRuleCount(project.id)} 条规则
+                    {joinCsv(project.siteMatchPatterns ?? project.siteHosts) || "未填写站点匹配"} · {projectRuleCount(project.id)} 条规则
                   </div>
                 </div>
                 <div className="sp-site-actions">

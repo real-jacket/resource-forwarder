@@ -17,6 +17,7 @@ import {
   assertWorkspace,
   collectWorkspaceWarnings,
   createEmptyWorkspace,
+  matchesProjectSite,
   parseWorkspace,
   serializeWorkspace,
   toDynamicNetRequestRules,
@@ -44,6 +45,16 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(() => {
   void syncWorkspace();
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url || changeInfo.status === "loading") {
+    void refreshDnrForTabs();
+  }
+});
+
+chrome.tabs.onRemoved.addListener(() => {
+  void refreshDnrForTabs();
 });
 
 chrome.runtime.onMessage.addListener((message: RuntimeRequest, sender, sendResponse) => {
@@ -562,7 +573,18 @@ async function serviceFetch(path: string, init?: RequestInit & { serviceUrl?: st
 }
 
 async function applyDynamicRules(workspace: WorkspaceSnapshot): Promise<void> {
-  const nextRules = toDynamicNetRequestRules(workspace);
+  const baseRules = toDynamicNetRequestRules(workspace);
+
+  const tabs = await chrome.tabs.query({});
+  const matchedTabIds = collectMatchedTabIds(workspace, tabs);
+
+  const finalRules = baseRules.map((rule) => {
+    if (matchedTabIds) {
+      return { ...rule, condition: { ...rule.condition, tabIds: matchedTabIds } };
+    }
+    return rule;
+  });
+
   const stored = await chrome.storage.local.get(STORAGE_KEYS.managedRuleIds);
   const removeRuleIds = Array.isArray(stored[STORAGE_KEYS.managedRuleIds])
     ? (stored[STORAGE_KEYS.managedRuleIds] as number[])
@@ -570,12 +592,56 @@ async function applyDynamicRules(workspace: WorkspaceSnapshot): Promise<void> {
 
   await chrome.declarativeNetRequest.updateDynamicRules({
     removeRuleIds,
-    addRules: nextRules as chrome.declarativeNetRequest.Rule[],
+    addRules: finalRules as chrome.declarativeNetRequest.Rule[],
   });
 
   await chrome.storage.local.set({
-    [STORAGE_KEYS.managedRuleIds]: nextRules.map((rule) => rule.id),
+    [STORAGE_KEYS.managedRuleIds]: finalRules.map((rule) => rule.id),
   });
+}
+
+/**
+ * Re-apply DNR rules with updated tabIds based on current tab URLs.
+ * Called when tabs navigate or close.
+ */
+async function refreshDnrForTabs(): Promise<void> {
+  try {
+    await applyDynamicRules(runtimeState.workspace);
+  } catch { /* swallow — will retry on next navigation */ }
+}
+
+/**
+ * Determine which tab IDs match at least one enabled project's site scope.
+ * Returns undefined if any project has no siteMatchPatterns (global scope) —
+ * meaning no tabIds restriction should be applied.
+ */
+function collectMatchedTabIds(
+  workspace: WorkspaceSnapshot,
+  tabs: chrome.tabs.Tab[],
+): number[] | undefined {
+  const enabledProjects = workspace.projects.filter((p) => p.enabled);
+  if (enabledProjects.length === 0) {
+    return [];
+  }
+
+  const hasGlobalProject = enabledProjects.some(
+    (p) => !p.siteMatchPatterns || p.siteMatchPatterns.length === 0,
+  );
+  if (hasGlobalProject) {
+    return undefined;
+  }
+
+  const ids: number[] = [];
+  for (const tab of tabs) {
+    if (typeof tab.id !== "number" || !tab.url || !/^https?:/.test(tab.url)) {
+      continue;
+    }
+    const matches = enabledProjects.some((project) => matchesProjectSite(project, tab.url!));
+    if (matches) {
+      ids.push(tab.id);
+    }
+  }
+  return ids;
 }
 
 async function notifyTabsToRefresh(): Promise<void> {
