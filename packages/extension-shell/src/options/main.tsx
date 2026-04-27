@@ -91,6 +91,7 @@ interface SelectOption {
   value: string;
   label: string;
   disabled?: boolean;
+  className?: string;
 }
 
 function CustomSelect({
@@ -98,18 +99,30 @@ function CustomSelect({
   options,
   onChange,
   className = "",
+  searchable = false,
+  searchPlaceholder = "搜索...",
 }: {
   value: string;
   options: SelectOption[];
   onChange: (value: string) => void;
   className?: string;
+  searchable?: boolean;
+  searchPlaceholder?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [focusIdx, setFocusIdx] = useState(-1);
+  const [query, setQuery] = useState("");
   const wrapRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const selected = options.find((o) => o.value === value);
+
+  const visibleOptions = useMemo(() => {
+    if (!searchable || !query.trim()) return options;
+    const q = query.trim().toLowerCase();
+    return options.filter((o) => o.label.toLowerCase().includes(q));
+  }, [options, query, searchable]);
 
   useEffect(() => {
     if (!open) return;
@@ -122,10 +135,18 @@ function CustomSelect({
 
   useEffect(() => {
     if (open) {
-      const idx = options.findIndex((o) => o.value === value);
+      setQuery("");
+      const idx = visibleOptions.findIndex((o) => o.value === value);
       setFocusIdx(idx >= 0 ? idx : 0);
+      if (searchable) {
+        requestAnimationFrame(() => searchRef.current?.focus());
+      }
     }
   }, [open]);
+
+  useEffect(() => {
+    setFocusIdx(0);
+  }, [query]);
 
   useEffect(() => {
     if (open && listRef.current && focusIdx >= 0) {
@@ -146,17 +167,16 @@ function CustomSelect({
       switch (e.key) {
         case "ArrowDown":
           e.preventDefault();
-          setFocusIdx((i) => Math.min(i + 1, options.length - 1));
+          setFocusIdx((i) => Math.min(i + 1, visibleOptions.length - 1));
           break;
         case "ArrowUp":
           e.preventDefault();
           setFocusIdx((i) => Math.max(i - 1, 0));
           break;
         case "Enter":
-        case " ":
           e.preventDefault();
-          if (focusIdx >= 0 && !options[focusIdx].disabled) {
-            onChange(options[focusIdx].value);
+          if (focusIdx >= 0 && focusIdx < visibleOptions.length && !visibleOptions[focusIdx].disabled) {
+            onChange(visibleOptions[focusIdx].value);
             setOpen(false);
           }
           break;
@@ -166,7 +186,7 @@ function CustomSelect({
           break;
       }
     },
-    [open, focusIdx, options, onChange],
+    [open, focusIdx, visibleOptions, onChange],
   );
 
   return (
@@ -184,28 +204,51 @@ function CustomSelect({
         </svg>
       </button>
       {open && (
-        <div className="cs-menu" role="listbox" ref={listRef}>
-          {options.map((opt, i) => (
-            <div
-              key={opt.value}
-              role="option"
-              aria-selected={opt.value === value}
-              className={`cs-option ${opt.value === value ? "is-selected" : ""} ${i === focusIdx ? "is-focused" : ""} ${opt.disabled ? "is-disabled" : ""}`}
-              onMouseEnter={() => setFocusIdx(i)}
-              onClick={() => {
-                if (opt.disabled) return;
-                onChange(opt.value);
-                setOpen(false);
-              }}
-            >
-              {opt.label}
-              {opt.value === value && (
-                <svg className="cs-check" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                </svg>
-              )}
+        <div className="cs-menu" role="listbox">
+          {searchable && (
+            <div className="cs-search">
+              <svg className="cs-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+              <input
+                ref={searchRef}
+                className="cs-search-input"
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={searchPlaceholder}
+                onClick={(e) => e.stopPropagation()}
+              />
             </div>
-          ))}
+          )}
+          <div className="cs-options" ref={listRef}>
+            {visibleOptions.length === 0 ? (
+              <div className="cs-empty">无匹配结果</div>
+            ) : (
+              visibleOptions.map((opt, i) => (
+                <div
+                  key={opt.value}
+                  role="option"
+                  aria-selected={opt.value === value}
+                  className={`cs-option ${opt.value === value ? "is-selected" : ""} ${i === focusIdx ? "is-focused" : ""} ${opt.disabled ? "is-disabled" : ""} ${opt.className ?? ""}`}
+                  onMouseEnter={() => setFocusIdx(i)}
+                  onClick={() => {
+                    if (opt.disabled) return;
+                    onChange(opt.value);
+                    setOpen(false);
+                  }}
+                >
+                  {opt.label}
+                  {opt.value === value && (
+                    <svg className="cs-check" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                    </svg>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -236,9 +279,12 @@ function App() {
   const [resourceOverridePreview, setResourceOverridePreview] = useState<ReturnType<typeof parseResourceOverrideExport> | null>(null);
   const [importModalError, setImportModalError] = useState<string | null>(null);
   const [selectedProjectIds, setSelectedProjectIds] = useState<Set<string>>(new Set());
+  const [siteStatusFilter, setSiteStatusFilter] = useState<"all" | "enabled" | "disabled">("all");
+  const [siteQuery, setSiteQuery] = useState("");
   const [status, setStatus] = useState("正在加载规则...");
   const [busy, setBusy] = useState(false);
   const deferredRuleQuery = useDeferredValue(ruleQuery.trim().toLowerCase());
+  const deferredSiteQuery = useDeferredValue(siteQuery.trim().toLowerCase());
 
   useEffect(() => {
     void refresh();
@@ -303,6 +349,21 @@ function App() {
 
   const enabledCount = useMemo(() => allRuleRows.filter(({ rule }) => rule.enabled && (!selectedProjectId || (allRuleRows.find(r => r.rule.id === rule.id)?.project?.id === selectedProjectId))).length, [allRuleRows, selectedProjectId]);
   const disabledCount = useMemo(() => allRuleRows.filter(({ rule }) => !rule.enabled && (!selectedProjectId || (allRuleRows.find(r => r.rule.id === rule.id)?.project?.id === selectedProjectId))).length, [allRuleRows, selectedProjectId]);
+
+  const filteredProjects = useMemo(() => {
+    return projects.filter((project) => {
+      if (siteStatusFilter === "enabled" && !project.enabled) return false;
+      if (siteStatusFilter === "disabled" && project.enabled) return false;
+      if (deferredSiteQuery) {
+        const text = [project.name, ...project.siteHosts, project.envLabel ?? ""].join(" ").toLowerCase();
+        return text.includes(deferredSiteQuery);
+      }
+      return true;
+    });
+  }, [projects, siteStatusFilter, deferredSiteQuery]);
+
+  const siteEnabledCount = useMemo(() => projects.filter((p) => p.enabled).length, [projects]);
+  const siteDisabledCount = useMemo(() => projects.filter((p) => !p.enabled).length, [projects]);
 
   const projectRuleRows = useMemo(
     () => selectedProjectId ? allRuleRows.filter(({ project }) => project?.id === selectedProjectId) : allRuleRows,
@@ -638,8 +699,9 @@ function App() {
   }
 
   function toggleAllProjectSelection(): void {
+    const visibleIds = filteredProjects.map((p) => p.id);
     setSelectedProjectIds((prev) =>
-      prev.size === projects.length ? new Set() : new Set(projects.map((p) => p.id)),
+      prev.size === visibleIds.length ? new Set() : new Set(visibleIds),
     );
   }
 
@@ -1186,26 +1248,36 @@ function App() {
 
         {/* Status tabs */}
         <div className="status-tabs">
-          <button
-            className={`status-tab ${ruleStatusTab === "all" ? "active" : ""}`}
-            onClick={() => setRuleStatusTab("all")}
-          >
-            全部
-            <span className="status-tab-count">{totalCount}</span>
-          </button>
-          <button
-            className={`status-tab ${ruleStatusTab === "enabled" ? "active" : ""}`}
-            onClick={() => setRuleStatusTab("enabled")}
-          >
-            启用中
-            <span className="status-tab-count">{tabEnabledCount}</span>
-          </button>
-          <button
-            className={`status-tab ${ruleStatusTab === "disabled" ? "active" : ""}`}
-            onClick={() => setRuleStatusTab("disabled")}
-          >
-            已禁用
-            <span className="status-tab-count">{tabDisabledCount}</span>
+          <div className="status-tabs-left">
+            <button
+              className={`status-tab ${ruleStatusTab === "all" ? "active" : ""}`}
+              onClick={() => setRuleStatusTab("all")}
+            >
+              全部
+              <span className="status-tab-count">{totalCount}</span>
+            </button>
+            <button
+              className={`status-tab ${ruleStatusTab === "enabled" ? "active" : ""}`}
+              onClick={() => setRuleStatusTab("enabled")}
+            >
+              启用中
+              <span className="status-tab-count">{tabEnabledCount}</span>
+            </button>
+            <button
+              className={`status-tab ${ruleStatusTab === "disabled" ? "active" : ""}`}
+              onClick={() => setRuleStatusTab("disabled")}
+            >
+              已禁用
+              <span className="status-tab-count">{tabDisabledCount}</span>
+            </button>
+          </div>
+          <button className="btn btn-default btn-sm" onClick={() => openProjectModal()}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 13, height: 13 }}>
+              <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+              <line x1="12" y1="11" x2="12" y2="17" />
+              <line x1="9" y1="14" x2="15" y2="14" />
+            </svg>
+            新建站点
           </button>
         </div>
 
@@ -1223,6 +1295,8 @@ function App() {
                 })),
               ]}
               onChange={setSelectedProjectId}
+              searchable
+              searchPlaceholder="搜索站点..."
             />
             {selectedProject && (
               <div className="toolbar-group-actions">
@@ -2210,7 +2284,8 @@ function App() {
               <div className="site-mgr-title-area">
                 <div className="settings-card-title">站点管理</div>
                 <div className="settings-card-desc">
-                  共 {projects.length} 个站点 · {projects.filter((p) => p.enabled).length} 个启用
+                  共 {projects.length} 个站点 · {siteEnabledCount} 个启用
+                  {(siteStatusFilter !== "all" || deferredSiteQuery) && ` · 筛选出 ${filteredProjects.length} 个`}
                 </div>
               </div>
               <div className="site-mgr-header-actions">
@@ -2234,13 +2309,49 @@ function App() {
               </div>
             </div>
 
+            {/* Site filters */}
+            {projects.length > 0 && (
+              <div className="site-mgr-filters">
+                <div className="site-mgr-status-tabs">
+                  <button className={`site-mgr-tab${siteStatusFilter === "all" ? " active" : ""}`} onClick={() => setSiteStatusFilter("all")}>
+                    全部 <span className="site-mgr-tab-count">{projects.length}</span>
+                  </button>
+                  <button className={`site-mgr-tab${siteStatusFilter === "enabled" ? " active" : ""}`} onClick={() => setSiteStatusFilter("enabled")}>
+                    启用 <span className="site-mgr-tab-count">{siteEnabledCount}</span>
+                  </button>
+                  <button className={`site-mgr-tab${siteStatusFilter === "disabled" ? " active" : ""}`} onClick={() => setSiteStatusFilter("disabled")}>
+                    停用 <span className="site-mgr-tab-count">{siteDisabledCount}</span>
+                  </button>
+                </div>
+                <div className="site-mgr-search">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+                    <circle cx="11" cy="11" r="8" />
+                    <path d="m21 21-4.35-4.35" />
+                  </svg>
+                  <input
+                    className="site-mgr-search-input"
+                    value={siteQuery}
+                    onChange={(e) => setSiteQuery(e.target.value)}
+                    placeholder="搜索站点名称、域名"
+                  />
+                  {siteQuery && (
+                    <button className="site-mgr-search-clear" onClick={() => setSiteQuery("")}>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="12" height="12">
+                        <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div className="site-list">
-              {projects.length > 0 && (
+              {filteredProjects.length > 0 && (
                 <div className="site-list-head">
                   <label className="site-list-checkbox">
                     <input
                       type="checkbox"
-                      checked={selectedProjectIds.size === projects.length && projects.length > 0}
+                      checked={selectedProjectIds.size === filteredProjects.length && filteredProjects.length > 0}
                       onChange={toggleAllProjectSelection}
                     />
                   </label>
@@ -2252,7 +2363,15 @@ function App() {
                   还没有站点，点击「新建」开始添加。
                 </div>
               )}
-              {projects.map((project) => {
+              {projects.length > 0 && filteredProjects.length === 0 && (
+                <div className="site-list-empty">
+                  没有匹配的站点。
+                  <button className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={() => { setSiteStatusFilter("all"); setSiteQuery(""); }}>
+                    清除筛选
+                  </button>
+                </div>
+              )}
+              {filteredProjects.map((project) => {
                 const ruleCount = ruleSets
                   .filter((rs) => rs.projectId === project.id)
                   .reduce((sum, rs) => sum + rs.ruleIds.length, 0);
