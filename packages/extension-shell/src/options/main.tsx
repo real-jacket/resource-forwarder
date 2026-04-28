@@ -17,6 +17,7 @@ import type {
   WorkspaceSnapshot,
 } from "@resource-forwarder/shared-types";
 import { createId, joinCsv, splitCsv } from "../shared/helpers.js";
+import { createProjectCopyBundle } from "./project-copy.js";
 import type {
   DashboardState,
   ExportWorkspaceRuntimeResponse,
@@ -366,6 +367,20 @@ function App() {
     });
   }, [projects, siteStatusFilter, deferredSiteQuery]);
 
+  const duplicateProjectIds = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const p of projects) {
+      const key = `${p.name}|${(p.siteMatchPatterns ?? p.siteHosts ?? []).join(",")}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const dupes = new Set<string>();
+    for (const p of projects) {
+      const key = `${p.name}|${(p.siteMatchPatterns ?? p.siteHosts ?? []).join(",")}`;
+      if ((counts.get(key) ?? 0) > 1) dupes.add(p.id);
+    }
+    return dupes;
+  }, [projects]);
+
   const siteEnabledCount = useMemo(() => projects.filter((p) => p.enabled).length, [projects]);
   const siteDisabledCount = useMemo(() => projects.filter((p) => !p.enabled).length, [projects]);
 
@@ -689,6 +704,52 @@ function App() {
       setStatus(`分组「${project.name}」已删除。`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "删除分组失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function duplicateProject(project: Project): Promise<void> {
+    if (!dashboard) {
+      setStatus("请先加载站点后再复制。");
+      return;
+    }
+
+    setBusy(true);
+    let nextState: UpsertMutationResponse | null = null;
+    try {
+      const now = new Date().toISOString();
+      const bundle = createProjectCopyBundle(dashboard.workspace, project.id, now, createId);
+      nextState = await runtimeRequest<UpsertMutationResponse>({
+        type: "upsert-project",
+        payload: {
+          project: bundle.project,
+          ruleSets: bundle.ruleSets,
+        },
+      });
+
+      for (const rule of bundle.rules) {
+        const targetRuleSet = bundle.ruleSets.find((ruleSet) => ruleSet.ruleIds.includes(rule.id));
+        if (!targetRuleSet) {
+          continue;
+        }
+        nextState = await runtimeRequest<UpsertMutationResponse>({
+          type: "upsert-rule",
+          payload: { rule, ruleSetId: targetRuleSet.id },
+        });
+      }
+
+      if (nextState) {
+        hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
+      }
+      setSelectedProjectId(bundle.project.id);
+      setSelectedProjectIds(new Set());
+      setStatus(`站点「${project.name}」已复制为「${bundle.project.name}」。`);
+    } catch (error) {
+      if (nextState) {
+        hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
+      }
+      setStatus(error instanceof Error ? error.message : "复制站点失败。");
     } finally {
       setBusy(false);
     }
@@ -2266,6 +2327,27 @@ function App() {
         </div>
 
         <div className="settings-page">
+          {/* Warnings — surfaced at top so critical errors aren't hidden under the scrollable site list */}
+          {(dashboard?.warnings ?? []).length > 0 && (
+            <div className="settings-warning-banner" role="alert">
+              <div className="settings-warning-banner-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+                  <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+              </div>
+              <div className="settings-warning-banner-body">
+                <div className="settings-warning-banner-title">
+                  配置告警 · {(dashboard?.warnings ?? []).length} 条
+                </div>
+                {(dashboard?.warnings ?? []).map((w) => (
+                  <div className="settings-warning-banner-item" key={w}>{localizeWarning(w)}</div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Service URL */}
           <div className="settings-card">
             <div className="settings-card-header">
@@ -2419,6 +2501,14 @@ function App() {
                     <div className="site-list-info">
                       <div className="site-list-name-row">
                         <span className="site-list-name">{project.name}</span>
+                        {project.envLabel && (
+                          <span className="site-list-badge env">{project.envLabel}</span>
+                        )}
+                        {duplicateProjectIds.has(project.id) && (
+                          <span className="site-list-badge duplicate" title="存在同名同域名的站点">
+                            重复 #{project.id.slice(-6)}
+                          </span>
+                        )}
                         {!project.enabled && (
                           <span className="site-list-badge disabled">已停用</span>
                         )}
@@ -2446,6 +2536,14 @@ function App() {
                         onClick={() => openProjectModal(project)}
                       >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15"><path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5z" /></svg>
+                      </button>
+                      <button
+                        className="btn-icon"
+                        title="复制"
+                        onClick={() => void duplicateProject(project)}
+                        disabled={busy}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>
                       </button>
                       <button
                         className={`btn-icon${project.enabled ? "" : " is-off"}`}
@@ -2496,20 +2594,6 @@ function App() {
                       {formatTimestamp(log.occurredAt)}
                     </span>
                   </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Warnings */}
-          {(dashboard?.warnings ?? []).length > 0 && (
-            <div className="settings-card">
-              <div className="settings-card-header">
-                <div className="settings-card-title">配置告警</div>
-              </div>
-              <div className="settings-card-body" style={{ gap: 8 }}>
-                {(dashboard?.warnings ?? []).map((w) => (
-                  <div className="form-warning-item" key={w}>{localizeWarning(w)}</div>
                 ))}
               </div>
             </div>

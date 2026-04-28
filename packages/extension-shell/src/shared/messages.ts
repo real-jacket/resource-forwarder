@@ -32,7 +32,8 @@ export type RuntimeRequest =
   | { type: "import-workspace"; payload: ImportWorkspacePayload }
   | { type: "export-workspace"; projectIds: string[]; format: "json" | "yaml" }
   | { type: "get-site-context"; url: string; tabId?: number }
-  | { type: "proxy-request"; payload: ForwardRequestPayload };
+  | { type: "proxy-request"; requestId: string; payload: ForwardRequestPayload }
+  | { type: "proxy-abort"; requestId: string };
 
 export interface RuntimeEnvelope {
   type: string;

@@ -1,7 +1,6 @@
 import type { ForwardRequestPayload, SiteContextPayload } from "@resource-forwarder/shared-types";
 import { WINDOW_SOURCE } from "./shared/constants.js";
 
-let lastUrl = location.href;
 let bridgeInjected = false;
 
 injectBridge();
@@ -12,13 +11,6 @@ chrome.runtime.onMessage.addListener((message) => {
     void refreshSiteContext();
   }
 });
-
-window.setInterval(() => {
-  if (location.href !== lastUrl) {
-    lastUrl = location.href;
-    void refreshSiteContext();
-  }
-}, 1000);
 
 function injectBridge(): void {
   if (bridgeInjected) {
@@ -74,6 +66,14 @@ async function handleWindowMessage(event: MessageEvent): Promise<void> {
     return;
   }
 
+  if (data.type === "proxy-abort") {
+    const payload = data.payload as { id: string };
+    if (payload?.id) {
+      void chrome.runtime.sendMessage({ type: "proxy-abort", requestId: payload.id }).catch(() => undefined);
+    }
+    return;
+  }
+
   if (data.type !== "proxy-request") {
     return;
   }
@@ -83,6 +83,7 @@ async function handleWindowMessage(event: MessageEvent): Promise<void> {
   try {
     const response = await chrome.runtime.sendMessage({
       type: "proxy-request",
+      requestId: payload.id,
       payload: payload.request,
     });
 

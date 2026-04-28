@@ -17,14 +17,14 @@ import {
   assertWorkspace,
   collectWorkspaceWarnings,
   createEmptyWorkspace,
-  matchesProjectSite,
   parseWorkspace,
   serializeWorkspace,
-  toDynamicNetRequestRules,
   trimWorkspaceForUrl,
 } from "@resource-forwarder/rule-core";
 import type { DashboardState, RuntimeRequest } from "./shared/messages.js";
-import { DEFAULT_SERVICE_URL, STORAGE_KEYS } from "./shared/constants.js";
+import { DEFAULT_SERVICE_URL, SERVICE_OFFLINE_SENTINEL, STORAGE_KEYS } from "./shared/constants.js";
+import { buildDynamicRuleUpdatePlan, buildScopedDnrRuleGroups } from "./dnr.js";
+import { normalizeProxyRequestError } from "./shared/service-errors.js";
 
 // ── Runtime state ────────────────────────────────────────────────────────
 
@@ -34,6 +34,7 @@ let runtimeState: RuntimeState = {
   workspace: createEmptyWorkspace(),
 };
 let runtimeWarnings: string[] = [];
+let lastAppliedDnrFingerprint: string | undefined;
 
 // ── Extension lifecycle ──────────────────────────────────────────────────
 
@@ -47,15 +48,47 @@ chrome.runtime.onStartup.addListener(() => {
   void syncWorkspace();
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
   if (changeInfo.url || changeInfo.status === "loading") {
-    void refreshDnrForTabs();
+    scheduleDnrRefresh();
   }
 });
 
 chrome.tabs.onRemoved.addListener(() => {
-  void refreshDnrForTabs();
+  scheduleDnrRefresh();
 });
+
+// SPA route changes don't fire tabs.onUpdated, so subscribe to webNavigation.
+// onHistoryStateUpdated fires on pushState/replaceState; onReferenceFragmentUpdated
+// fires on hash-only changes. Either one means the page-bridge needs a fresh
+// site context (different rules may apply on the new path).
+chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+  if (details.frameId !== 0) return;
+  scheduleDnrRefresh();
+  void chrome.tabs.sendMessage(details.tabId, { type: "refresh-site-context" }).catch(() => undefined);
+});
+
+chrome.webNavigation.onReferenceFragmentUpdated.addListener((details) => {
+  if (details.frameId !== 0) return;
+  scheduleDnrRefresh();
+  void chrome.tabs.sendMessage(details.tabId, { type: "refresh-site-context" }).catch(() => undefined);
+});
+
+// Coalesce bursts of tab navigation/close events into a single DNR update.
+// Without this, restoring a session (dozens of tabs flipping to "loading"
+// at once) would call updateDynamicRules dozens of times in a row.
+const DNR_REFRESH_DEBOUNCE_MS = 200;
+let dnrRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+function scheduleDnrRefresh(): void {
+  if (dnrRefreshTimer !== undefined) {
+    clearTimeout(dnrRefreshTimer);
+  }
+  dnrRefreshTimer = setTimeout(() => {
+    dnrRefreshTimer = undefined;
+    void refreshDnrForTabs();
+  }, DNR_REFRESH_DEBOUNCE_MS);
+}
 
 chrome.runtime.onMessage.addListener((message: RuntimeRequest, sender, sendResponse) => {
   void handleRuntimeMessage(message, sender)
@@ -101,7 +134,10 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
     case "get-site-context":
       return buildSiteContext(message.url, message.tabId ?? sender.tab?.id);
     case "proxy-request":
-      return proxyRequest(message.payload);
+      return proxyRequest(message.requestId, message.payload);
+    case "proxy-abort":
+      abortInflight(message.requestId);
+      return null;
     default:
       return null;
   }
@@ -501,19 +537,47 @@ async function buildSiteContext(url: string, tabId?: number): Promise<SiteContex
   };
 }
 
-async function proxyRequest(payload: ForwardRequestPayload) {
-  const response = await serviceFetch(`/forward`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: response.statusText }));
-    throw new Error(error.message || `Forward request failed with ${response.status}.`);
+async function proxyRequest(requestId: string, payload: ForwardRequestPayload) {
+  // Surface service offline as a sentinel so page-bridge can transparently
+  // fall back to the native fetch/XHR. Without this, an offline service makes
+  // every matching request appear to hang or 502 — worse than not having the
+  // extension installed at all.
+  if (!runtimeState.health) {
+    throw new Error(SERVICE_OFFLINE_SENTINEL);
   }
 
-  return response.json();
+  const controller = new AbortController();
+  inflightForwards.set(requestId, controller);
+
+  try {
+    const response = await serviceFetch(`/forward`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ message: response.statusText }));
+      throw new Error(error.message || `Forward request failed with ${response.status}.`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    throw normalizeProxyRequestError(error);
+  } finally {
+    inflightForwards.delete(requestId);
+  }
+}
+
+const inflightForwards = new Map<string, AbortController>();
+
+function abortInflight(requestId: string): void {
+  const controller = inflightForwards.get(requestId);
+  if (controller) {
+    controller.abort();
+    inflightForwards.delete(requestId);
+  }
 }
 
 // ── Tab / health / service helpers ───────────────────────────────────────
@@ -573,30 +637,53 @@ async function serviceFetch(path: string, init?: RequestInit & { serviceUrl?: st
 }
 
 async function applyDynamicRules(workspace: WorkspaceSnapshot): Promise<void> {
-  const baseRules = toDynamicNetRequestRules(workspace);
-
   const tabs = await chrome.tabs.query({});
-  const matchedTabIds = collectMatchedTabIds(workspace, tabs);
+  const { dynamicRules, sessionRules } = buildScopedDnrRuleGroups(workspace, tabs);
 
-  const finalRules = baseRules.map((rule) => {
-    if (matchedTabIds) {
-      return { ...rule, condition: { ...rule.condition, tabIds: matchedTabIds } };
-    }
-    return rule;
-  });
+  // Chrome only accepts the `tabIds` condition on session-scoped rules. Keep
+  // globally scoped redirects in the dynamic store and page-scoped redirects
+  // in the session store so different projects do not share one tabId union.
+  const fingerprint = `D|${JSON.stringify(dynamicRules)}|S|${JSON.stringify(sessionRules)}`;
+  if (fingerprint === lastAppliedDnrFingerprint) {
+    return;
+  }
 
-  const stored = await chrome.storage.local.get(STORAGE_KEYS.managedRuleIds);
-  const removeRuleIds = Array.isArray(stored[STORAGE_KEYS.managedRuleIds])
-    ? (stored[STORAGE_KEYS.managedRuleIds] as number[])
-    : [];
+  // Source the IDs to remove from Chrome itself, not local storage. A buggy
+  // earlier code path could have left rules installed without updating
+  // managedRuleIds — those orphans would otherwise survive every refresh and
+  // collide with new addRules entries.
+  const [existingDynamic, existingSession] = await Promise.all([
+    chrome.declarativeNetRequest.getDynamicRules(),
+    chrome.declarativeNetRequest.getSessionRules(),
+  ]);
 
-  await chrome.declarativeNetRequest.updateDynamicRules({
-    removeRuleIds,
-    addRules: finalRules as chrome.declarativeNetRequest.Rule[],
-  });
+  // Always remove every previously-installed rule before re-adding. Chrome
+  // rejects updates with "duplicate rule ID" when an addRules entry conflicts
+  // with an existing rule that isn't in removeRuleIds — there is no atomic
+  // in-place replace. The fingerprint check above already skips no-op updates.
+  const dynamicUpdate = buildDynamicRuleUpdatePlan(
+    existingDynamic.map((r) => r.id),
+    dynamicRules,
+  );
+  const sessionUpdate = buildDynamicRuleUpdatePlan(
+    existingSession.map((r) => r.id),
+    sessionRules,
+  );
 
+  await Promise.all([
+    chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: dynamicUpdate.removeRuleIds,
+      addRules: dynamicUpdate.addRules as chrome.declarativeNetRequest.Rule[],
+    }),
+    chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: sessionUpdate.removeRuleIds,
+      addRules: sessionUpdate.addRules as chrome.declarativeNetRequest.Rule[],
+    }),
+  ]);
+
+  lastAppliedDnrFingerprint = fingerprint;
   await chrome.storage.local.set({
-    [STORAGE_KEYS.managedRuleIds]: finalRules.map((rule) => rule.id),
+    [STORAGE_KEYS.managedRuleIds]: [...dynamicRules, ...sessionRules].map((rule) => rule.id),
   });
 }
 
@@ -608,40 +695,6 @@ async function refreshDnrForTabs(): Promise<void> {
   try {
     await applyDynamicRules(runtimeState.workspace);
   } catch { /* swallow — will retry on next navigation */ }
-}
-
-/**
- * Determine which tab IDs match at least one enabled project's site scope.
- * Returns undefined if any project has no siteMatchPatterns (global scope) —
- * meaning no tabIds restriction should be applied.
- */
-function collectMatchedTabIds(
-  workspace: WorkspaceSnapshot,
-  tabs: chrome.tabs.Tab[],
-): number[] | undefined {
-  const enabledProjects = workspace.projects.filter((p) => p.enabled);
-  if (enabledProjects.length === 0) {
-    return [];
-  }
-
-  const hasGlobalProject = enabledProjects.some(
-    (p) => !p.siteMatchPatterns || p.siteMatchPatterns.length === 0,
-  );
-  if (hasGlobalProject) {
-    return undefined;
-  }
-
-  const ids: number[] = [];
-  for (const tab of tabs) {
-    if (typeof tab.id !== "number" || !tab.url || !/^https?:/.test(tab.url)) {
-      continue;
-    }
-    const matches = enabledProjects.some((project) => matchesProjectSite(project, tab.url!));
-    if (matches) {
-      ids.push(tab.id);
-    }
-  }
-  return ids;
 }
 
 async function notifyTabsToRefresh(): Promise<void> {

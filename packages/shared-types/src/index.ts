@@ -62,7 +62,23 @@ export interface ForwardProfile {
   stripPrefix?: string;
   pathRewrite?: PathRewrite[];
   headers?: Record<string, string>;
+  headerPolicy?: ForwardHeaderPolicy;
   timeoutMs?: number;
+}
+
+export interface ForwardHeaderPolicy {
+  /**
+   * Header names to strip from the forwarded request in addition to the
+   * built-in defaults (host, content-length, cookie, cookie2, origin, referer).
+   * Names are matched case-insensitively.
+   */
+  strip?: string[];
+  /**
+   * Header names that should be forwarded even if they appear in the strip
+   * list (built-in or user-provided). Useful when a particular target needs
+   * the original Cookie or Authorization despite the safer default.
+   */
+  passthrough?: string[];
 }
 
 export interface Target {
@@ -132,6 +148,13 @@ export interface ForwardRequestPayload {
   bodyEncoding?: "utf8" | "base64";
   tabId?: number;
   resourceType?: "fetch" | "xmlhttprequest";
+  /**
+   * Rule the client (background or page-bridge) already matched against. If
+   * present and resolvable in the service-side workspace, the service skips
+   * its own match step — eliminating the inconsistency window where the two
+   * workspaces have drifted. Falls back to pickMatchingRule when absent.
+   */
+  matchedRuleId?: string;
 }
 
 export interface ForwardResponsePayload {

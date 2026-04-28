@@ -5,13 +5,15 @@ import type {
   ImportWorkspacePayload,
   LogsResponse,
   ProjectsResponse,
+  RequestContext,
+  RuleBinding,
   RulesResponse,
   ServiceHealthResponse,
   SupportedExportFormat,
   UpsertProjectPayload,
   UpsertRulePayload,
 } from "@resource-forwarder/shared-types";
-import { collectWorkspaceWarnings, pickMatchingRule } from "@resource-forwarder/rule-core";
+import { collectWorkspaceWarnings, matchesRule, pickMatchingRule, resolveRuleBinding } from "@resource-forwarder/rule-core";
 import { createRequestContext, forwardThroughRule } from "./proxy.js";
 import { WorkspaceStorage } from "./storage.js";
 
@@ -25,7 +27,9 @@ export function buildServer({ storage }: BuildServerOptions) {
   const app = Fastify({ logger: false });
 
   void app.register(cors, {
-    origin: true,
+    origin: (origin, callback) => {
+      callback(null, isAllowedCorsOrigin(origin));
+    },
   });
 
   app.get("/health", async (): Promise<ServiceHealthResponse> => ({
@@ -76,9 +80,20 @@ export function buildServer({ storage }: BuildServerOptions) {
   app.post<{ Body: ForwardRequestPayload }>("/forward", async (request, reply) => {
     const workspace = await storage.readWorkspace();
     const context = createRequestContext(request.body);
-    const binding = pickMatchingRule(workspace, context, "api_forward");
     const startedAt = Date.now();
 
+    // Treat the client-provided matchedRuleId as a hint only. The service is
+    // the final boundary, so it must re-check enablement and request matching.
+    const hintedBinding =
+      request.body.matchedRuleId !== undefined
+        ? resolveRuleBinding(workspace, request.body.matchedRuleId)
+        : undefined;
+    const binding =
+      request.body.matchedRuleId !== undefined
+        ? hintedBinding && isUsableForwardBinding(hintedBinding, context)
+          ? hintedBinding
+          : undefined
+        : pickMatchingRule(workspace, context, "api_forward");
     if (!binding) {
       await storage.appendHit({
         requestUrl: request.body.url,
@@ -151,4 +166,34 @@ export function buildServer({ storage }: BuildServerOptions) {
   );
 
   return app;
+}
+
+function isUsableForwardBinding(binding: RuleBinding, context: RequestContext): boolean {
+  return (
+    binding.rule.kind === "api_forward" &&
+    binding.rule.enabled &&
+    (binding.ruleSet ? binding.ruleSet.enabled : true) &&
+    (binding.project ? binding.project.enabled : true) &&
+    matchesRule(binding.rule, context)
+  );
+}
+
+function isAllowedCorsOrigin(origin: string | undefined): boolean {
+  if (!origin) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(origin);
+    if (parsed.protocol === "chrome-extension:") {
+      return true;
+    }
+
+    return (
+      parsed.protocol === "http:" &&
+      (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost")
+    );
+  } catch {
+    return false;
+  }
 }

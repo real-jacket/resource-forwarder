@@ -1,6 +1,6 @@
 import { pickMatchingRule } from "@resource-forwarder/rule-core";
 import type { ForwardRequestPayload, ForwardResponsePayload, SiteContextPayload, WorkspaceSnapshot } from "@resource-forwarder/shared-types";
-import { WINDOW_SOURCE } from "./shared/constants.js";
+import { FORWARD_BODY_LIMIT_BYTES, PAYLOAD_TOO_LARGE_SENTINEL, SERVICE_OFFLINE_SENTINEL, WINDOW_SOURCE } from "./shared/constants.js";
 
 interface ProxyPending {
   resolve: (response: ForwardResponsePayload) => void;
@@ -13,6 +13,7 @@ interface XhrState {
   requestHeaders: Record<string, string>;
   intercepted: boolean;
   aborted: boolean;
+  requestId?: string;
   readyState: number;
   status: number;
   statusText: string;
@@ -32,6 +33,21 @@ let state: SiteContextPayload = {
   currentUrl: location.href,
   warnings: [],
 };
+
+// configReady gates rule matching until the content-script delivers the workspace.
+// Without this gate, requests fired during the patch/handshake window would skip
+// every rule and silently fall through to the native implementation.
+const CONFIG_READY_TIMEOUT_MS = 2000;
+let configReceived = false;
+let resolveConfigReady: () => void = () => {};
+const configReady = new Promise<void>((resolve) => {
+  resolveConfigReady = resolve;
+});
+const configReadyTimer = window.setTimeout(() => {
+  if (!configReceived) {
+    resolveConfigReady();
+  }
+}, CONFIG_READY_TIMEOUT_MS);
 
 if (!pageWindow.__RESOURCE_FORWARDER_PATCHED__) {
   pageWindow.__RESOURCE_FORWARDER_PATCHED__ = true;
@@ -53,6 +69,9 @@ function handleBridgeMessage(event: MessageEvent): void {
 
   if (data.type === "config") {
     state = data.payload as SiteContextPayload;
+    configReceived = true;
+    window.clearTimeout(configReadyTimer);
+    resolveConfigReady();
     return;
   }
 
@@ -79,15 +98,41 @@ function handleBridgeMessage(event: MessageEvent): void {
 function installFetchPatch(): void {
   const nativeFetch = window.fetch.bind(window);
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    await configReady;
+
+    // Pull the abort signal from either init or the Request itself; init wins
+    // because the user may pass a fresh signal alongside an existing Request.
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    if (signal?.aborted) {
+      throw signalAbortReason(signal);
+    }
+
     const request = new Request(input, init);
     const match = pickMatchingRule(state.workspace as WorkspaceSnapshot, buildContext(request.url, request.method, "fetch"), "api_forward");
     if (!match) {
       return nativeFetch(input, init);
     }
 
-    const payload = await createForwardPayload(request, "fetch");
-    const forwarded = await dispatchProxyRequest(payload);
-    return createBrowserResponse(forwarded);
+    // Pre-flight body size check. Cheap path: if init.body has a synchronously
+    // knowable size (string / Blob / typed array / URLSearchParams) and exceeds
+    // the limit, skip forwarding entirely so we never read it into memory.
+    const initSize = approximateBodySize(init?.body);
+    if (initSize > FORWARD_BODY_LIMIT_BYTES) {
+      warnPayloadTooLarge(request.url, initSize);
+      return nativeFetch(input, init);
+    }
+
+    try {
+      const payload = await createForwardPayload(request, "fetch", match.rule.id);
+      const requestId = crypto.randomUUID();
+      const forwarded = await dispatchProxyRequest(requestId, payload, signal);
+      return createBrowserResponse(forwarded);
+    } catch (error) {
+      if (isServiceOfflineError(error) || isPayloadTooLargeError(error)) {
+        return nativeFetch(input, init);
+      }
+      throw error;
+    }
   };
 }
 
@@ -129,32 +174,65 @@ function installXhrPatch(): void {
   };
 
   xhrPrototype.setRequestHeader = function setRequestHeader(name: string, value: string): void {
+    // Defer native application until send() decides whether this XHR will be
+    // forwarded or executed natively. Eagerly calling nativeSetRequestHeader
+    // here pollutes the native XHR's header list even on requests we end up
+    // intercepting, which makes debugging confusing and has no upside since
+    // the forwarded request reads from current.requestHeaders.
     const current = getOrCreateXhrState(this);
     current.requestHeaders[name] = value;
-    if (!current.intercepted) {
-      nativeSetRequestHeader.call(this, name, value);
-    }
   };
 
   xhrPrototype.send = function send(body?: Document | XMLHttpRequestBodyInit | null): void {
     const current = getOrCreateXhrState(this);
-    const match = pickMatchingRule(state.workspace as WorkspaceSnapshot, buildContext(current.url, current.method, "xmlhttprequest"), "api_forward");
-    if (!match) {
-      nativeSend.call(this, body ?? null);
-      return;
-    }
+    const xhr = this;
+
+    const sendNative = (): void => {
+      replayHeadersToNative(xhr, current, nativeSetRequestHeader);
+      nativeSend.call(xhr, body ?? null);
+    };
 
     void (async () => {
+      await configReady;
+      if (current.aborted) {
+        return;
+      }
+
+      const match = pickMatchingRule(state.workspace as WorkspaceSnapshot, buildContext(current.url, current.method, "xmlhttprequest"), "api_forward");
+      if (!match) {
+        sendNative();
+        return;
+      }
+
+      // Pre-flight body size check (same rationale as fetch path).
+      const bodySize = approximateBodySize(body ?? undefined);
+      if (bodySize > FORWARD_BODY_LIMIT_BYTES) {
+        warnPayloadTooLarge(current.url, bodySize);
+        sendNative();
+        return;
+      }
+
       try {
-        const payload = await createForwardPayloadFromBody(current, body ?? undefined);
-        current.intercepted = true;
-        const forwarded = await dispatchProxyRequest(payload);
+        const payload = await createForwardPayloadFromBody(current, body ?? undefined, match.rule.id);
         if (current.aborted) {
           return;
         }
-        applyXhrResponse(this, current, forwarded);
+        current.intercepted = true;
+        current.requestId = crypto.randomUUID();
+        const forwarded = await dispatchProxyRequest(current.requestId, payload);
+        if (current.aborted) {
+          return;
+        }
+        applyXhrResponse(xhr, current, forwarded);
       } catch {
-        nativeSend.call(this, body ?? null);
+        if (current.aborted) {
+          return;
+        }
+        // Forwarding failed — fall back to native and let the original XHR
+        // surface its own success/error events. Reset `intercepted` so the
+        // native readyState/status getters take over again.
+        current.intercepted = false;
+        sendNative();
       }
     })();
   };
@@ -162,12 +240,19 @@ function installXhrPatch(): void {
   xhrPrototype.abort = function abort(): void {
     const current = xhrState.get(this);
     if (!current?.intercepted) {
+      if (current) {
+        current.aborted = true;
+        current.readyState = 0;
+      }
       nativeAbort.call(this);
       return;
     }
 
     current.aborted = true;
     current.readyState = 0;
+    if (current.requestId) {
+      sendAbortMessage(current.requestId);
+    }
     dispatchXhrEvent(this, "abort");
     dispatchXhrEvent(this, "loadend");
   };
@@ -277,8 +362,12 @@ function buildContext(urlString: string, method: string, resourceType: "fetch" |
   };
 }
 
-async function createForwardPayload(request: Request, resourceType: "fetch" | "xmlhttprequest"): Promise<ForwardRequestPayload> {
+async function createForwardPayload(request: Request, resourceType: "fetch" | "xmlhttprequest", matchedRuleId: string): Promise<ForwardRequestPayload> {
   const bodyBuffer = await readBody(request.clone());
+  if (bodyBuffer && bodyBuffer.byteLength > FORWARD_BODY_LIMIT_BYTES) {
+    warnPayloadTooLarge(request.url, bodyBuffer.byteLength);
+    throw new Error(PAYLOAD_TOO_LARGE_SENTINEL);
+  }
   return {
     url: request.url,
     method: request.method,
@@ -287,11 +376,16 @@ async function createForwardPayload(request: Request, resourceType: "fetch" | "x
     bodyEncoding: bodyBuffer ? "base64" : undefined,
     tabId: state.tabId,
     resourceType,
+    matchedRuleId,
   };
 }
 
-async function createForwardPayloadFromBody(xhr: XhrState, body?: Document | XMLHttpRequestBodyInit | null): Promise<ForwardRequestPayload> {
+async function createForwardPayloadFromBody(xhr: XhrState, body: Document | XMLHttpRequestBodyInit | null | undefined, matchedRuleId: string): Promise<ForwardRequestPayload> {
   const buffer = body ? await readBody(new Request(xhr.url, { method: xhr.method, body: body as BodyInit }).clone()) : undefined;
+  if (buffer && buffer.byteLength > FORWARD_BODY_LIMIT_BYTES) {
+    warnPayloadTooLarge(xhr.url, buffer.byteLength);
+    throw new Error(PAYLOAD_TOO_LARGE_SENTINEL);
+  }
   return {
     url: xhr.url,
     method: xhr.method,
@@ -300,13 +394,33 @@ async function createForwardPayloadFromBody(xhr: XhrState, body?: Document | XML
     bodyEncoding: buffer ? "base64" : undefined,
     tabId: state.tabId,
     resourceType: "xmlhttprequest",
+    matchedRuleId,
   };
 }
 
-async function dispatchProxyRequest(payload: ForwardRequestPayload): Promise<ForwardResponsePayload> {
-  const id = crypto.randomUUID();
+async function dispatchProxyRequest(
+  id: string,
+  payload: ForwardRequestPayload,
+  signal?: AbortSignal,
+): Promise<ForwardResponsePayload> {
   return new Promise<ForwardResponsePayload>((resolve, reject) => {
     pending.set(id, { resolve, reject });
+
+    const onAbort = () => {
+      if (!pending.has(id)) return;
+      pending.delete(id);
+      sendAbortMessage(id);
+      reject(signalAbortReason(signal));
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
     window.postMessage(
       {
         source: WINDOW_SOURCE,
@@ -316,6 +430,21 @@ async function dispatchProxyRequest(payload: ForwardRequestPayload): Promise<For
       location.origin,
     );
   });
+}
+
+function sendAbortMessage(id: string): void {
+  window.postMessage(
+    {
+      source: WINDOW_SOURCE,
+      type: "proxy-abort",
+      payload: { id },
+    },
+    location.origin,
+  );
+}
+
+function signalAbortReason(signal?: AbortSignal): unknown {
+  return signal?.reason ?? new DOMException("The operation was aborted.", "AbortError");
 }
 
 function createBrowserResponse(forwarded: ForwardResponsePayload): Response {
@@ -413,5 +542,50 @@ function safeJsonParse(value: string): unknown {
     return JSON.parse(value);
   } catch {
     return null;
+  }
+}
+
+function isServiceOfflineError(error: unknown): boolean {
+  return error instanceof Error && error.message === SERVICE_OFFLINE_SENTINEL;
+}
+
+function isPayloadTooLargeError(error: unknown): boolean {
+  return error instanceof Error && error.message === PAYLOAD_TOO_LARGE_SENTINEL;
+}
+
+/**
+ * Best-effort body size for the synchronous-sized BodyInit variants.
+ * Returns -1 for ReadableStream / FormData / Document — sizes that can only
+ * be known after fully consuming the body, so we let the request through and
+ * rely on the post-read check inside createForwardPayload.
+ */
+function approximateBodySize(body: unknown): number {
+  if (body == null) return 0;
+  if (typeof body === "string") return body.length;
+  if (body instanceof Blob) return body.size;
+  if (body instanceof ArrayBuffer) return body.byteLength;
+  if (ArrayBuffer.isView(body)) return body.byteLength;
+  if (body instanceof URLSearchParams) return body.toString().length;
+  return -1;
+}
+
+function warnPayloadTooLarge(url: string, size: number): void {
+  console.warn(
+    `[resource-forwarder] body for ${url} is ${size} bytes (limit ${FORWARD_BODY_LIMIT_BYTES}); falling back to native request.`,
+  );
+}
+
+function replayHeadersToNative(
+  xhr: XMLHttpRequest,
+  current: XhrState,
+  nativeSetRequestHeader: typeof XMLHttpRequest.prototype.setRequestHeader,
+): void {
+  for (const [name, value] of Object.entries(current.requestHeaders)) {
+    try {
+      nativeSetRequestHeader.call(xhr, name, value);
+    } catch {
+      // setRequestHeader can throw for forbidden header names; ignore so a
+      // single bad header doesn't take down the whole request.
+    }
   }
 }

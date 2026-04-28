@@ -434,6 +434,7 @@ function buildWildcardRedirect(
   redirectUrl: string,
 ): { regexFilter: string; regexSubstitution: string; requestDomains?: string[] } {
   const pathGlob = match.pathGlob || "**";
+  const hostPattern = buildHostRegexSource(match.host, "[^/]+");
 
   let pathRegex = "";
   for (let i = 0; i < pathGlob.length; i += 1) {
@@ -452,7 +453,7 @@ function buildWildcardRedirect(
     pathRegex = `/${pathRegex}`;
   }
 
-  const regexFilter = `^https?://[^/]+${pathRegex}`;
+  const regexFilter = `^https?://${hostPattern}${pathRegex}`;
 
   let captureIndex = 0;
   let substitution = "";
@@ -486,6 +487,11 @@ function buildWildcardRedirect(
  * We use urlFilter when the glob can be expressed with simple `*` wildcards.
  */
 function buildDnrCondition(match: MatchCondition): Pick<DynamicRedirectRule["condition"], "regexFilter" | "urlFilter" | "requestDomains"> {
+  const hasWildcardHost = match.host.some((host) => host !== "*" && host.includes("*"));
+  if (hasWildcardHost) {
+    return { regexFilter: buildRegexFilter(match) };
+  }
+
   const urlFilter = globToUrlFilter(match.pathGlob || "**");
   const concreteHosts = match.host.filter((h) => h !== "*" && !h.includes("*"));
 
@@ -530,12 +536,9 @@ function globToUrlFilter(glob: string): string | null {
 }
 
 export function buildRegexFilter(match: MatchCondition): string {
-  const hostPattern =
-    match.host.length === 0 || match.host.includes("*")
-      ? ".*"
-      : `(?:${match.host.map((host) => escapeRegex(host).replace(/\\\*/g, "[^.]+" )).join("|")})`;
+  const hostPattern = buildHostRegexSource(match.host, ".*");
   const pathPattern = globToRegexSource(match.pathGlob || "**");
-  return `^https?:\\/\\/${hostPattern}${pathPattern}$`;
+  return `^https?:\\/\\/${hostPattern}${pathPattern}(?:[?#].*)?$`;
 }
 
 export function matchesHost(patterns: string[], host: string): boolean {
@@ -550,7 +553,7 @@ export function matchesHost(patterns: string[], host: string): boolean {
     }
 
     if (pattern.includes("*")) {
-      return new RegExp(`^${escapeRegex(pattern).replace(/\\\*/g, ".*")}$`).test(host);
+      return new RegExp(`^${escapeRegex(pattern).replace(/\*/g, ".*")}$`).test(host);
     }
 
     return host === pattern;
@@ -673,28 +676,35 @@ function matchesSitePattern(pattern: string, pageUrl: string): boolean {
 }
 
 export function trimWorkspaceForUrl(workspace: WorkspaceSnapshot, urlString: string, tabId?: number): WorkspaceSnapshot {
-  const url = new URL(urlString);
-  const allowedRuleIds = new Set(
-    getEnabledRuleBindings(workspace)
-      .filter((binding) => matchesHost(binding.rule.match.host, url.host) && matchesTabScope(binding.rule.match, tabId))
-      .map((binding) => binding.rule.id),
+  const allowedProjectIds = new Set(
+    workspace.projects
+      .filter((project) => project.enabled)
+      .filter((project) => matchesProjectSite(project, urlString))
+      .map((project) => project.id),
   );
-
-  const allowedRuleSets = workspace.ruleSets.filter((ruleSet) => ruleSet.ruleIds.some((ruleId) => allowedRuleIds.has(ruleId)));
-  const allowedProjectIds = new Set(allowedRuleSets.map((ruleSet) => ruleSet.projectId));
+  const allowedRuleSets = workspace.ruleSets.filter(
+    (ruleSet) => ruleSet.enabled && allowedProjectIds.has(ruleSet.projectId),
+  );
+  const allowedRuleIds = new Set(allowedRuleSets.flatMap((ruleSet) => ruleSet.ruleIds));
 
   return {
     version: workspace.version,
     updatedAt: workspace.updatedAt,
     projects: workspace.projects.filter((project) => allowedProjectIds.has(project.id)),
     ruleSets: allowedRuleSets,
-    rules: workspace.rules.filter((rule) => allowedRuleIds.has(rule.id)),
+    rules: workspace.rules.filter(
+      (rule) => rule.enabled && allowedRuleIds.has(rule.id) && matchesTabScope(rule.match, tabId),
+    ),
   };
 }
 
 export function isTextualContentType(contentType?: string): boolean {
+  // Default to binary when the upstream omits Content-Type — decoding an
+  // unknown payload as utf-8 is lossy for binary content (images, archives,
+  // protobuf, etc.) and only saves a base64 round-trip for the text case,
+  // which most well-behaved servers label correctly anyway.
   if (!contentType) {
-    return true;
+    return false;
   }
 
   const normalized = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
@@ -1095,6 +1105,14 @@ function inferLocalhostStripPrefix(matchPathGlob: string, replacePath: string): 
 
 function escapeRegex(value: string): string {
   return value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+
+function buildHostRegexSource(hosts: string[], wildcardSource: string): string {
+  if (hosts.length === 0 || hosts.includes("*")) {
+    return wildcardSource;
+  }
+
+  return `(?:${hosts.map((host) => escapeRegex(host).replace(/\*/g, "[^.]+")).join("|")})`;
 }
 
 function stablePositiveHash(value: string): number {

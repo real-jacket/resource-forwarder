@@ -9,6 +9,7 @@ import {
   serializeWorkspace,
   toDynamicNetRequestRules,
   toDynamicRule,
+  trimWorkspaceForUrl,
 } from "./index.js";
 
 const apiRule: Rule = {
@@ -128,7 +129,7 @@ describe("rule-core", () => {
     expect(dnr.action.redirect.url).toBeUndefined();
     expect(dnr.action.redirect.regexSubstitution).toBe("http://localhost:8000/\\1.chunk.js");
     expect(dnr.condition.regexFilter).toBe(
-      "^https?://[^/]+/minio/shimo-assets/table/([^/?]*)\\.chunk\\.js",
+      "^https?://(?:co-dev-18\\.shimorelease\\.com)/minio/shimo-assets/table/([^/?]*)\\.chunk\\.js",
     );
     expect(dnr.condition.requestDomains).toEqual(["co-dev-18.shimorelease.com"]);
     expect(dnr.condition.urlFilter).toBeUndefined();
@@ -148,7 +149,7 @@ describe("rule-core", () => {
 
     const dnr = toDynamicRule(rule);
     expect(dnr.action.redirect.regexSubstitution).toBe("http://localhost:3000/\\1");
-    expect(dnr.condition.regexFilter).toBe("^https?://[^/]+/assets/(.*)");
+    expect(dnr.condition.regexFilter).toBe("^https?://(?:example\\.com)/assets/(.*)");
   });
 
   it("uses static url for non-wildcard redirectUrl", () => {
@@ -465,5 +466,106 @@ describe("rule-core", () => {
   it("matchesProjectSite matches all URLs when both siteHosts and siteMatchPatterns are empty", () => {
     const project = { siteHosts: [], siteMatchPatterns: [] };
     expect(matchesProjectSite(project, "https://any.site.com/path")).toBe(true);
+  });
+
+  it("trims workspace by project site scope while preserving cross-origin API rules", () => {
+    const scopedWorkspace: WorkspaceSnapshot = {
+      version: 1,
+      updatedAt: "2024-01-01T00:00:00.000Z",
+      projects: [
+        {
+          id: "p1",
+          name: "Tables",
+          enabled: true,
+          siteHosts: ["shimo.im"],
+          siteMatchPatterns: ["https://shimo.im/tables/*"],
+          tags: [],
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        },
+      ],
+      ruleSets: [
+        {
+          id: "rs1",
+          projectId: "p1",
+          name: "Default",
+          enabled: true,
+          ruleIds: ["api-cross-origin"],
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        },
+      ],
+      rules: [
+        {
+          ...apiRule,
+          id: "api-cross-origin",
+          match: {
+            ...apiRule.match,
+            host: ["api.shimo.im"],
+            pathGlob: "/v1/**",
+          },
+        },
+      ],
+    };
+
+    const matchingPage = trimWorkspaceForUrl(scopedWorkspace, "https://shimo.im/tables/abc");
+    expect(matchingPage.projects.map((project) => project.id)).toEqual(["p1"]);
+    expect(matchingPage.rules.map((rule) => rule.id)).toEqual(["api-cross-origin"]);
+
+    const nonMatchingPage = trimWorkspaceForUrl(scopedWorkspace, "https://shimo.im/sheets/abc");
+    expect(nonMatchingPage.projects).toHaveLength(0);
+    expect(nonMatchingPage.rules).toHaveLength(0);
+  });
+
+  it("uses regexFilter instead of path-only urlFilter for wildcard DNR hosts", () => {
+    const dnr = toDynamicRule({
+      ...assetRule,
+      match: {
+        ...assetRule.match,
+        host: ["*.cdn.example.com"],
+        pathGlob: "/assets/**",
+      },
+      target: {
+        redirectUrl: "https://localhost.example/assets/app.js",
+      },
+    });
+
+    expect(dnr.condition.urlFilter).toBeUndefined();
+    expect(dnr.condition.regexFilter).toBe("^https?:\\/\\/(?:[^.]+\\.cdn\\.example\\.com)/assets/.*(?:[?#].*)?$");
+  });
+
+  it("keeps wildcard-host regex DNR rules matching URLs with query strings", () => {
+    const dnr = toDynamicRule({
+      ...assetRule,
+      match: {
+        ...assetRule.match,
+        host: ["*.cdn.example.com"],
+        pathGlob: "/assets/*.js",
+      },
+      target: {
+        redirectUrl: "https://localhost.example/assets/app.js",
+      },
+    });
+
+    expect(new RegExp(dnr.condition.regexFilter!).test("https://foo.cdn.example.com/assets/app.js?v=1")).toBe(true);
+    expect(new RegExp(dnr.condition.regexFilter!).test("https://other.example.com/assets/app.js?v=1")).toBe(false);
+  });
+
+  it("constrains wildcard redirectUrl regex filters to wildcard hosts", () => {
+    const dnr = toDynamicRule({
+      ...assetRule,
+      match: {
+        ...assetRule.match,
+        host: ["*.cdn.example.com"],
+        pathGlob: "/assets/*.js",
+      },
+      target: {
+        redirectUrl: "http://localhost:8000/*.js",
+      },
+    });
+
+    expect(dnr.condition.requestDomains).toBeUndefined();
+    expect(new RegExp(dnr.condition.regexFilter!).test("https://foo.cdn.example.com/assets/app.js?v=1")).toBe(true);
+    expect(new RegExp(dnr.condition.regexFilter!).test("https://other.example.com/assets/app.js?v=1")).toBe(false);
   });
 });
