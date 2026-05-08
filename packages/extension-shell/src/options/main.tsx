@@ -944,6 +944,21 @@ function App() {
             <div className="sidebar-logo-name">Resource Proxy</div>
             <div className="sidebar-logo-sub">本地资源代理插件</div>
           </div>
+          {/* Collapse button lives in the header next to the brand so users
+              don't hunt for it at the bottom of a tall list. The same button
+              becomes the "expand" affordance once collapsed (icon flips). */}
+          <button
+            className="sidebar-collapse-btn"
+            onClick={() => setSidebarCollapsed((v) => !v)}
+            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            aria-expanded={!sidebarCollapsed}
+          >
+            <svg className="sidebar-collapse-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="11 17 6 12 11 7" />
+              <polyline points="18 17 13 12 18 7" />
+            </svg>
+          </button>
         </div>
 
         <div className="sidebar-nav">
@@ -1013,16 +1028,6 @@ function App() {
                 : "启动本地服务后数据将自动同步"}
             </div>
           )}
-          <button
-            className="btn-icon sidebar-collapse-btn"
-            onClick={() => setSidebarCollapsed((v) => !v)}
-            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="sidebar-collapse-icon">
-              <polyline points="11 17 6 12 11 7" />
-              <polyline points="18 17 13 12 18 7" />
-            </svg>
-          </button>
         </div>
       </nav>
 
