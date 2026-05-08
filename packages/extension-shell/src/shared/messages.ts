@@ -24,6 +24,7 @@ export type RuntimeRequest =
   | { type: "get-dashboard-state"; tabId?: number }
   | { type: "sync-workspace" }
   | { type: "set-service-url"; serviceUrl: string }
+  | { type: "set-service-token"; token: string }
   | { type: "upsert-project"; payload: UpsertProjectPayload }
   | { type: "delete-project"; projectId: string }
   | { type: "upsert-rule"; payload: UpsertRulePayload }

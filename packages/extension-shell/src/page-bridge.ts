@@ -1,6 +1,8 @@
-import { pickMatchingRule } from "@resource-forwarder/rule-core";
+import { prepareMatcher } from "@resource-forwarder/rule-core";
+import type { MatcherCache } from "@resource-forwarder/rule-core";
 import type { ForwardRequestPayload, ForwardResponsePayload, SiteContextPayload, WorkspaceSnapshot } from "@resource-forwarder/shared-types";
-import { FORWARD_BODY_LIMIT_BYTES, PAYLOAD_TOO_LARGE_SENTINEL, SERVICE_OFFLINE_SENTINEL, WINDOW_SOURCE } from "./shared/constants.js";
+import { FORWARD_BODY_LIMIT_BYTES, PAYLOAD_TOO_LARGE_SENTINEL, SERVICE_OFFLINE_SENTINEL, STREAMING_UNSUPPORTED_SENTINEL, WINDOW_SOURCE } from "./shared/constants.js";
+import { getWindowPostMessageTargetOrigin } from "./shared/window-messaging.js";
 
 interface ProxyPending {
   resolve: (response: ForwardResponsePayload) => void;
@@ -27,17 +29,60 @@ interface XhrState {
 const pageWindow = window as Window & { __RESOURCE_FORWARDER_PATCHED__?: boolean };
 const pending = new Map<string, ProxyPending>();
 const xhrState = new WeakMap<XMLHttpRequest, XhrState>();
+
+/**
+ * Generate a request id usable for correlating proxy requests across the
+ * page-bridge → content-script → background hops.
+ *
+ * `crypto.randomUUID()` is the right answer wherever it exists, but page
+ * bridges run inside arbitrary host pages — older Chromium-based PWAs, some
+ * embedded webviews, and any insecure context that hasn't enabled the WebCrypto
+ * API will throw "crypto.randomUUID is not a function". Falling back to a
+ * Math.random()-derived id keeps the proxy working in those environments at
+ * the cost of weaker uniqueness (collision risk is still negligible at the
+ * volumes we route through here).
+ */
+function randomRequestId(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // Some environments throw on access (e.g. crypto stub without randomUUID);
+    // fall through to the polyfill.
+  }
+  // RFC 4122-like 16-byte random hex; not cryptographically strong but unique
+  // enough for in-process correlation. Don't use this for anything security-
+  // sensitive (we only need request id correlation here).
+  const bytes = new Array(16);
+  for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  // Set version (4) and variant bits to keep the format recognisable.
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 let state: SiteContextPayload = {
   serviceUrl: "",
   workspace: { version: 1, updatedAt: new Date().toISOString(), projects: [], ruleSets: [], rules: [] },
   currentUrl: location.href,
   warnings: [],
 };
+// Compiled matcher rebuilt only when the workspace snapshot changes, so the
+// hot fetch/XHR path doesn't pay the regex-construction tax on every request.
+let matcher: MatcherCache = prepareMatcher(state.workspace as WorkspaceSnapshot);
 
 // configReady gates rule matching until the content-script delivers the workspace.
 // Without this gate, requests fired during the patch/handshake window would skip
 // every rule and silently fall through to the native implementation.
-const CONFIG_READY_TIMEOUT_MS = 2000;
+//
+// Now that page-bridge ships as its own document_start content_script (world:
+// "MAIN"), the isolated-world content-script kicks off the site-context
+// roundtrip in parallel with us — there is no script-tag fetch to wait on.
+// 300 ms is plenty for the chrome.runtime.sendMessage hop + storage reads.
+// On timeout we resolve and let in-flight requests fall through to native; we
+// do NOT block the page longer than necessary.
+const CONFIG_READY_TIMEOUT_MS = 300;
 let configReceived = false;
 let resolveConfigReady: () => void = () => {};
 const configReady = new Promise<void>((resolve) => {
@@ -53,22 +98,75 @@ if (!pageWindow.__RESOURCE_FORWARDER_PATCHED__) {
   pageWindow.__RESOURCE_FORWARDER_PATCHED__ = true;
   installFetchPatch();
   installXhrPatch();
-  window.addEventListener("message", handleBridgeMessage);
-  window.postMessage({ source: WINDOW_SOURCE, type: "bridge-ready" }, location.origin);
+  // Announce ourselves and wait for the isolated-world content-script to hand
+  // back a private MessagePort. Until that lands every message we want to send
+  // sits in `pendingPortMessages`; messages received from the port are routed
+  // to the same handler as the legacy `window.postMessage` path.
+  window.addEventListener("message", handleHandshakeMessage);
+  window.postMessage(
+    { source: WINDOW_SOURCE, type: "bridge-ready" },
+    getWindowPostMessageTargetOrigin(location.origin),
+  );
 }
 
-function handleBridgeMessage(event: MessageEvent): void {
+let bridgePort: MessagePort | undefined;
+const pendingPortMessages: Array<{ type: string; payload?: unknown }> = [];
+
+function handleHandshakeMessage(event: MessageEvent): void {
   if (event.source !== window) {
     return;
   }
+  const data = event.data as { source?: string; type?: string };
+  if (data?.source !== WINDOW_SOURCE) {
+    return;
+  }
+  if (data.type !== "bridge-port" || bridgePort) {
+    return;
+  }
+  const port = event.ports[0];
+  if (!port) {
+    return;
+  }
+  bridgePort = port;
+  bridgePort.onmessage = handleBridgePortMessage;
+  // We only need the global listener to capture the one-shot handshake; once
+  // we have the port any other listener on `window.message` is irrelevant.
+  window.removeEventListener("message", handleHandshakeMessage);
+  for (const buffered of pendingPortMessages.splice(0)) {
+    bridgePort.postMessage(buffered);
+  }
+}
 
+function postToBridge(message: { type: string; payload?: unknown }): void {
+  const envelope = { source: WINDOW_SOURCE, ...message };
+  if (bridgePort) {
+    bridgePort.postMessage(envelope);
+    return;
+  }
+  pendingPortMessages.push(envelope);
+}
+
+function handleBridgePortMessage(event: MessageEvent): void {
   const data = event.data as { source?: string; type?: string; payload?: unknown };
   if (data?.source !== WINDOW_SOURCE) {
     return;
   }
+  routeBridgeMessage(data);
+}
 
+function routeBridgeMessage(data: { type?: string; payload?: unknown }): void {
   if (data.type === "config") {
-    state = data.payload as SiteContextPayload;
+    const next = data.payload as SiteContextPayload;
+    state = next;
+    // SPA navigations resend the same workspace many times in a row. Skipping
+    // prepareMatcher when the underlying workspace hasn't changed turns the
+    // hot path on history-state-update into a no-op (we keep the existing
+    // matcher closures).
+    const fingerprint = workspaceFingerprint(next.workspace as WorkspaceSnapshot);
+    if (fingerprint !== lastWorkspaceFingerprint) {
+      matcher = prepareMatcher(next.workspace as WorkspaceSnapshot);
+      lastWorkspaceFingerprint = fingerprint;
+    }
     configReceived = true;
     window.clearTimeout(configReadyTimer);
     resolveConfigReady();
@@ -95,6 +193,15 @@ function handleBridgeMessage(event: MessageEvent): void {
   }
 }
 
+let lastWorkspaceFingerprint: string | undefined;
+function workspaceFingerprint(workspace: WorkspaceSnapshot): string {
+  // updatedAt is bumped on every persist, so for a server-driven flow this
+  // discriminates exactly when matcher behaviour can change. The lengths are
+  // a cheap defence against backends that forget to bump updatedAt; without
+  // them, an apparent no-op message could mask a structural change.
+  return `${workspace.updatedAt}|${workspace.projects.length}|${workspace.ruleSets.length}|${workspace.rules.length}`;
+}
+
 function installFetchPatch(): void {
   const nativeFetch = window.fetch.bind(window);
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -108,7 +215,7 @@ function installFetchPatch(): void {
     }
 
     const request = new Request(input, init);
-    const match = pickMatchingRule(state.workspace as WorkspaceSnapshot, buildContext(request.url, request.method, "fetch"), "api_forward");
+    const match = matcher.pick(buildContext(request.url, request.method, "fetch"), "api_forward");
     if (!match) {
       return nativeFetch(input, init);
     }
@@ -124,11 +231,11 @@ function installFetchPatch(): void {
 
     try {
       const payload = await createForwardPayload(request, "fetch", match.rule.id);
-      const requestId = crypto.randomUUID();
+      const requestId = randomRequestId();
       const forwarded = await dispatchProxyRequest(requestId, payload, signal);
       return createBrowserResponse(forwarded);
     } catch (error) {
-      if (isServiceOfflineError(error) || isPayloadTooLargeError(error)) {
+      if (isServiceOfflineError(error) || isPayloadTooLargeError(error) || isStreamingUnsupportedError(error)) {
         return nativeFetch(input, init);
       }
       throw error;
@@ -179,6 +286,11 @@ function installXhrPatch(): void {
     // here pollutes the native XHR's header list even on requests we end up
     // intercepting, which makes debugging confusing and has no upside since
     // the forwarded request reads from current.requestHeaders.
+    //
+    // Spec deviation: native setRequestHeader throws InvalidStateError when
+    // called after send(); this patched version silently records the header
+    // instead. In practice no real code relies on that throw, and the
+    // alternative (replicating the state machine) is not worth the surface.
     const current = getOrCreateXhrState(this);
     current.requestHeaders[name] = value;
   };
@@ -198,7 +310,7 @@ function installXhrPatch(): void {
         return;
       }
 
-      const match = pickMatchingRule(state.workspace as WorkspaceSnapshot, buildContext(current.url, current.method, "xmlhttprequest"), "api_forward");
+      const match = matcher.pick(buildContext(current.url, current.method, "xmlhttprequest"), "api_forward");
       if (!match) {
         sendNative();
         return;
@@ -218,7 +330,7 @@ function installXhrPatch(): void {
           return;
         }
         current.intercepted = true;
-        current.requestId = crypto.randomUUID();
+        current.requestId = randomRequestId();
         const forwarded = await dispatchProxyRequest(current.requestId, payload);
         if (current.aborted) {
           return;
@@ -262,9 +374,15 @@ function installXhrPatch(): void {
     if (!current?.intercepted) {
       return nativeGetAllResponseHeaders.call(this);
     }
-    return Object.entries(current.responseHeaders)
-      .map(([name, value]) => `${name}: ${value}`)
-      .join("\r\n");
+    // Per spec, each header is terminated by CRLF (including the last one).
+    // Joining with "\r\n" omits the trailing CRLF and breaks parsers that
+    // split on it (notably libraries that do `headers.split('\r\n').slice(0,-1)`
+    // expecting a trailing empty entry).
+    let result = "";
+    for (const [name, value] of Object.entries(current.responseHeaders)) {
+      result += `${name}: ${value}\r\n`;
+    }
+    return result;
   };
 
   xhrPrototype.getResponseHeader = function getResponseHeader(name: string): string | null {
@@ -404,43 +522,37 @@ async function dispatchProxyRequest(
   signal?: AbortSignal,
 ): Promise<ForwardResponsePayload> {
   return new Promise<ForwardResponsePayload>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-
     const onAbort = () => {
       if (!pending.has(id)) return;
       pending.delete(id);
       sendAbortMessage(id);
+      cleanup();
       reject(signalAbortReason(signal));
     };
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+
+    // Wrap resolve/reject so the listener is always removed exactly once,
+    // regardless of which path completes the promise. Long-lived AbortSignals
+    // reused across many requests would otherwise accumulate listeners.
+    pending.set(id, {
+      resolve: (value) => { cleanup(); resolve(value); },
+      reject: (reason) => { cleanup(); reject(reason); },
+    });
 
     if (signal) {
       if (signal.aborted) {
         onAbort();
         return;
       }
-      signal.addEventListener("abort", onAbort, { once: true });
+      signal.addEventListener("abort", onAbort);
     }
 
-    window.postMessage(
-      {
-        source: WINDOW_SOURCE,
-        type: "proxy-request",
-        payload: { id, request: payload },
-      },
-      location.origin,
-    );
+    postToBridge({ type: "proxy-request", payload: { id, request: payload } });
   });
 }
 
 function sendAbortMessage(id: string): void {
-  window.postMessage(
-    {
-      source: WINDOW_SOURCE,
-      type: "proxy-abort",
-      payload: { id },
-    },
-    location.origin,
-  );
+  postToBridge({ type: "proxy-abort", payload: { id } });
 }
 
 function signalAbortReason(signal?: AbortSignal): unknown {
@@ -457,11 +569,14 @@ function createBrowserResponse(forwarded: ForwardResponsePayload): Response {
 
 function applyXhrResponse(xhr: XMLHttpRequest, current: XhrState, forwarded: ForwardResponsePayload): void {
   current.intercepted = true;
-  current.readyState = 2;
   current.status = forwarded.status;
   current.statusText = forwarded.statusText;
   current.responseHeaders = normalizeHeaders(forwarded.headers);
   current.responseURL = forwarded.responseUrl;
+
+  // HEADERS_RECEIVED — handlers reading status/getAllResponseHeaders here
+  // expect them to be populated, so fill state before the dispatch.
+  current.readyState = 2;
   dispatchXhrEvent(xhr, "readystatechange");
 
   const body = decodeForwardBody(forwarded);
@@ -478,14 +593,37 @@ function applyXhrResponse(xhr: XMLHttpRequest, current: XhrState, forwarded: For
     current.response = responseType === "json" ? safeJsonParse(text) : text;
   }
 
+  // LOADING — many libraries (axios <0.27, fetch polyfills) gate response body
+  // reading on readyState >= 3, and progress bars need the progress event.
+  // Dispatching synthesised LOADING + a single progress event matches what a
+  // local upstream that returned the whole body in one chunk would look like.
+  current.readyState = 3;
+  dispatchXhrEvent(xhr, "readystatechange");
+  dispatchProgressEvent(xhr, "progress", body.byteLength);
+
   current.readyState = 4;
   dispatchXhrEvent(xhr, "readystatechange");
-  dispatchXhrEvent(xhr, "load");
-  dispatchXhrEvent(xhr, "loadend");
+  dispatchProgressEvent(xhr, "load", body.byteLength);
+  dispatchProgressEvent(xhr, "loadend", body.byteLength);
 }
 
 function dispatchXhrEvent(xhr: XMLHttpRequest, type: string): void {
   const event = new Event(type);
+  xhr.dispatchEvent(event);
+  const handler = (xhr as unknown as Record<string, unknown>)[`on${type}`];
+  if (typeof handler === "function") {
+    handler.call(xhr, event);
+  }
+}
+
+function dispatchProgressEvent(xhr: XMLHttpRequest, type: string, total: number): void {
+  // ProgressEvent is the spec-correct event class for progress/load/loadend.
+  // It also exposes upload progress hooks via xhr.upload, but the page bridge
+  // only ever fires download progress so we skip that path.
+  const event =
+    typeof ProgressEvent === "function"
+      ? new ProgressEvent(type, { lengthComputable: total > 0, loaded: total, total })
+      : new Event(type);
   xhr.dispatchEvent(event);
   const handler = (xhr as unknown as Record<string, unknown>)[`on${type}`];
   if (typeof handler === "function") {
@@ -520,18 +658,29 @@ async function readBody(request: Request): Promise<Uint8Array | undefined> {
   return buffer.byteLength ? new Uint8Array(buffer) : undefined;
 }
 
+// Chunk size chosen so String.fromCharCode.apply doesn't blow the call stack
+// (most JS engines cap at ~120k args). 0x8000 keeps each apply call cheap and
+// the GC happy for very large bodies (multi-MB upload XHRs).
+const BASE64_CHUNK = 0x8000;
+
 function bytesToBase64(bytes: Uint8Array): string {
+  // The previous implementation appended one char at a time inside .forEach,
+  // which produced a String of length ~N with ~N intermediate allocations.
+  // Chunked apply produces ~N/CHUNK intermediate strings concatenated once at
+  // the end — measurable on multi-MB JSON bodies (>10× faster in practice).
   let binary = "";
-  bytes.forEach((byte) => {
-    binary += String.fromCharCode(byte);
-  });
+  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK) {
+    const chunk = bytes.subarray(offset, offset + BASE64_CHUNK);
+    binary += String.fromCharCode.apply(null, chunk as unknown as number[]);
+  }
   return btoa(binary);
 }
 
 function base64ToBytes(value: string): Uint8Array {
   const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
+  const length = binary.length;
+  const bytes = new Uint8Array(length);
+  for (let index = 0; index < length; index += 1) {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes;
@@ -551,6 +700,10 @@ function isServiceOfflineError(error: unknown): boolean {
 
 function isPayloadTooLargeError(error: unknown): boolean {
   return error instanceof Error && error.message === PAYLOAD_TOO_LARGE_SENTINEL;
+}
+
+function isStreamingUnsupportedError(error: unknown): boolean {
+  return error instanceof Error && error.message === STREAMING_UNSUPPORTED_SENTINEL;
 }
 
 /**

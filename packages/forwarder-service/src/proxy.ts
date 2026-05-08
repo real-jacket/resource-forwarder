@@ -9,6 +9,17 @@ import type {
 import { isTextualContentType } from "@resource-forwarder/rule-core";
 import { DEFAULT_FORWARD_TIMEOUT_MS } from "./defaults.js";
 
+/**
+ * Sentinel thrown by `forwardThroughRule` when it can tell, just from response
+ * headers, that buffering the body would be wrong (SSE streams) or expensive
+ * (multi-MiB downloads). The route handler turns this into a 409 + `code:
+ * "stream-unsupported"` so the extension can fall back to a native fetch.
+ */
+export const STREAMING_UNSUPPORTED = "STREAMING_UNSUPPORTED";
+
+/** Hard cap above which we tell the page to fetch directly (~4 MiB). */
+const MAX_FORWARDABLE_BODY_BYTES = 4 * 1024 * 1024;
+
 export function createRequestContext(payload: ForwardRequestPayload): RequestContext {
   const url = new URL(payload.url);
   return {
@@ -33,7 +44,7 @@ export async function forwardThroughRule(
 
   const sourceUrl = new URL(payload.url);
   const targetUrl = buildForwardTargetUrl(profile, sourceUrl).toString();
-  const headers = buildForwardHeaders(payload.headers, profile);
+  const headers = buildForwardHeaders(payload.headers, profile, sourceUrl);
   const body = decodeRequestBody(payload);
   const response = await fetch(targetUrl, {
     method: payload.method,
@@ -44,6 +55,22 @@ export async function forwardThroughRule(
 
   const responseHeaders = Object.fromEntries(response.headers.entries());
   const contentType = response.headers.get("content-type") ?? undefined;
+
+  // Refuse to buffer responses that are inherently streaming. Doing so would
+  // hold the request open until the upstream closed it (SSE never does) and
+  // collapse every event into one base64 blob the page can't progressively
+  // consume. Better to tell the page-bridge to retry natively.
+  if (contentType && /text\/event-stream/i.test(contentType)) {
+    throw new Error(STREAMING_UNSUPPORTED);
+  }
+
+  // Same logic for very large bodies: the entire response would be base64'd
+  // and shipped through chrome.runtime.sendMessage, which has a practical
+  // ceiling around 8 MiB. Fall through to the native fetch instead.
+  const declaredLength = Number.parseInt(response.headers.get("content-length") ?? "", 10);
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_FORWARDABLE_BODY_BYTES) {
+    throw new Error(STREAMING_UNSUPPORTED);
+  }
 
   if (isTextualContentType(contentType)) {
     return {
@@ -112,15 +139,38 @@ export function buildForwardTargetUrl(profile: ForwardProfile, sourceUrl: URL): 
 function buildForwardHeaders(
   incomingHeaders: Record<string, string>,
   profile: ForwardProfile,
+  sourceUrl: URL,
 ): Headers {
   const policy = profile.headerPolicy;
   const stripExtra = (policy?.strip ?? []).map((name) => name.toLowerCase());
   const passthrough = new Set((policy?.passthrough ?? []).map((name) => name.toLowerCase()));
 
+  // Default strip list. host / content-length must always be dropped (the
+  // values become wrong after url/body rewrite). Cookie / origin / referer
+  // get stripped *only when going cross-origin*: a same-host forward usually
+  // wants the cookie session preserved, and stripping it forces every user
+  // to add an explicit passthrough policy. The auth-style headers stay
+  // protected for cross-origin destinations.
+  const strip = new Set<string>(["host", "content-length"]);
+  let isSameOrigin = false;
+  try {
+    const target = new URL(profile.targetBaseUrl);
+    isSameOrigin = target.hostname === sourceUrl.hostname;
+  } catch {
+    // Malformed targetBaseUrl — fall through to "treat as cross-origin" which
+    // is the safer default.
+  }
+  if (!isSameOrigin) {
+    strip.add("cookie");
+    strip.add("cookie2");
+    strip.add("origin");
+    strip.add("referer");
+  }
+
   const headers = new Headers();
   for (const [name, value] of Object.entries(incomingHeaders)) {
     const lower = name.toLowerCase();
-    if (!passthrough.has(lower) && (DEFAULT_STRIP_HEADERS.has(lower) || stripExtra.includes(lower))) {
+    if (!passthrough.has(lower) && (strip.has(lower) || stripExtra.includes(lower))) {
       continue;
     }
     headers.set(name, value);
@@ -133,21 +183,10 @@ function buildForwardHeaders(
   return headers;
 }
 
-// Headers stripped by default before the request leaves the local service.
-// host / content-length: values become invalid after the URL/body rewrite.
-// cookie, cookie2: depth-of-defence — fetch/XHR shouldn't surface these to
-//   user code anyway, but a future code path could, so we don't trust the
-//   incoming map.
-// origin, referer: cross-origin upstreams often reject mismatched values.
-// Use ForwardHeaderPolicy.passthrough to override per-rule.
-const DEFAULT_STRIP_HEADERS = new Set([
-  "host",
-  "content-length",
-  "cookie",
-  "cookie2",
-  "origin",
-  "referer",
-]);
+// host / content-length are always stripped because their values become invalid
+// after the URL and body rewrite. Cookie / origin / referer are stripped *only
+// when going cross-origin* — same-host forwards typically want the session
+// cookie preserved. Use ForwardHeaderPolicy.passthrough to override per-rule.
 
 function decodeRequestBody(payload: ForwardRequestPayload): BodyInit | undefined {
   if (!payload.body || payload.method.toUpperCase() === "GET" || payload.method.toUpperCase() === "HEAD") {

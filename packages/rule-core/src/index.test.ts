@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Rule, WorkspaceSnapshot } from "@resource-forwarder/shared-types";
 import {
+  collectProjectWarnings,
   collectUnsupportedRuleWarnings,
   matchesProjectSite,
   parseWorkspace,
@@ -106,11 +107,29 @@ describe("rule-core", () => {
     expect(parseWorkspace(yaml)).toEqual(workspace);
   });
 
-  it("creates dynamic DNR rules for asset redirects with initiatorDomains from project siteHosts", () => {
+  it("normalizes rule hosts when parsing workspace snapshots", () => {
+    const parsed = parseWorkspace(JSON.stringify({
+      ...workspace,
+      rules: [
+        {
+          ...assetRule,
+          match: {
+            ...assetRule.match,
+            host: ["https://app.example.com"],
+          },
+        },
+      ],
+    }));
+
+    expect(parsed.rules[0]?.match.host).toEqual(["app.example.com"]);
+  });
+
+  it("omits initiatorDomains for same-origin asset redirects", () => {
     const rules = toDynamicNetRequestRules(workspace);
     expect(rules).toHaveLength(1);
     expect(rules[0]?.action.redirect.url).toContain("https://cdn.example.com");
-    expect(rules[0]?.condition.initiatorDomains).toEqual(["app.example.com"]);
+    expect(rules[0]?.condition.requestDomains).toEqual(["app.example.com"]);
+    expect(rules[0]?.condition.initiatorDomains).toBeUndefined();
   });
 
   it("creates regexFilter + regexSubstitution for wildcard redirectUrl", () => {
@@ -567,5 +586,45 @@ describe("rule-core", () => {
     expect(dnr.condition.requestDomains).toBeUndefined();
     expect(new RegExp(dnr.condition.regexFilter!).test("https://foo.cdn.example.com/assets/app.js?v=1")).toBe(true);
     expect(new RegExp(dnr.condition.regexFilter!).test("https://other.example.com/assets/app.js?v=1")).toBe(false);
+  });
+
+  it("warns when a project mixes a wildcard site pattern with specific ones", () => {
+    const warnings = collectProjectWarnings({
+      id: "p1",
+      name: "Mixed",
+      enabled: true,
+      siteHosts: ["shimo.im"],
+      siteMatchPatterns: ["*", "https://shimo.im/tables/*"],
+      tags: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/wildcard/);
+  });
+
+  it("does not warn when patterns are all specific or only the wildcard", () => {
+    const baseProject = {
+      id: "p1",
+      name: "Specific",
+      enabled: true,
+      siteHosts: ["shimo.im"],
+      tags: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    expect(collectProjectWarnings({
+      ...baseProject,
+      siteMatchPatterns: ["https://shimo.im/tables/*", "https://shimo.im/sheets/*"],
+    })).toEqual([]);
+
+    expect(collectProjectWarnings({
+      ...baseProject,
+      siteMatchPatterns: ["*"],
+    })).toEqual([]);
+
+    expect(collectProjectWarnings({ ...baseProject, siteMatchPatterns: undefined })).toEqual([]);
   });
 });

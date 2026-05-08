@@ -11,6 +11,15 @@ export function splitCsv(value: string): string[] {
     .filter(Boolean);
 }
 
+export function normalizeHostInput(value: string): string {
+  const trimmed = value.trim();
+  try {
+    return new URL(trimmed).host;
+  } catch {
+    return trimmed.replace(/\.$/, "").replace(/:\d+$/, "");
+  }
+}
+
 export function joinCsv(values: string[] | undefined): string {
   return (values ?? []).join(", ");
 }

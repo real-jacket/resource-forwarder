@@ -1,30 +1,43 @@
-import { mkdir, readFile, readdir, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile, appendFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type {
   ExportWorkspaceResponse,
   HitRecord,
   ImportWorkspacePayload,
-  Project,
-  Rule,
-  RuleSet,
   SupportedExportFormat,
   UpsertProjectPayload,
   UpsertRulePayload,
   WorkspaceSnapshot,
 } from "@resource-forwarder/shared-types";
-import { createEmptyWorkspace, parseWorkspace, serializeWorkspace } from "@resource-forwarder/rule-core";
+import {
+  applyUpsertProject,
+  applyUpsertRule,
+  createEmptyWorkspace,
+  mergeWorkspaces,
+  parseWorkspace,
+  serializeWorkspace,
+} from "@resource-forwarder/rule-core";
+import { SecretsManager } from "./secrets.js";
 
 export class WorkspaceStorage {
   private readonly workspaceFile: string;
   private readonly logsDir: string;
+  private readonly secrets: SecretsManager;
 
   constructor(readonly rootDir: string) {
     this.workspaceFile = join(rootDir, "workspace.json");
     this.logsDir = join(rootDir, "logs");
+    this.secrets = new SecretsManager(rootDir);
   }
 
   async init(): Promise<void> {
+    if (this.initPromise) return this.initPromise;
+    this.initPromise = this.runInit();
+    return this.initPromise;
+  }
+
+  private async runInit(): Promise<void> {
     await mkdir(this.rootDir, { recursive: true });
     await mkdir(dirname(this.workspaceFile), { recursive: true });
     await mkdir(this.logsDir, { recursive: true });
@@ -32,69 +45,85 @@ export class WorkspaceStorage {
     try {
       await readFile(this.workspaceFile, "utf8");
     } catch {
-      await this.writeWorkspace(createEmptyWorkspace());
+      // First-time setup: write an empty snapshot directly. This cannot deadlock
+      // on the writeChain because init() runs before any handler is registered.
+      await this.atomicWriteWorkspace(createEmptyWorkspace());
     }
   }
 
   async readWorkspace(): Promise<WorkspaceSnapshot> {
     await this.init();
-    const raw = await readFile(this.workspaceFile, "utf8");
-    return parseWorkspace(raw, "json");
+    return this.readWorkspaceSafely();
+  }
+
+  /**
+   * Read + parse with crash-recovery semantics. If workspace.json was somehow
+   * truncated (process killed mid-write before tmp+rename landed in 0.x, a
+   * corrupted backup restored over the top, manual edit gone wrong) we MUST
+   * NOT 5xx every subsequent request — that turns a recoverable file issue
+   * into a service outage. Instead, snapshot the bad file aside for forensics,
+   * write a fresh empty workspace, and continue serving.
+   */
+  private async readWorkspaceSafely(): Promise<WorkspaceSnapshot> {
+    let raw: string;
+    try {
+      raw = await readFile(this.workspaceFile, "utf8");
+    } catch (error) {
+      // ENOENT after init() is unexpected (init creates the file) but recover
+      // gracefully anyway — the next mutation will recreate it.
+      if (isNodeError(error) && error.code !== "ENOENT") throw error;
+      return createEmptyWorkspace();
+    }
+
+    try {
+      const parsed = parseWorkspace(raw, "json");
+      // Hydrate `secret:<id>` refs back to cleartext for in-process callers.
+      // The proxy + matcher always see the real Authorization values; the
+      // redaction is purely a disk-format concern.
+      return await this.secrets.hydrateWorkspace(parsed);
+    } catch (parseError) {
+      const quarantineFile = `${this.workspaceFile}.corrupt.${Date.now()}`;
+      try {
+        await writeFile(quarantineFile, raw, "utf8");
+      } catch {
+        // If we can't even write the quarantine file the disk is hopeless —
+        // there's nothing useful to do but still return a usable snapshot.
+      }
+      const fresh = createEmptyWorkspace();
+      await this.atomicWriteWorkspace(fresh);
+      // Surface this loudly so an operator notices in the service log; the
+      // route handlers still see a valid workspace and won't 5xx.
+      // eslint-disable-next-line no-console
+      console.error(
+        `[forwarder-service] workspace.json was unparseable; quarantined to ${quarantineFile} and reset to empty.`,
+        parseError,
+      );
+      return fresh;
+    }
   }
 
   async writeWorkspace(workspace: WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
+    await this.init();
     const normalized: WorkspaceSnapshot = {
       ...workspace,
       updatedAt: new Date().toISOString(),
     };
-    await writeFile(this.workspaceFile, serializeWorkspace(normalized, "json"), "utf8");
-    return normalized;
+    // Two concurrent route handlers (e.g. PUT /projects + POST /import) hit the
+    // same file. Without serialization they read the same baseline and one
+    // commit silently disappears. Funneling through writeChain guarantees
+    // last-write-wins reflects only sequential state transitions.
+    return this.serialize(async () => {
+      await this.atomicWriteWorkspace(normalized);
+      return normalized;
+    });
   }
 
   async upsertProject(payload: UpsertProjectPayload): Promise<WorkspaceSnapshot> {
-    return this.mutateWorkspace((workspace) => {
-      const projects = upsertById(workspace.projects, stampUpdated(payload.project));
-      let ruleSets = workspace.ruleSets;
-
-      if (payload.ruleSets) {
-        for (const ruleSet of payload.ruleSets.map(stampUpdated)) {
-          ruleSets = upsertById(ruleSets, ensureProjectId(ruleSet, payload.project.id));
-        }
-      }
-
-      return {
-        ...workspace,
-        projects,
-        ruleSets,
-      };
-    });
+    return this.mutateWorkspace((workspace) => applyUpsertProject(workspace, payload));
   }
 
   async upsertRule(payload: UpsertRulePayload): Promise<WorkspaceSnapshot> {
-    return this.mutateWorkspace((workspace) => {
-      const rules = upsertById(workspace.rules, stampUpdated(payload.rule));
-      let ruleSets = workspace.ruleSets.map((ruleSet) => ({
-        ...ruleSet,
-        ruleIds: ruleSet.ruleIds.filter((ruleId) => ruleId !== payload.rule.id),
-      }));
-
-      if (payload.ruleSetId) {
-        ruleSets = ruleSets.map((ruleSet) =>
-          ruleSet.id === payload.ruleSetId
-            ? stampUpdated({
-                ...ruleSet,
-                ruleIds: [...ruleSet.ruleIds, payload.rule.id],
-              })
-            : ruleSet,
-        );
-      }
-
-      return {
-        ...workspace,
-        rules,
-        ruleSets,
-      };
-    });
+    return this.mutateWorkspace((workspace) => applyUpsertRule(workspace, payload));
   }
 
   async importWorkspace(payload: ImportWorkspacePayload): Promise<WorkspaceSnapshot> {
@@ -104,6 +133,30 @@ export class WorkspaceStorage {
     }
 
     return this.mutateWorkspace((workspace) => mergeWorkspaces(workspace, imported));
+  }
+
+  async appendHits(records: Array<Omit<HitRecord, "id" | "occurredAt">>): Promise<HitRecord[]> {
+    if (records.length === 0) return [];
+    const enriched = records.map((record) => ({
+      ...record,
+      id: randomUUID(),
+      occurredAt: new Date().toISOString(),
+    }));
+    // Group by daily file so we minimise filesystem syscalls when the queue
+    // straddles midnight (rare, but cheap to guard against).
+    const grouped = new Map<string, HitRecord[]>();
+    for (const entry of enriched) {
+      const key = entry.occurredAt.slice(0, 10);
+      const bucket = grouped.get(key) ?? [];
+      bucket.push(entry);
+      grouped.set(key, bucket);
+    }
+    for (const [day, bucket] of grouped) {
+      const file = join(this.logsDir, `${day}.jsonl`);
+      const payload = bucket.map((entry) => `${JSON.stringify(entry)}\n`).join("");
+      await appendFile(file, payload, "utf8");
+    }
+    return enriched;
   }
 
   async exportWorkspace(projectId: string, format: SupportedExportFormat): Promise<ExportWorkspaceResponse> {
@@ -125,88 +178,92 @@ export class WorkspaceStorage {
   }
 
   async appendHit(record: Omit<HitRecord, "id" | "occurredAt">): Promise<HitRecord> {
-    const timestamp = new Date();
-    const enriched: HitRecord = {
-      ...record,
-      id: randomUUID(),
-      occurredAt: timestamp.toISOString(),
-    };
-    const file = join(this.logsDir, `${timestamp.toISOString().slice(0, 10)}.jsonl`);
-    await appendFile(file, `${JSON.stringify(enriched)}\n`, "utf8");
+    const [enriched] = await this.appendHits([record]);
     return enriched;
   }
 
   async listLogs(limit = 100, projectId?: string): Promise<HitRecord[]> {
     await this.init();
+    // Clamp to a hard upper bound so a malicious or accidental ?limit=10000000
+    // can't force the service to slurp every JSONL file into memory.
+    const effectiveLimit = Math.max(0, Math.min(limit, MAX_LOGS_PAGE_SIZE));
+    if (effectiveLimit === 0) return [];
+
     const names = (await readdir(this.logsDir)).sort().reverse();
     const logs: HitRecord[] = [];
 
     for (const name of names) {
       const raw = await readFile(join(this.logsDir, name), "utf8");
-      const entries = raw
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as HitRecord)
-        .filter((entry) => (projectId ? entry.projectId === projectId : true));
-      logs.push(...entries.reverse());
-      if (logs.length >= limit) {
-        break;
+      const entries: HitRecord[] = [];
+      // Iterate from the tail so we can early-exit before parsing the whole
+      // day. JSONL is append-only so newest records sit at the bottom.
+      const lines = raw.split("\n");
+      for (let i = lines.length - 1; i >= 0; i -= 1) {
+        const line = lines[i];
+        if (!line) continue;
+        try {
+          const parsed = JSON.parse(line) as HitRecord;
+          if (projectId && parsed.projectId !== projectId) continue;
+          entries.push(parsed);
+          if (logs.length + entries.length >= effectiveLimit) break;
+        } catch {
+          // Tolerate truncated tail lines from a crash mid-write.
+        }
       }
+      logs.push(...entries);
+      if (logs.length >= effectiveLimit) break;
     }
 
-    return logs.slice(0, limit);
+    return logs.slice(0, effectiveLimit);
   }
 
   private async mutateWorkspace(mutator: (workspace: WorkspaceSnapshot) => WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
-    const current = await this.readWorkspace();
-    return this.writeWorkspace(mutator(current));
+    await this.init();
+    return this.serialize(async () => {
+      // Read inside the serialize block so we observe the result of any
+      // previously serialized write — otherwise two concurrent mutateWorkspace
+      // calls can both read the same baseline and the second would clobber
+      // the first. readWorkspaceSafely also handles a corrupted file by
+      // resetting to empty, which is what we want for a fresh mutate cycle.
+      const current = await this.readWorkspaceSafely();
+      const next: WorkspaceSnapshot = {
+        ...mutator(current),
+        updatedAt: new Date().toISOString(),
+      };
+      await this.atomicWriteWorkspace(next);
+      return next;
+    });
+  }
+
+  // ── Internal serialization & atomic IO ────────────────────────────────
+
+  private initPromise: Promise<void> | undefined;
+  private writeChain: Promise<unknown> = Promise.resolve();
+
+  private serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.writeChain.then(fn, fn);
+    this.writeChain = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * Persist the workspace snapshot via tmp + rename so a crash or process kill
+   * mid-write cannot leave behind a half-written workspace.json. POSIX rename
+   * is atomic on the same filesystem, which all sensible storage layouts are.
+   */
+  private async atomicWriteWorkspace(workspace: WorkspaceSnapshot): Promise<void> {
+    // Move sensitive header values out to secrets.json before serialising.
+    // This must happen INSIDE atomicWriteWorkspace so the redaction always
+    // matches the bytes we land on disk — no caller can accidentally bypass it.
+    const redacted = await this.secrets.redactWorkspace(workspace);
+    const tmp = `${this.workspaceFile}.${process.pid}.tmp`;
+    await writeFile(tmp, serializeWorkspace(redacted, "json"), "utf8");
+    await rename(tmp, this.workspaceFile);
   }
 }
 
-function mergeWorkspaces(current: WorkspaceSnapshot, imported: WorkspaceSnapshot): WorkspaceSnapshot {
-  return {
-    version: Math.max(current.version, imported.version),
-    updatedAt: new Date().toISOString(),
-    projects: mergeArray(current.projects, imported.projects),
-    ruleSets: mergeArray(current.ruleSets, imported.ruleSets),
-    rules: mergeArray(current.rules, imported.rules),
-  };
-}
+const MAX_LOGS_PAGE_SIZE = 1000;
 
-function mergeArray<T extends { id: string }>(current: T[], incoming: T[]): T[] {
-  const map = new Map<string, T>();
-  for (const item of current) {
-    map.set(item.id, item);
-  }
-  for (const item of incoming) {
-    map.set(item.id, item);
-  }
-  return Array.from(map.values());
-}
-
-function upsertById<T extends { id: string }>(items: T[], item: T): T[] {
-  const index = items.findIndex((candidate) => candidate.id === item.id);
-  if (index === -1) {
-    return [...items, item];
-  }
-
-  const next = [...items];
-  next[index] = item;
-  return next;
-}
-
-function stampUpdated<T extends { createdAt: string; updatedAt: string }>(item: T): T {
-  const now = new Date().toISOString();
-  return {
-    ...item,
-    createdAt: item.createdAt || now,
-    updatedAt: now,
-  };
-}
-
-function ensureProjectId(ruleSet: RuleSet, projectId: string): RuleSet {
-  return {
-    ...ruleSet,
-    projectId,
-  };
+function isNodeError(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && typeof (value as NodeJS.ErrnoException).code === "string";
 }

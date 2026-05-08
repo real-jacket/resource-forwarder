@@ -167,4 +167,91 @@ describe("dnr helpers", () => {
     expect(groups.sessionRules.map((item) => item.action.redirect.url)).toEqual(["http://localhost:8000/tables.js"]);
     expect(groups.sessionRules[0]?.condition.tabIds).toEqual([2]);
   });
+
+  it("keeps host-wide project rules dynamic so early page scripts can be redirected", () => {
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [
+          project({
+            siteHosts: ["co-dev-17.shimorelease.com"],
+            siteMatchPatterns: ["https://co-dev-17.shimorelease.com/*"],
+          }),
+        ],
+        ruleSets: [
+          {
+            id: "rs-host-wide",
+            projectId: "project-1",
+            name: "Host wide",
+            enabled: true,
+            ruleIds: ["rule-zebra"],
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        rules: [
+          {
+            ...assetRule("rule-zebra", "co-dev-17.shimorelease.com", "http://localhost:8080/zebra.js"),
+            match: {
+              host: ["co-dev-17.shimorelease.com"],
+              pathGlob: "/minio/shimo-assets/table/zebra.*.js",
+              resourceType: ["script"],
+              tabScope: { mode: "all" },
+            },
+          },
+        ],
+      },
+      [],
+    );
+
+    expect(groups.dynamicRules).toHaveLength(1);
+    expect(groups.dynamicRules[0]?.condition.tabIds).toBeUndefined();
+    expect(groups.dynamicRules[0]?.condition.requestDomains).toEqual(["co-dev-17.shimorelease.com"]);
+    expect(groups.dynamicRules[0]?.condition.initiatorDomains).toBeUndefined();
+    expect(groups.sessionRules).toHaveLength(0);
+  });
+
+  it("keeps same-origin path-scoped asset rules dynamic so initial scripts are not missed", () => {
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [
+          project({
+            siteHosts: ["co-dev-17.shimorelease.com"],
+            siteMatchPatterns: ["https://co-dev-17.shimorelease.com/tables/*"],
+          }),
+        ],
+        ruleSets: [
+          {
+            id: "rs-tables",
+            projectId: "project-1",
+            name: "Tables",
+            enabled: true,
+            ruleIds: ["rule-zebra"],
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        rules: [
+          {
+            ...assetRule("rule-zebra", "co-dev-17.shimorelease.com", "http://localhost:8000/zebra.js"),
+            match: {
+              host: ["co-dev-17.shimorelease.com"],
+              pathGlob: "/minio/shimo-assets/table/zebra.*.js",
+              resourceType: ["script"],
+              tabScope: { mode: "all" },
+            },
+          },
+        ],
+      },
+      [],
+    );
+
+    expect(groups.dynamicRules).toHaveLength(1);
+    expect(groups.dynamicRules[0]?.condition.tabIds).toBeUndefined();
+    expect(groups.dynamicRules[0]?.condition.requestDomains).toEqual(["co-dev-17.shimorelease.com"]);
+    expect(groups.sessionRules).toHaveLength(0);
+  });
 });

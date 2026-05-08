@@ -5,7 +5,6 @@ import type {
   LogsResponse,
   ProjectsResponse,
   RulesResponse,
-  RuleSet,
   RuntimeState,
   ServiceHealthResponse,
   SiteContextPayload,
@@ -14,15 +13,25 @@ import type {
   WorkspaceSnapshot,
 } from "@resource-forwarder/shared-types";
 import {
+  applyPendingDeletions,
+  applyUpsertProject,
+  applyUpsertRule,
   assertWorkspace,
   collectWorkspaceWarnings,
   createEmptyWorkspace,
+  emptyPendingDeletions,
+  isPendingDeletionsEmpty,
+  mergePendingDeletions,
+  mergeWorkspaces,
   parseWorkspace,
+  planDeleteProject,
+  planDeleteRule,
   serializeWorkspace,
   trimWorkspaceForUrl,
+  type PendingDeletions,
 } from "@resource-forwarder/rule-core";
 import type { DashboardState, RuntimeRequest } from "./shared/messages.js";
-import { DEFAULT_SERVICE_URL, SERVICE_OFFLINE_SENTINEL, STORAGE_KEYS } from "./shared/constants.js";
+import { DEFAULT_SERVICE_URL, SERVICE_OFFLINE_SENTINEL, SESSION_STORAGE_KEYS, STORAGE_KEYS } from "./shared/constants.js";
 import { buildDynamicRuleUpdatePlan, buildScopedDnrRuleGroups } from "./dnr.js";
 import { normalizeProxyRequestError } from "./shared/service-errors.js";
 
@@ -36,17 +45,57 @@ let runtimeState: RuntimeState = {
 let runtimeWarnings: string[] = [];
 let lastAppliedDnrFingerprint: string | undefined;
 
+// Serialize write handlers so two concurrent runtime messages can't read the
+// same base workspace and clobber each other's edits. Read paths (proxyRequest,
+// buildSiteContext, getDashboardState, syncWorkspace) intentionally stay out
+// of this lock so an in-flight upsert never delays a forwarded request.
+let writeChain: Promise<unknown> = Promise.resolve();
+function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = writeChain.then(fn, fn);
+  writeChain = next.catch(() => undefined);
+  return next;
+}
+
 // ── Extension lifecycle ──────────────────────────────────────────────────
 
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
+// MV3 service workers are killed after ~30s of idleness, which means anything
+// in-memory at that moment (DNR fingerprint, in-flight aborts, the timer below)
+// is gone on next wake. Strategy:
+//   • On boot we re-apply DNR rules and clear stale inflight ids; the page
+//     bridge will get an explicit error rather than hanging forever.
+//   • A recurring chrome.alarm acts as a low-frequency "compensation tick" so
+//     even if onStartup never fires (e.g. installed mid-session) we still
+//     reconcile DNR + push dirty work eventually.
+const RECONCILE_ALARM = "resource-forwarder:reconcile";
+
 chrome.runtime.onInstalled.addListener(() => {
-  void syncWorkspace();
+  void onWorkerWake("install");
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  void syncWorkspace();
+  void onWorkerWake("startup");
 });
+
+void chrome.alarms.create(RECONCILE_ALARM, { periodInMinutes: 1 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RECONCILE_ALARM) {
+    void onWorkerWake("alarm");
+  }
+});
+
+async function onWorkerWake(reason: "install" | "startup" | "alarm"): Promise<void> {
+  // Drop any inflight forward ids from the previous worker incarnation —
+  // the AbortControllers they reference are gone, and leaving them in storage
+  // would trick abortInflight() into thinking it can still cancel them.
+  await chrome.storage.session.remove(SESSION_STORAGE_KEYS.inflightForwards).catch(() => undefined);
+  // Always sync on wake so dirty pending ops eventually drain even if no UI
+  // surface has triggered a manual sync. The alarm path makes this a soft
+  // periodic retry; install/startup runs once at the obvious points.
+  await syncWorkspace().catch(() => undefined);
+  void reason;
+}
 
 chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
   if (changeInfo.url || changeInfo.status === "loading") {
@@ -115,6 +164,11 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
       await chrome.storage.local.set({ [STORAGE_KEYS.serviceUrl]: message.serviceUrl });
       runtimeState.serviceUrl = message.serviceUrl;
       return syncWorkspace();
+    case "set-service-token":
+      await chrome.storage.local.set({ [STORAGE_KEYS.serviceToken]: message.token });
+      // The new token may unblock previously-401'd /import or /forward retries —
+      // sync immediately so the user sees the effect on the dashboard.
+      return syncWorkspace();
     case "upsert-project":
       return handleUpsertProject(message.payload);
     case "delete-project":
@@ -160,67 +214,130 @@ async function writeLocalWorkspace(workspace: WorkspaceSnapshot): Promise<void> 
   await chrome.storage.local.set({ [STORAGE_KEYS.workspace]: workspace });
 }
 
-async function isDirty(): Promise<boolean> {
+// Pending push tracking. Each scheduled async push gets a unique id stored in
+// chrome.storage. Dirty == set non-empty. Critical: a boolean flag conflates
+// multiple in-flight pushes — if push A succeeds while push B is still running
+// (or has already failed), clearing the flag would falsely advertise a clean
+// state. Tracking individual ops removes that race entirely.
+async function readPendingPushOps(): Promise<string[]> {
   const stored = await chrome.storage.local.get(STORAGE_KEYS.workspaceDirty);
-  return stored[STORAGE_KEYS.workspaceDirty] === true;
+  const raw = stored[STORAGE_KEYS.workspaceDirty];
+  if (Array.isArray(raw)) return raw.filter((value): value is string => typeof value === "string");
+  // Backwards compat: old boolean value gets folded into a single sentinel op
+  // so a freshly upgraded extension still treats existing dirty state as dirty.
+  if (raw === true) return ["__legacy_dirty__"];
+  return [];
 }
 
-async function markDirty(): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.workspaceDirty]: true });
+async function isDirty(): Promise<boolean> {
+  return (await readPendingPushOps()).length > 0;
 }
 
-async function clearDirty(): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.workspaceDirty]: false });
+async function clearPendingPushOp(opId: string): Promise<void> {
+  await mutatePendingPushOps((ops) => ops.filter((id) => id !== opId));
 }
 
-interface PendingDelete {
-  projectId: string;
-  ruleIds: string[];
-  ruleSetIds: string[];
+async function markPushFailed(opId: string): Promise<void> {
+  // Keep the op alive so the next syncWorkspace knows there is still pending
+  // local state to push. The op id is opaque — only the count matters.
+  await mutatePendingPushOps((ops) => (ops.includes(opId) ? ops : [...ops, opId]));
 }
 
-async function readPendingDeletes(): Promise<PendingDelete[]> {
+async function mutatePendingPushOps(updater: (ops: string[]) => string[]): Promise<void> {
+  // Mutations have to be serialized against each other because chrome.storage
+  // does not give us a CAS primitive. The writeChain already guarantees no two
+  // mutators interleave their read-modify-write.
+  return withWriteLock(async () => {
+    const current = await readPendingPushOps();
+    const next = updater(current);
+    await chrome.storage.local.set({ [STORAGE_KEYS.workspaceDirty]: next });
+  });
+}
+
+function createOpId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `op-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+async function readPendingDeletions(): Promise<PendingDeletions> {
   const stored = await chrome.storage.local.get(STORAGE_KEYS.pendingDeletes);
   const raw = stored[STORAGE_KEYS.pendingDeletes];
-  return Array.isArray(raw) ? raw : [];
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const candidate = raw as Partial<PendingDeletions>;
+    return {
+      projectIds: Array.isArray(candidate.projectIds) ? candidate.projectIds : [],
+      ruleSetIds: Array.isArray(candidate.ruleSetIds) ? candidate.ruleSetIds : [],
+      ruleIds: Array.isArray(candidate.ruleIds) ? candidate.ruleIds : [],
+    };
+  }
+  // Backwards compat: previous shape was PendingDelete[] keyed on projectId.
+  if (Array.isArray(raw)) {
+    let merged = emptyPendingDeletions();
+    for (const entry of raw) {
+      if (!entry || typeof entry !== "object") continue;
+      merged = mergePendingDeletions(merged, {
+        projectIds: typeof entry.projectId === "string" ? [entry.projectId] : [],
+        ruleSetIds: Array.isArray(entry.ruleSetIds) ? entry.ruleSetIds : [],
+        ruleIds: Array.isArray(entry.ruleIds) ? entry.ruleIds : [],
+      });
+    }
+    return merged;
+  }
+  return emptyPendingDeletions();
 }
 
-async function appendPendingDelete(entry: PendingDelete): Promise<void> {
-  const existing = await readPendingDeletes();
-  existing.push(entry);
-  await chrome.storage.local.set({ [STORAGE_KEYS.pendingDeletes]: existing });
+async function appendPendingDeletions(extra: Partial<PendingDeletions>): Promise<void> {
+  // Read-modify-write under the write lock: two concurrent .catch handlers
+  // from different delete operations would otherwise overwrite each other.
+  return withWriteLock(async () => {
+    const current = await readPendingDeletions();
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.pendingDeletes]: mergePendingDeletions(current, extra),
+    });
+  });
 }
 
-async function clearPendingDeletes(): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.pendingDeletes]: [] });
-}
-
-function applyPendingDeletesToWorkspace(workspace: WorkspaceSnapshot, deletes: PendingDelete[]): WorkspaceSnapshot {
-  if (deletes.length === 0) return workspace;
-  const projectIds = new Set(deletes.map((d) => d.projectId));
-  const ruleIds = new Set(deletes.flatMap((d) => d.ruleIds));
-  const ruleSetIds = new Set(deletes.flatMap((d) => d.ruleSetIds));
-  return {
-    ...workspace,
-    projects: workspace.projects.filter((p) => !projectIds.has(p.id)),
-    ruleSets: workspace.ruleSets.filter((rs) => !ruleSetIds.has(rs.id)),
-    rules: workspace.rules.filter((r) => !ruleIds.has(r.id)),
-  };
+async function clearPendingDeletions(): Promise<void> {
+  await chrome.storage.local.set({ [STORAGE_KEYS.pendingDeletes]: emptyPendingDeletions() });
 }
 
 /**
- * Write workspace to local storage, update runtimeState, apply DNR rules,
- * and notify tabs. This is the single place to "commit" a workspace change.
+ * Persist workspace, then update runtimeState, then apply DNR rules and notify
+ * tabs. This is the single place to "commit" a workspace change.
+ *
+ * Persistence intentionally happens BEFORE the in-memory state mutation: if
+ * chrome.storage.local fails (quota exceeded, transient error), runtimeState
+ * keeps the last known-good snapshot and the failure surfaces as a warning,
+ * so a subsequent syncWorkspace can recover instead of advertising a broken
+ * snapshot to UI consumers.
  */
-async function commitWorkspace(workspace: WorkspaceSnapshot, serviceUrl: string, health: ServiceHealthResponse | null): Promise<RuntimeState & { warnings: string[] }> {
-  // Update in-memory state immediately so callers always get fresh data
-  runtimeState = { serviceUrl, health, workspace };
-  runtimeWarnings = collectWorkspaceWarnings(workspace);
+async function commitWorkspace(
+  workspace: WorkspaceSnapshot,
+  serviceUrl: string,
+  health: ServiceHealthResponse | null,
+): Promise<RuntimeState & { warnings: string[] }> {
+  const warnings = collectWorkspaceWarnings(workspace);
 
-  try { await writeLocalWorkspace(workspace); } catch (e) {
-    runtimeWarnings.push(`本地存储写入失败：${e instanceof Error ? e.message : String(e)}`);
+  let persisted = true;
+  try {
+    await writeLocalWorkspace(workspace);
+  } catch (e) {
+    persisted = false;
+    warnings.push(`本地存储写入失败：${e instanceof Error ? e.message : String(e)}`);
   }
-  try { await applyDynamicRules(workspace); } catch (e) {
+
+  if (persisted) {
+    runtimeState = { serviceUrl, health, workspace };
+  } else {
+    runtimeState = { ...runtimeState, serviceUrl, health };
+  }
+  runtimeWarnings = warnings;
+
+  try {
+    await applyDynamicRules(runtimeState.workspace);
+  } catch (e) {
     runtimeWarnings.push(`DNR 规则应用失败：${e instanceof Error ? e.message : String(e)}`);
   }
   void notifyTabsToRefresh();
@@ -247,30 +364,39 @@ async function syncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
     return commitWorkspace(localWorkspace, serviceUrl, null);
   }
 
-  const pendingDeletes = await readPendingDeletes();
-  const hasPendingDeletes = pendingDeletes.length > 0;
+  const pendingDeletions = await readPendingDeletions();
+  const hasPendingDeletions = !isPendingDeletionsEmpty(pendingDeletions);
+  const dirty = await isDirty();
 
-  // Service is reachable — push dirty local changes first (merge mode preserves service-side edits)
-  if (await isDirty()) {
+  // Service is reachable — push dirty local changes first.
+  // When deletions are queued we MUST push as `merge: false` (replace mode):
+  // a merge import only adds/updates entries, so deleted rules would silently
+  // resurrect on the next pull. With `merge: true` the service would still
+  // hold the deleted rule, we'd pull it back, and the user's "delete" would
+  // appear to never have happened. This is the heart of the offline-resurrect
+  // bug, fixed by preferring replace whenever pendingDeletions is non-empty.
+  if (dirty || hasPendingDeletions) {
+    const localWithDeletions = applyPendingDeletions(localWorkspace, pendingDeletions);
     try {
       await serviceJson(`/import`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         serviceUrl,
         body: JSON.stringify({
-          content: serializeWorkspace(localWorkspace, "json"),
+          content: serializeWorkspace(localWithDeletions, "json"),
           format: "json",
-          merge: true,
+          merge: !hasPendingDeletions,
         } satisfies ImportWorkspacePayload),
       });
-      await clearDirty();
+      await mutatePendingPushOps(() => []);
+      if (hasPendingDeletions) await clearPendingDeletions();
     } catch {
-      // Push failed — keep dirty flag, use local data
-      return commitWorkspace(localWorkspace, serviceUrl, health);
+      // Push failed — keep dirty/pending state, surface local data.
+      return commitWorkspace(localWithDeletions, serviceUrl, health);
     }
   }
 
-  // Pull latest from service — fall back to local if service goes away mid-sync
+  // Pull latest from service — fall back to local if service goes away mid-sync.
   let workspace: WorkspaceSnapshot;
   try {
     const [projects, rules] = await Promise.all([
@@ -288,154 +414,140 @@ async function syncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
     return commitWorkspace(localWorkspace, serviceUrl, health);
   }
 
-  // Apply pending deletes to the merged workspace, then push the clean result back
-  if (hasPendingDeletes) {
-    workspace = applyPendingDeletesToWorkspace(workspace, pendingDeletes);
-    try {
-      await serviceJson(`/import`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        serviceUrl,
-        body: JSON.stringify({
-          content: serializeWorkspace(workspace, "json"),
-          format: "json",
-          merge: false,
-        } satisfies ImportWorkspacePayload),
-      });
-      await clearPendingDeletes();
-    } catch {
-      // Could not push deletes — keep them for next sync
-    }
-  }
-
   return commitWorkspace(workspace, serviceUrl, health);
 }
 
 // ── Write handlers: local-first, then best-effort push to service ────────
 
 async function handleImportWorkspace(payload: ImportWorkspacePayload): Promise<RuntimeState & { warnings: string[] }> {
-  let nextWorkspace: WorkspaceSnapshot;
-  try {
-    const imported = parseWorkspace(payload.content, payload.format ?? "json");
-    const localWorkspace = await readLocalWorkspace();
-    nextWorkspace = payload.merge ? mergeWorkspaces(localWorkspace, imported) : imported;
-  } catch (e) {
-    throw new Error(`解析导入数据失败：${e instanceof Error ? e.message : String(e)}`);
-  }
+  return withWriteLock(async () => {
+    let nextWorkspace: WorkspaceSnapshot;
+    try {
+      const imported = parseWorkspace(payload.content, payload.format ?? "json");
+      const localWorkspace = await readLocalWorkspace();
+      nextWorkspace = payload.merge ? mergeWorkspaces(localWorkspace, imported) : imported;
+    } catch (e) {
+      throw new Error(`解析导入数据失败：${e instanceof Error ? e.message : String(e)}`);
+    }
 
-  const serviceUrl = await getServiceUrl();
-  const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
-
-  // Fire-and-forget: push to service in background
-  void pushToService(serviceUrl, payload).then(async (health) => {
-    if (!health) { await markDirty(); } else { await clearDirty(); runtimeState.health = health; }
-  }).catch(() => void markDirty());
-
-  return result;
+    const serviceUrl = await getServiceUrl();
+    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
+    schedulePush((opId) => pushToService(serviceUrl, payload).then((health) => recordPushResult(opId, health)));
+    return result;
+  });
 }
 
 async function handleUpsertProject(payload: UpsertProjectPayload): Promise<RuntimeState & { warnings: string[] }> {
-  const localWorkspace = await readLocalWorkspace();
-  const nextWorkspace = applyUpsertProject(localWorkspace, payload);
-  const serviceUrl = await getServiceUrl();
+  return withWriteLock(async () => {
+    const localWorkspace = await readLocalWorkspace();
+    const nextWorkspace = applyUpsertProject(localWorkspace, payload);
+    const serviceUrl = await getServiceUrl();
 
-  const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
-
-  void tryServiceCall(serviceUrl, async () => {
-    await serviceJson(`/projects/${payload.project.id}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      serviceUrl,
-      body: JSON.stringify(payload),
-    });
-  }).then(async (health) => {
-    if (!health) { await markDirty(); } else { await clearDirty(); runtimeState.health = health; }
-  }).catch(() => markDirty());
-
-  return result;
+    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
+    schedulePush((opId) =>
+      tryServiceCall(serviceUrl, async () => {
+        await serviceJson(`/projects/${payload.project.id}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          serviceUrl,
+          body: JSON.stringify(payload),
+        });
+      }).then((health) => recordPushResult(opId, health)),
+    );
+    return result;
+  });
 }
 
 async function handleDeleteProject(projectId: string): Promise<RuntimeState & { warnings: string[] }> {
-  const localWorkspace = await readLocalWorkspace();
+  return withWriteLock(async () => {
+    const localWorkspace = await readLocalWorkspace();
+    const { workspace: nextWorkspace, deletions } = planDeleteProject(localWorkspace, projectId);
 
-  const affectedRuleSets = localWorkspace.ruleSets.filter((rs) => rs.projectId === projectId);
-  const ruleIdsToRemove = new Set(affectedRuleSets.flatMap((rs) => rs.ruleIds));
+    const serviceUrl = await getServiceUrl();
+    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
 
-  const pendingEntry: PendingDelete = {
-    projectId,
-    ruleIds: [...ruleIdsToRemove],
-    ruleSetIds: affectedRuleSets.map((rs) => rs.id),
-  };
-
-  const nextWorkspace: WorkspaceSnapshot = {
-    ...localWorkspace,
-    projects: localWorkspace.projects.filter((p) => p.id !== projectId),
-    ruleSets: localWorkspace.ruleSets.filter((rs) => rs.projectId !== projectId),
-    rules: localWorkspace.rules.filter((r) => !ruleIdsToRemove.has(r.id)),
-  };
-
-  const serviceUrl = await getServiceUrl();
-
-  const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
-
-  void pushWorkspaceReplace(serviceUrl, nextWorkspace).then(async (health) => {
-    if (!health) {
-      await appendPendingDelete(pendingEntry);
-      await markDirty();
-    } else {
-      await clearPendingDeletes();
-      await clearDirty();
-      runtimeState.health = health;
-    }
-  }).catch(async () => {
-    await appendPendingDelete(pendingEntry);
-    await markDirty();
+    schedulePush((opId) =>
+      pushWorkspaceReplace(serviceUrl, nextWorkspace).then(async (health) => {
+        if (!health) {
+          await appendPendingDeletions(deletions);
+          await markPushFailed(opId);
+        } else {
+          await clearPendingPushOp(opId);
+          runtimeState.health = health;
+        }
+      }),
+    );
+    return result;
   });
-
-  return result;
 }
 
 async function handleUpsertRule(payload: UpsertRulePayload): Promise<RuntimeState & { warnings: string[] }> {
-  const localWorkspace = await readLocalWorkspace();
-  const nextWorkspace = applyUpsertRule(localWorkspace, payload);
-  const serviceUrl = await getServiceUrl();
+  return withWriteLock(async () => {
+    const localWorkspace = await readLocalWorkspace();
+    const nextWorkspace = applyUpsertRule(localWorkspace, payload);
+    const serviceUrl = await getServiceUrl();
 
-  const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
-
-  void tryServiceCall(serviceUrl, async () => {
-    await serviceJson(`/rules/${payload.rule.id}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      serviceUrl,
-      body: JSON.stringify(payload),
-    });
-  }).then(async (health) => {
-    if (!health) { await markDirty(); } else { await clearDirty(); runtimeState.health = health; }
-  }).catch(() => markDirty());
-
-  return result;
+    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
+    schedulePush((opId) =>
+      tryServiceCall(serviceUrl, async () => {
+        await serviceJson(`/rules/${payload.rule.id}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          serviceUrl,
+          body: JSON.stringify(payload),
+        });
+      }).then((health) => recordPushResult(opId, health)),
+    );
+    return result;
+  });
 }
 
 async function handleDeleteRule(ruleId: string): Promise<RuntimeState & { warnings: string[] }> {
-  const localWorkspace = await readLocalWorkspace();
-  const nextWorkspace: WorkspaceSnapshot = {
-    ...localWorkspace,
-    ruleSets: localWorkspace.ruleSets.map((rs) => ({
-      ...rs,
-      ruleIds: rs.ruleIds.filter((id) => id !== ruleId),
-    })),
-    rules: localWorkspace.rules.filter((r) => r.id !== ruleId),
-    updatedAt: new Date().toISOString(),
-  };
+  return withWriteLock(async () => {
+    const localWorkspace = await readLocalWorkspace();
+    const { workspace: nextWorkspace, deletions } = planDeleteRule(localWorkspace, ruleId);
 
-  const serviceUrl = await getServiceUrl();
-  const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
+    const serviceUrl = await getServiceUrl();
+    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
 
-  void pushWorkspaceReplace(serviceUrl, nextWorkspace).then(async (health) => {
-    if (!health) { await markDirty(); } else { await clearDirty(); runtimeState.health = health; }
-  }).catch(() => markDirty());
+    schedulePush((opId) =>
+      pushWorkspaceReplace(serviceUrl, nextWorkspace).then(async (health) => {
+        if (!health) {
+          // Persist the deleted rule id so that even after a future merge-pull
+          // brings the rule back from the service, syncWorkspace knows to
+          // re-apply the removal before pushing replace mode.
+          await appendPendingDeletions(deletions);
+          await markPushFailed(opId);
+        } else {
+          await clearPendingPushOp(opId);
+          runtimeState.health = health;
+        }
+      }),
+    );
+    return result;
+  });
+}
 
-  return result;
+/**
+ * Wrap a fire-and-forget push: register a unique op id under the dirty key,
+ * await the work, and let the push callback decide whether to clear or keep
+ * the op id. Failures inside the push are still treated as "dirty" so we do
+ * not lose track of unsynchronised local state.
+ */
+function schedulePush(work: (opId: string) => Promise<void>): void {
+  const opId = createOpId();
+  void mutatePendingPushOps((ops) => [...ops, opId])
+    .then(() => work(opId))
+    .catch(() => markPushFailed(opId));
+}
+
+async function recordPushResult(opId: string, health: ServiceHealthResponse | null): Promise<void> {
+  if (!health) {
+    await markPushFailed(opId);
+    return;
+  }
+  await clearPendingPushOp(opId);
+  runtimeState.health = health;
 }
 
 async function handleExportWorkspace(projectIds: string[], format: "json" | "yaml"): Promise<ExportWorkspaceResponse> {
@@ -542,12 +654,24 @@ async function proxyRequest(requestId: string, payload: ForwardRequestPayload) {
   // fall back to the native fetch/XHR. Without this, an offline service makes
   // every matching request appear to hang or 502 — worse than not having the
   // extension installed at all.
+  //
+  // After a worker restart `runtimeState.health` resets to null until
+  // syncWorkspace runs, but the user's request can land before that. Probe
+  // /health once here so the very first proxied request after a wake doesn't
+  // get a false-positive offline response.
   if (!runtimeState.health) {
-    throw new Error(SERVICE_OFFLINE_SENTINEL);
+    const probed = await getHealth(runtimeState.serviceUrl || (await getServiceUrl()));
+    if (probed) {
+      runtimeState.health = probed;
+      void syncWorkspace().catch(() => undefined);
+    } else {
+      throw new Error(SERVICE_OFFLINE_SENTINEL);
+    }
   }
 
   const controller = new AbortController();
   inflightForwards.set(requestId, controller);
+  await persistInflightId(requestId);
 
   try {
     const response = await serviceFetch(`/forward`, {
@@ -567,6 +691,7 @@ async function proxyRequest(requestId: string, payload: ForwardRequestPayload) {
     throw normalizeProxyRequestError(error);
   } finally {
     inflightForwards.delete(requestId);
+    await unpersistInflightId(requestId);
   }
 }
 
@@ -577,6 +702,40 @@ function abortInflight(requestId: string): void {
   if (controller) {
     controller.abort();
     inflightForwards.delete(requestId);
+    void unpersistInflightId(requestId);
+  }
+}
+
+/**
+ * Persist inflight forward ids so a worker restart can at least clear stale
+ * ones (see onWorkerWake). The values themselves are opaque correlation ids;
+ * losing them on disk is harmless, the worst outcome is a stale id surviving
+ * one tick longer than necessary.
+ */
+async function persistInflightId(requestId: string): Promise<void> {
+  try {
+    const stored = await chrome.storage.session.get(SESSION_STORAGE_KEYS.inflightForwards);
+    const current = (stored[SESSION_STORAGE_KEYS.inflightForwards] as string[]) ?? [];
+    if (current.includes(requestId)) return;
+    await chrome.storage.session.set({
+      [SESSION_STORAGE_KEYS.inflightForwards]: [...current, requestId],
+    });
+  } catch {
+    /* ignore — best-effort */
+  }
+}
+
+async function unpersistInflightId(requestId: string): Promise<void> {
+  try {
+    const stored = await chrome.storage.session.get(SESSION_STORAGE_KEYS.inflightForwards);
+    const current = (stored[SESSION_STORAGE_KEYS.inflightForwards] as string[]) ?? [];
+    const next = current.filter((id) => id !== requestId);
+    if (next.length === current.length) return;
+    await chrome.storage.session.set({
+      [SESSION_STORAGE_KEYS.inflightForwards]: next,
+    });
+  } catch {
+    /* ignore */
   }
 }
 
@@ -608,10 +767,29 @@ async function getHealth(serviceUrl: string): Promise<ServiceHealthResponse | nu
     if (!response.ok) {
       return null;
     }
-    return (await response.json()) as ServiceHealthResponse;
+    const result = (await response.json()) as ServiceHealthResponse;
+    // Detect "service just came back online" so dirty pending ops drain
+    // automatically instead of waiting for the next user-triggered sync.
+    if (!runtimeState.health && result?.ok) {
+      void scheduleHealthRecoverySync();
+    }
+    return result;
   } catch {
     return null;
   }
+}
+
+let healthRecoveryScheduled = false;
+function scheduleHealthRecoverySync(): void {
+  if (healthRecoveryScheduled) return;
+  healthRecoveryScheduled = true;
+  // Defer to a microtask so the caller of getHealth gets to update
+  // runtimeState.health before sync reads it (otherwise the recovery sync
+  // would loop forever observing health === null).
+  queueMicrotask(() => {
+    healthRecoveryScheduled = false;
+    void syncWorkspace().catch(() => undefined);
+  });
 }
 
 async function getServiceUrl(): Promise<string> {
@@ -621,10 +799,19 @@ async function getServiceUrl(): Promise<string> {
     : DEFAULT_SERVICE_URL;
 }
 
+async function getServiceToken(): Promise<string | undefined> {
+  const stored = await chrome.storage.local.get(STORAGE_KEYS.serviceToken);
+  const value = stored[STORAGE_KEYS.serviceToken];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 async function serviceJson<T>(path: string, init?: RequestInit & { serviceUrl?: string }): Promise<T> {
   const response = await serviceFetch(path, init);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ message: response.statusText }));
+    if (response.status === 401) {
+      throw new Error("服务 token 校验失败，请在设置页重新粘贴 token。");
+    }
     throw new Error(error.message || `Service request failed with ${response.status}.`);
   }
   return (await response.json()) as T;
@@ -633,7 +820,19 @@ async function serviceJson<T>(path: string, init?: RequestInit & { serviceUrl?: 
 async function serviceFetch(path: string, init?: RequestInit & { serviceUrl?: string }): Promise<Response> {
   const serviceUrl = init?.serviceUrl ?? runtimeState.serviceUrl ?? (await getServiceUrl());
   const url = new URL(path, serviceUrl).toString();
-  return fetch(url, init);
+  // /health intentionally does NOT require auth so the extension can probe the
+  // service before the user has pasted a token. Every other endpoint must
+  // attach the bearer.
+  const isHealthProbe = path === "/health" || path.startsWith("/health?");
+  const baseHeaders = (init?.headers ?? {}) as Record<string, string>;
+  let headers: Record<string, string> = baseHeaders;
+  if (!isHealthProbe) {
+    const token = await getServiceToken();
+    if (token) {
+      headers = { ...baseHeaders, authorization: `Bearer ${token}` };
+    }
+  }
+  return fetch(url, { ...init, headers });
 }
 
 async function applyDynamicRules(workspace: WorkspaceSnapshot): Promise<void> {
@@ -704,69 +903,6 @@ async function notifyTabsToRefresh(): Promise<void> {
       .filter((tab) => typeof tab.id === "number" && typeof tab.url === "string" && /^https?:/.test(tab.url))
       .map((tab) => chrome.tabs.sendMessage(tab.id!, { type: "refresh-site-context" }).catch(() => undefined)),
   );
-}
-
-// ── Pure workspace mutation helpers (ported from forwarder-service) ───────
-
-function mergeWorkspaces(current: WorkspaceSnapshot, imported: WorkspaceSnapshot): WorkspaceSnapshot {
-  return {
-    version: Math.max(current.version, imported.version),
-    updatedAt: new Date().toISOString(),
-    projects: mergeArray(current.projects, imported.projects),
-    ruleSets: mergeArray(current.ruleSets, imported.ruleSets),
-    rules: mergeArray(current.rules, imported.rules),
-  };
-}
-
-function mergeArray<T extends { id: string }>(current: T[], incoming: T[]): T[] {
-  const map = new Map<string, T>();
-  for (const item of current) map.set(item.id, item);
-  for (const item of incoming) map.set(item.id, item);
-  return Array.from(map.values());
-}
-
-function upsertById<T extends { id: string }>(items: T[], item: T): T[] {
-  const index = items.findIndex((c) => c.id === item.id);
-  if (index === -1) return [...items, item];
-  const next = [...items];
-  next[index] = item;
-  return next;
-}
-
-function stampUpdated<T extends { createdAt: string; updatedAt: string }>(item: T): T {
-  const now = new Date().toISOString();
-  return { ...item, createdAt: item.createdAt || now, updatedAt: now };
-}
-
-function ensureProjectId(ruleSet: RuleSet, projectId: string): RuleSet {
-  return { ...ruleSet, projectId };
-}
-
-function applyUpsertProject(workspace: WorkspaceSnapshot, payload: UpsertProjectPayload): WorkspaceSnapshot {
-  const projects = upsertById(workspace.projects, stampUpdated(payload.project));
-  let ruleSets = workspace.ruleSets;
-  if (payload.ruleSets) {
-    for (const rs of payload.ruleSets.map(stampUpdated)) {
-      ruleSets = upsertById(ruleSets, ensureProjectId(rs, payload.project.id));
-    }
-  }
-  return { ...workspace, projects, ruleSets, updatedAt: new Date().toISOString() };
-}
-
-function applyUpsertRule(workspace: WorkspaceSnapshot, payload: UpsertRulePayload): WorkspaceSnapshot {
-  const rules = upsertById(workspace.rules, stampUpdated(payload.rule));
-  let ruleSets = workspace.ruleSets.map((rs) => ({
-    ...rs,
-    ruleIds: rs.ruleIds.filter((id) => id !== payload.rule.id),
-  }));
-  if (payload.ruleSetId) {
-    ruleSets = ruleSets.map((rs) =>
-      rs.id === payload.ruleSetId
-        ? stampUpdated({ ...rs, ruleIds: [...rs.ruleIds, payload.rule.id] })
-        : rs,
-    );
-  }
-  return { ...workspace, rules, ruleSets, updatedAt: new Date().toISOString() };
 }
 
 // ── Misc helpers ─────────────────────────────────────────────────────────

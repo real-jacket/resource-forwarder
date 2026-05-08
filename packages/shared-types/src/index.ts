@@ -191,7 +191,12 @@ export interface ExportWorkspaceResponse {
 export interface ServiceHealthResponse {
   ok: boolean;
   version: string;
-  storagePath: string;
+  /**
+   * Optional and intentionally not exposed by /health to avoid leaking the
+   * filesystem layout to anyone who can hit the loose-CORS endpoint. Callers
+   * that need it should read it from their local WorkspaceStorage instance.
+   */
+  storagePath?: string;
 }
 
 export interface ProjectsResponse {

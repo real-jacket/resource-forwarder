@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { matchesProjectSite, sortRules } from "@resource-forwarder/rule-core";
 import type { Project, Rule } from "@resource-forwarder/shared-types";
@@ -144,7 +144,7 @@ function App() {
             <button className="btn btn-primary btn-sm" onClick={() => void chrome.runtime.openOptionsPage()}>规则页</button>
           </div>
         </div>
-        <div className="sp-hero-url">{softBreak(currentUrl) || "打开一个网页后显示"}</div>
+        <div className="sp-hero-url">{currentUrl || "打开一个网页后显示"}</div>
         <div className="sp-hero-badges">
           <span className={`sp-badge ${dashboard?.health ? "online" : "offline"}`}>
             <span className="sp-badge-dot" />
@@ -170,14 +170,14 @@ function App() {
               <div className={`sp-site-item${!project.enabled ? " is-off" : ""}`} key={project.id}>
                 <div className="sp-site-info">
                   <div className="sp-site-name-row">
-                    <span className="sp-site-name">{softBreak(project.name)}</span>
+                    <span className="sp-site-name">{project.name}</span>
                     <span className={`site-list-badge ${project.enabled ? "active" : "disabled"}`}>
                       {project.enabled ? "启用" : "停用"}
                     </span>
                     {project.envLabel && <span className="site-list-badge disabled">{project.envLabel}</span>}
                   </div>
                   <div className="sp-site-meta">
-                    {softBreak(joinCsv(project.siteMatchPatterns ?? project.siteHosts) || "未填写站点匹配")} · {projectRuleCount(project.id)} 条规则
+                    {joinCsv(project.siteMatchPatterns ?? project.siteHosts) || "未填写站点匹配"} · {projectRuleCount(project.id)} 条规则
                   </div>
                 </div>
                 <div className="sp-site-actions">
@@ -217,13 +217,13 @@ function App() {
                 </label>
                 <div className="sp-rule-info">
                   <div className="sp-rule-name-row">
-                    <span className="sp-rule-name">{softBreak(rule.name)}</span>
+                    <span className="sp-rule-name">{rule.name}</span>
                     <span className={`match-badge ${rule.kind === "api_forward" ? "api" : "asset"}`}>
                       {formatKind(rule.kind)}
                     </span>
                   </div>
-                  <div className="sp-rule-path">{softBreak(rule.match.pathGlob)}</div>
-                  <div className="sp-rule-target">{softBreak(formatRuleTarget(rule))}</div>
+                  <div className="sp-rule-path">{rule.match.pathGlob}</div>
+                  <div className="sp-rule-target">{formatRuleTarget(rule)}</div>
                 </div>
               </div>
             ))}
@@ -249,19 +249,6 @@ function formatRuleTarget(rule: Rule): string {
     return rule.target.redirectUrl || "未填写 HTTPS 地址";
   }
   return rule.target.forwardProfile?.targetBaseUrl || "未填写目标地址";
-}
-
-// Insert <wbr> after path/URL separators so long names break at logical
-// boundaries (e.g. between `_`, `/`, `.`) rather than mid-token.
-function softBreak(text: string): React.ReactNode {
-  if (!text) return text;
-  const parts = text.split(/([\/_.\-:?&=])/);
-  const out: React.ReactNode[] = [];
-  for (let i = 0; i < parts.length; i++) {
-    out.push(parts[i]);
-    if (i < parts.length - 1) out.push(<wbr key={i} />);
-  }
-  return out;
 }
 
 const rootElement = document.getElementById("app");

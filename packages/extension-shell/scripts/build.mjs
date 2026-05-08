@@ -48,20 +48,26 @@ async function main() {
       globalName: "ResourceForwarderPageBridge",
       platform: "browser",
     },
+    // Combine the React-based pages into one ESM build so esbuild can hoist
+    // shared dependencies (react, react-dom, rule-core, shared-types) into a
+    // single vendor chunk via `splitting`. Both options.html and
+    // sidepanel.html load their entry as `type="module"` to consume the
+    // chunked output. Without splitting each page bundled its own copy of
+    // react-dom (~140KB each), inflating the unpacked extension size.
     {
       ...shared,
-      entryPoints: ["src/options/main.tsx"],
-      outfile: "dist/options.js",
-      format: "iife",
-      globalName: "ResourceForwarderOptions",
-      platform: "browser",
-    },
-    {
-      ...shared,
-      entryPoints: ["src/sidepanel/main.tsx"],
-      outfile: "dist/sidepanel.js",
-      format: "iife",
-      globalName: "ResourceForwarderSidepanel",
+      entryPoints: {
+        options: "src/options/main.tsx",
+        sidepanel: "src/sidepanel/main.tsx",
+      },
+      outdir: "dist",
+      format: "esm",
+      splitting: true,
+      // Predictable filenames for the entries (no content hash) so the static
+      // HTML can reference them directly. Auto-generated split chunks land in
+      // dist/chunks/ with hashed names.
+      entryNames: "[name]",
+      chunkNames: "chunks/[name]-[hash]",
       platform: "browser",
     },
   ];

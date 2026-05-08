@@ -2,9 +2,11 @@
   "name": "resource-forwarder-workspace",
   "private": true,
   "packageManager": "pnpm@9.15.1",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
-    "dev": "pnpm run dev:all",
-    "dev:all": "sh -c 'trap \"kill 0\" INT TERM EXIT; pnpm --filter @resource-forwarder/forwarder-service dev & pnpm --filter @resource-forwarder/extension-shell dev & wait'",
+    "dev": "concurrently --names service,extension --prefix-colors cyan,magenta --kill-others-on-fail \"pnpm dev:service\" \"pnpm dev:extension\"",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "start": "pnpm --filter @resource-forwarder/forwarder-service start",
@@ -16,6 +18,7 @@
     "@types/node": "^22.13.4",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
+    "concurrently": "^9.2.1",
     "esbuild": "^0.25.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",

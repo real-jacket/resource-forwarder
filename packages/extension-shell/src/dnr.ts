@@ -68,7 +68,11 @@ export function buildScopedDnrRuleGroups(
     }
 
     const rule = toDynamicRule(binding.rule, binding.project?.siteHosts);
-    if (isGlobalProjectScope(binding.project)) {
+    if (
+      isGlobalProjectScope(binding.project) ||
+      isHostWideProjectScope(binding.project) ||
+      isSameOriginAssetRule(binding.project, binding.rule.match.host)
+    ) {
       dynamicRules.push(rule);
       continue;
     }
@@ -119,4 +123,50 @@ function isGlobalProjectScope(project: Project | undefined): boolean {
     const trimmed = pattern.trim();
     return !trimmed || trimmed === "*" || trimmed === "<all_urls>";
   });
+}
+
+function isHostWideProjectScope(project: Project | undefined): boolean {
+  if (!project || project.siteHosts.length === 0) {
+    return false;
+  }
+
+  if (project.siteHosts.some((host) => host === "*" || host.includes("*"))) {
+    return false;
+  }
+
+  const patterns = project.siteMatchPatterns ?? [];
+  if (patterns.length === 0) {
+    return true;
+  }
+
+  return patterns.every((pattern) => {
+    const trimmed = pattern.trim();
+    if (!trimmed || trimmed === "*" || trimmed === "<all_urls>") {
+      return false;
+    }
+
+    const match = trimmed.match(/^(?:\*|https?):\/\/([^/]+)(\/.*)?$/i);
+    if (!match) {
+      return false;
+    }
+
+    const patternHost = match[1] ?? "";
+    const patternPath = match[2] ?? "";
+    const isKnownHost = project.siteHosts.includes(patternHost);
+    const isHostWidePath = patternPath === "" || patternPath === "/" || patternPath === "/*" || patternPath === "/**";
+    return isKnownHost && isHostWidePath;
+  });
+}
+
+function isSameOriginAssetRule(project: Project | undefined, ruleHosts: string[]): boolean {
+  if (!project || project.siteHosts.length === 0 || ruleHosts.length === 0) {
+    return false;
+  }
+
+  if (project.siteHosts.some((host) => host === "*" || host.includes("*"))) {
+    return false;
+  }
+
+  const concreteRuleHosts = ruleHosts.filter((host) => host !== "*" && !host.includes("*"));
+  return concreteRuleHosts.length > 0 && concreteRuleHosts.every((host) => project.siteHosts.includes(host));
 }

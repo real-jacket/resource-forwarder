@@ -3139,6 +3139,23 @@ details[open] .import-preview-warnings-summary::before {
   flex-shrink: 0;
 }
 
+/* Confirm dialog (used by useConfirm — replaces window.confirm). */
+.modal-box.modal-confirm {
+  width: min(440px, calc(100vw - 40px));
+}
+
+.modal-confirm-line {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.modal-confirm-line + .modal-confirm-line {
+  margin-top: 6px;
+}
+
 /* ===================== STATUS BAR ===================== */
 
 .options-statusbar {
