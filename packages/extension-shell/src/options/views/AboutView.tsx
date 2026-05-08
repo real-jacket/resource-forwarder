@@ -19,6 +19,7 @@ export function AboutView() {
       <div className="about-page">
         <HeroBar />
         <div className="about-guide">
+          <FirstRunSection />
           <CoreConceptsSection />
           <WorkflowSection />
           <AssetRedirectExamplesSection />
@@ -60,6 +61,34 @@ function HeroBar() {
         )}
       </div>
     </div>
+  );
+}
+
+function FirstRunSection() {
+  return (
+    <details className="about-accordion" open>
+      <summary>
+        <ChevronIcon />
+        <span className="acc-title">首次连接服务</span>
+        <span className="acc-badge">新手必看</span>
+      </summary>
+      <div className="about-accordion-body">
+        <p>本地服务启用了 token 鉴权，第一次跑 <code>pnpm dev</code> 后，扩展需要拿到 token 才能同步规则。</p>
+        <ol style={{ paddingLeft: 20, lineHeight: 1.8 }}>
+          <li>启动服务（<code>pnpm dev</code> 或 <code>pnpm dev:service</code>）。控制台会打印类似：<br />
+            <code>[forwarder-service] auth token file: /Users/&lt;you&gt;/.../.resource-forwarder/token</code>
+          </li>
+          <li>把该文件的内容（一行 UUID）整段复制。</li>
+          <li>在「设置 → 通用设置」里的「服务 token」输入框粘贴并保存。</li>
+        </ol>
+        <div className="guide-tip">
+          <strong>排查：</strong>如果设置页提示「服务 token 校验失败」，表示 token 不对——重启服务后会保留同一个 token，没必要每次重新粘贴；只有 <code>~/.resource-forwarder/token</code> 文件被删后才会重新生成。
+        </div>
+        <div className="guide-warn">
+          <strong>安全：</strong>该 token 是本地服务的唯一鉴权凭证。任何拿到 token + 本机网络可达的进程都能调用 <code>/forward</code>，请勿粘贴到任何远程脚本或截图。
+        </div>
+      </div>
+    </details>
   );
 }
 
@@ -318,6 +347,29 @@ function FaqSection() {
 
         <h3>从 Resource Override 导入的规则</h3>
         <p>导入时自动识别：localhost 静态资源 → <strong>资源替换</strong>，API 路径 → <strong>API 转发</strong>。导入后可在规则列表查看和调整。</p>
+
+        <h3>SSE / 大文件下载为什么没被代理？</h3>
+        <p>
+          本地服务在转发前会检查响应：<code>Content-Type: text/event-stream</code>（SSE）或 <code>Content-Length</code> 超过 4 MiB 时
+          自动放行到原生 fetch / XHR，规则视为「未命中」（命中日志中显示 <code>passed</code>）。
+          这是有意为之——若把它们整块缓冲到 base64 再回传，会破坏 <code>EventSource</code> / <code>ReadableStream</code> 的流式语义，并可能撑爆扩展消息通道。
+        </p>
+
+        <h3>转发请求里的 Cookie 何时会保留？</h3>
+        <p>
+          目标地址 <strong>同 host</strong>（例如 <code>app.example.com</code> → <code>https://app.example.com</code>）时，<code>Cookie</code>、<code>Origin</code>、<code>Referer</code> 默认透传，方便保持会话。
+          <strong>跨域</strong>转发时（例如转到 <code>localhost</code>）默认剥离这三类头，避免上游因校验失败而拒绝请求。需要强制跨域带 cookie，请在规则的 Header Policy 里把 <code>cookie</code> 写入 <code>passthrough</code> 列表。
+        </p>
+
+        <h3>Authorization 等敏感头会以明文存盘吗？</h3>
+        <p>
+          不会。规则的 <code>headers</code> 中 <code>authorization</code>、<code>cookie</code>、<code>x-api-key</code> 等敏感字段在落盘时会被 AES-256-GCM 加密到 <code>secrets.json</code>（0600），<code>workspace.json</code> 中只剩 <code>secret:&lt;id&gt;</code> 引用。导出工作区时仍是明文，方便迁移；不需要时请勿把导出文件放到不受信任的位置。
+        </p>
+
+        <h3>升级到 0.x 后，部分规则路径不再命中？</h3>
+        <p>
+          这一版统一了 <code>pathGlob</code> 的语义——<strong>单个 <code>*</code> 不再跨 <code>/</code></strong>。如果你之前依赖 <code>/api/*</code> 同时匹配 <code>/api/users/42</code>，请改成 <code>/api/**</code>。
+        </p>
       </div>
     </details>
   );
