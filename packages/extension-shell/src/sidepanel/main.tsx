@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { matchesProjectSite, sortRules } from "@resource-forwarder/rule-core";
 import type { Project, Rule } from "@resource-forwarder/shared-types";
@@ -10,9 +10,59 @@ function App() {
   const [dashboard, setDashboard] = useState<GetDashboardStateResponse | null>(null);
   const [status, setStatus] = useState("正在加载当前页面...");
   const [busy, setBusy] = useState(false);
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     void refresh();
+  }, []);
+
+  useEffect(() => {
+    // Debounce: tab activation, onUpdated and SPA history nav can fire in a burst.
+    const scheduleRefresh = (): void => {
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+      refreshTimer.current = setTimeout(() => {
+        refreshTimer.current = null;
+        void refresh();
+      }, 120);
+    };
+
+    const onActivated = (_info: chrome.tabs.TabActiveInfo): void => scheduleRefresh();
+    const onUpdated = (
+      _tabId: number,
+      changeInfo: chrome.tabs.TabChangeInfo,
+      tab: chrome.tabs.Tab,
+    ): void => {
+      if (!tab.active) return;
+      if (changeInfo.url || changeInfo.status === "complete") scheduleRefresh();
+    };
+    const onWindowFocus = (windowId: number): void => {
+      if (windowId !== chrome.windows.WINDOW_ID_NONE) scheduleRefresh();
+    };
+    const onVisibility = (): void => {
+      if (document.visibilityState === "visible") scheduleRefresh();
+    };
+    // SPA pushState navigations don't reach tabs.onUpdated reliably.
+    const onSpaNav = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails): void => {
+      if (details.frameId !== 0) return;
+      scheduleRefresh();
+    };
+
+    chrome.tabs.onActivated.addListener(onActivated);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.windows?.onFocusChanged.addListener(onWindowFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    chrome.webNavigation?.onHistoryStateUpdated.addListener(onSpaNav);
+    chrome.webNavigation?.onReferenceFragmentUpdated.addListener(onSpaNav);
+
+    return () => {
+      chrome.tabs.onActivated.removeListener(onActivated);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.windows?.onFocusChanged.removeListener(onWindowFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      chrome.webNavigation?.onHistoryStateUpdated.removeListener(onSpaNav);
+      chrome.webNavigation?.onReferenceFragmentUpdated.removeListener(onSpaNav);
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    };
   }, []);
 
   const currentHost = dashboard?.currentTab?.host ?? "";
