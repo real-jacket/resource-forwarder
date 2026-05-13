@@ -475,6 +475,24 @@ describe("rule-core", () => {
     expect(matchesProjectSite(project, "https://other.com/tables/abc")).toBe(false);
   });
 
+  it("matchesProjectSite treats trailing `*` as Chrome match-pattern wildcard spanning `/`", () => {
+    const project = {
+      siteHosts: ["co-dev-18.shimorelease.com"],
+      siteMatchPatterns: ["https://co-dev-18.shimorelease.com/tables/*"],
+    };
+    expect(
+      matchesProjectSite(
+        project,
+        "https://co-dev-18.shimorelease.com/tables/G8WoAMVQ2QfAJ3qM/?table=TbNkL5bFWTH&view=FSihaxoG1QJ",
+      ),
+    ).toBe(true);
+    expect(
+      matchesProjectSite(project, "https://co-dev-18.shimorelease.com/tables/abc/sub/leaf"),
+    ).toBe(true);
+    expect(matchesProjectSite(project, "https://co-dev-18.shimorelease.com/tables/")).toBe(true);
+    expect(matchesProjectSite(project, "https://co-dev-18.shimorelease.com/sheets/abc")).toBe(false);
+  });
+
   it("matchesProjectSite falls back to siteHosts when siteMatchPatterns is empty", () => {
     const project = { siteHosts: ["shimo.im"], siteMatchPatterns: [] };
     expect(matchesProjectSite(project, "https://shimo.im/tables/abc")).toBe(true);

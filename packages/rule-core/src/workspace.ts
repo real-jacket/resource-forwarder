@@ -166,7 +166,9 @@ function matchesSitePattern(pattern: string, pageUrl: string): boolean {
   if (patternHost !== "*" && !matchesHost([patternHost!], url.host)) return false;
 
   const pathGlob = patternPath || "/**";
-  const normalizedGlob = pathGlob.endsWith("*") ? pathGlob : `${pathGlob}**`;
+  // Chrome match-pattern semantics: `*` spans `/`. Internal path glob uses single-segment `*`, so promote standalone `*` to `**`.
+  const crossSegmentGlob = pathGlob.replace(/(?<!\*)\*(?!\*)/g, "**");
+  const normalizedGlob = crossSegmentGlob.endsWith("*") ? crossSegmentGlob : `${crossSegmentGlob}**`;
   return matchesPath(normalizedGlob, url.pathname);
 }
 
