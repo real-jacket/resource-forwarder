@@ -51,6 +51,13 @@ Dependency direction is intentionally one-way:
 2. Background syncs workspace from service and converts enabled asset rules to dynamic DNR rules (`chrome.declarativeNetRequest.updateDynamicRules`).
 3. Browser applies redirect directly at request layer (no service hop).
 
+Generated DNR rules carry `initiatorDomains` bound to the project's `siteHosts`
+(unless the project is wildcard / `*`). This means a rule only fires when the
+request is initiated by a page inside the owning project's site scope — so a
+disabled or unmatched project cannot leak its rules onto unrelated pages. The
+only exception is true global projects (`siteHosts` empty or contains `*`),
+which intentionally have no initiator restriction.
+
 ### API forward (`api_forward`)
 
 1. Content script injects `page-bridge.js` into page context.
@@ -71,7 +78,7 @@ Dependency direction is intentionally one-way:
 
 - Service base URL default is `http://127.0.0.1:5178` (extension constant + service default port).
 - Background worker is the source of truth for runtime state (`serviceUrl`, `health`, `workspace`) inside the extension.
-- Sidepanel is intentionally lightweight (status/toggle oriented), while options page is the full CRUD/import/export surface.
+- Sidepanel is intentionally lightweight (status/toggle oriented), while options page is the full CRUD/import/export surface. It surfaces a `N 条 DNR 已注册` badge sourced from `chrome.declarativeNetRequest.getDynamicRules / getSessionRules` so users can see how many rules Chrome is actually enforcing — useful when the workspace view says "未匹配" but stale or cross-project DNR rules are still installed.
 - `asset_redirect` rules must target `https://...` URLs; warnings are generated in `rule-core` for unsupported targets.
 - Import/export supports JSON and YAML; `rule-core` auto-detects format for imports.
 

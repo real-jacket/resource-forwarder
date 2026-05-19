@@ -124,12 +124,12 @@ describe("rule-core", () => {
     expect(parsed.rules[0]?.match.host).toEqual(["app.example.com"]);
   });
 
-  it("omits initiatorDomains for same-origin asset redirects", () => {
+  it("sets initiatorDomains from project siteHosts even for same-origin asset redirects", () => {
     const rules = toDynamicNetRequestRules(workspace);
     expect(rules).toHaveLength(1);
     expect(rules[0]?.action.redirect.url).toContain("https://cdn.example.com");
     expect(rules[0]?.condition.requestDomains).toEqual(["app.example.com"]);
-    expect(rules[0]?.condition.initiatorDomains).toBeUndefined();
+    expect(rules[0]?.condition.initiatorDomains).toEqual(["app.example.com"]);
   });
 
   it("creates regexFilter + regexSubstitution for wildcard redirectUrl", () => {
@@ -463,6 +463,30 @@ describe("rule-core", () => {
     };
     const rules = toDynamicNetRequestRules(globalWorkspace);
     expect(rules[0]?.condition.initiatorDomains).toBeUndefined();
+  });
+
+  it("sets initiatorDomains for host-only projects (no siteMatchPatterns)", () => {
+    const hostOnlyWorkspace: WorkspaceSnapshot = {
+      ...workspace,
+      projects: [
+        {
+          ...workspace.projects[0]!,
+          siteHosts: ["co-dev-18.shimorelease.com"],
+          siteMatchPatterns: undefined,
+        },
+      ],
+      rules: [
+        {
+          ...assetRule,
+          match: {
+            ...assetRule.match,
+            host: ["co-dev-18.shimorelease.com"],
+          },
+        },
+      ],
+    };
+    const rules = toDynamicNetRequestRules(hostOnlyWorkspace);
+    expect(rules[0]?.condition.initiatorDomains).toEqual(["co-dev-18.shimorelease.com"]);
   });
 
   it("matchesProjectSite uses siteMatchPatterns for path-level matching", () => {

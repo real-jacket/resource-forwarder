@@ -90,6 +90,13 @@ async function onWorkerWake(reason: "install" | "startup" | "alarm"): Promise<vo
   // the AbortControllers they reference are gone, and leaving them in storage
   // would trick abortInflight() into thinking it can still cancel them.
   await chrome.storage.session.remove(SESSION_STORAGE_KEYS.inflightForwards).catch(() => undefined);
+  // Force a DNR reconcile on every wake even if the workspace hasn't changed —
+  // chrome.declarativeNetRequest is persistent and a previous worker incarnation
+  // may have left stale rules (e.g. apply failed before the worker died, or the
+  // rule set was authored externally). Module-level state is already undefined
+  // here, but we set it explicitly to keep the contract clear for future readers
+  // / refactors that might move this state elsewhere.
+  lastAppliedDnrFingerprint = undefined;
   // Always sync on wake so dirty pending ops eventually drain even if no UI
   // surface has triggered a manual sync. The alarm path makes this a soft
   // periodic retry; install/startup runs once at the obvious points.
@@ -617,11 +624,12 @@ async function getDashboardState(tabId?: number): Promise<DashboardState> {
     try { await syncWorkspace(); } catch { /* use whatever runtimeState has */ }
   }
 
-  const [{ logs }, currentTab] = await Promise.all([
+  const [{ logs }, currentTab, dnrCounts] = await Promise.all([
     runtimeState.health
       ? serviceJson<LogsResponse>("/logs?limit=20").catch(() => ({ logs: [] as LogsResponse["logs"] }))
       : { logs: [] as LogsResponse["logs"] },
     getTabSnapshot(tabId),
+    readDnrRuleCounts(),
   ]);
 
   return {
@@ -629,7 +637,20 @@ async function getDashboardState(tabId?: number): Promise<DashboardState> {
     warnings: runtimeWarnings,
     logs,
     currentTab,
+    dnrRuleCount: dnrCounts,
   };
+}
+
+async function readDnrRuleCounts(): Promise<{ dynamic: number; session: number }> {
+  try {
+    const [dynamic, session] = await Promise.all([
+      chrome.declarativeNetRequest.getDynamicRules(),
+      chrome.declarativeNetRequest.getSessionRules(),
+    ]);
+    return { dynamic: dynamic.length, session: session.length };
+  } catch {
+    return { dynamic: 0, session: 0 };
+  }
 }
 
 // ── Site context / proxy ─────────────────────────────────────────────────
@@ -878,7 +899,15 @@ async function applyDynamicRules(workspace: WorkspaceSnapshot): Promise<void> {
       removeRuleIds: sessionUpdate.removeRuleIds,
       addRules: sessionUpdate.addRules as chrome.declarativeNetRequest.Rule[],
     }),
-  ]);
+  ]).catch((error) => {
+    // Reset the fingerprint so the next commitWorkspace / refreshDnrForTabs
+    // tick re-attempts the same plan instead of being short-circuited by the
+    // identical-fingerprint check. Without this, a single transient failure
+    // (Chrome rate-limit, quota error) would leave DNR permanently out of sync
+    // with the workspace until the worker restarts or the workspace changes.
+    lastAppliedDnrFingerprint = undefined;
+    throw error;
+  });
 
   lastAppliedDnrFingerprint = fingerprint;
   await chrome.storage.local.set({

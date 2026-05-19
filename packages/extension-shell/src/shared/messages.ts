@@ -18,6 +18,14 @@ export interface DashboardState extends RuntimeState {
     url: string;
     host: string;
   };
+  // Chrome 实际注册的 DNR 规则计数。sidepanel 显示「未匹配」是基于当前页面 URL
+  // 与 workspace 中 project 的匹配，但 DNR 一旦注册就独立运行；当两者出现差异
+  // （workspace 改变但 DNR 还未同步、或 stale DNR 残留）时，这个字段让 UI 能
+  // 提示用户「浏览器里其实还注册着 N 条规则」。
+  dnrRuleCount?: {
+    dynamic: number;
+    session: number;
+  };
 }
 
 export type RuntimeRequest =

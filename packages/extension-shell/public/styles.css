@@ -3357,6 +3357,11 @@ details[open] .import-preview-warnings-summary::before {
   color: var(--warning-text);
 }
 
+.sp-badge.warning {
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
 .sp-badge.neutral {
   background: #f5f5f5;
   color: var(--muted);

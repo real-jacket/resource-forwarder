@@ -109,6 +109,11 @@ function App() {
     [matchedRules],
   );
 
+  const dnrRegisteredCount =
+    (dashboard?.dnrRuleCount?.dynamic ?? 0) + (dashboard?.dnrRuleCount?.session ?? 0);
+  const dnrBadgeTone =
+    matchedProjects.length === 0 && dnrRegisteredCount > 0 ? "warning" : "neutral";
+
   async function refresh(): Promise<void> {
     setBusy(true);
     try {
@@ -204,6 +209,14 @@ function App() {
             {matchedProjects.length > 0 ? `${matchedProjects.length} 个站点` : "未匹配"}
           </span>
           <span className="sp-badge neutral">{activeRuleCount} / {matchedRules.length} 条规则生效</span>
+          {dnrRegisteredCount > 0 && (
+            <span
+              className={`sp-badge ${dnrBadgeTone}`}
+              title="Chrome 中已注册的 DNR 规则数（asset_redirect 通过浏览器请求层直接重定向，不受当前页面匹配影响）"
+            >
+              {dnrRegisteredCount} 条 DNR 已注册
+            </span>
+          )}
         </div>
       </div>
 

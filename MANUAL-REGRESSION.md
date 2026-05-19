@@ -94,6 +94,21 @@ fetch("https://example.com/api/binary").then(r => r.arrayBuffer()).then(b => con
 
 期望：200ms 内 DNR 切换；background DevTools 能看到 `applyDynamicRules` 被调用。
 
+### 2.3 跨页面 initiator 隔离（host-only project）
+
+- 项目 siteHosts=`["a.example.com"]`（**不设** siteMatchPatterns，对应导入自 Resource Override 的典型形态）
+- asset_redirect 规则 host=`a.example.com`，pathGlob=`/static/foo.js`，redirect → `http://localhost:8000/foo.js`
+- 打开 `https://a.example.com/` 上的页面，请求 `/static/foo.js` → **被** redirect（同源命中）
+- 打开任意其它页面（例如 `https://example.org/`），在 Console 跑：
+
+  ```js
+  fetch("https://a.example.com/static/foo.js").then(r => r.text()).then(t => console.log(t.length))
+  ```
+
+  期望：**不被** redirect（响应来自上游 a.example.com，而不是 localhost）。在 background DevTools 跑 `await chrome.declarativeNetRequest.getDynamicRules()`，可看到该规则带 `initiatorDomains: ["a.example.com"]`。
+
+  这是 DNR 同源 escape hatch 被移除后的预期：sidepanel 视角下「未匹配」的页面不会再触发该项目的资源替换。
+
 ## 3. 写锁专项
 
 ### 3.1 options 连点
@@ -227,6 +242,20 @@ fetch("https://example.com/api/profile").then(r => r.json()).then(console.log).c
 - 长 URL 在容器边界处自动换行（CSS `overflow-wrap: anywhere`）
 - 不应横向溢出
 - 不应有可见零宽字符或异常断点
+
+### 7.1 DNR 已注册徽章
+
+前置：保留几条 asset_redirect 规则（让 `chrome.declarativeNetRequest.getDynamicRules()` 返回非空）。
+
+- 当前页面**匹配**任一 enabled project：hero 区出现 `N 条 DNR 已注册` 徽章，颜色为中性灰（`.sp-badge.neutral`），N 与 background 内 `await chrome.declarativeNetRequest.getDynamicRules()` + `getSessionRules()` 长度之和一致。
+- 切到一个**未匹配**任何 project 的页面（例如 `about:blank` 后再打开 `https://example.org/`，project 中没有该站点）：徽章变为橙色 `.sp-badge.warning`，提示用户当前页面在 sidepanel 视角下未匹配，但 Chrome 里仍注册着 N 条 DNR 规则。
+- N 为 0 时徽章应隐藏，不出现空徽章。
+
+### 7.2 DNR apply 失败自愈
+
+- 在 background DevTools 给 `chrome.declarativeNetRequest.updateDynamicRules` 临时打断点并抛错，触发一次 commitWorkspace（在 options 切换一条规则）。
+- 期望：sidepanel `warnings` 出现「DNR 规则应用失败」一条；`lastAppliedDnrFingerprint` 被清空。
+- 移除断点，下次 commitWorkspace 或 alarms tick（≤ 1 分钟）应重新成功 apply 而**不被 fingerprint 检查短路**，sidepanel `N 条 DNR 已注册` 数恢复一致。
 
 ## 8. token 鉴权与 Host 防御
 

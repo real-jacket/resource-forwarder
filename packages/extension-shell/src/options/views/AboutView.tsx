@@ -370,6 +370,18 @@ function FaqSection() {
         <p>
           这一版统一了 <code>pathGlob</code> 的语义——<strong>单个 <code>*</code> 不再跨 <code>/</code></strong>。如果你之前依赖 <code>/api/*</code> 同时匹配 <code>/api/users/42</code>，请改成 <code>/api/**</code>。
         </p>
+
+        <h3>sidepanel 显示「未匹配」时，为什么资源还被替换？</h3>
+        <p>
+          asset_redirect 规则注册到 Chrome DNR 时会绑定到项目的 <code>siteHosts</code>（<code>initiatorDomains</code>）：
+          原则上只有项目站点页面发起的请求才能被替换。如果 sidepanel hero 区显示
+          <strong>橙色</strong>的「N 条 DNR 已注册」徽章，说明 Chrome 中仍注册着 N 条规则——
+          通常是 workspace 视角下当前页面已不匹配，或 DNR 还未随 workspace 变更同步清理。
+          在 background DevTools 跑 <code>await chrome.declarativeNetRequest.getDynamicRules()</code>
+          可查看真实下发的规则集；扩展会在下次 commitWorkspace 或 <code>chrome.alarms</code> 周期（约 1 分钟）
+          触发时自动重新 reconcile。例外：把项目 <code>siteHosts</code> 设为 <code>*</code> 的真 global 项目
+          不绑 initiator，会对任何页面发起的命中请求生效。
+        </p>
       </div>
     </details>
   );
@@ -404,15 +416,15 @@ function AssetRedirectFlow() {
           <FlowArrowRight />
           <FlowNode kind="ext" label="规则注册" text="pathGlob" sub="写入 urlFilter / regexFilter" />
           <FlowArrowRight label="注册到" />
-          <FlowNode kind="chrome" label="Chrome" text="DNR 规则" sub="全局生效，跨标签页" />
+          <FlowNode kind="chrome" label="Chrome" text="DNR 规则" sub="绑 initiatorDomains，按项目站点作用域生效" />
         </div>
         <div style={{ height: 10 }} />
         <div className="flow-row">
           <FlowNode kind="browser" label="浏览器" text="发起请求" sub="<script> / <link> / <img>" />
           <FlowArrowRight />
-          <FlowNode kind="chrome" label="Chrome 网络层" text="Host 匹配" sub="requestDomains 过滤" />
-          <FlowArrowRight label="域名命中" />
-          <FlowNode kind="chrome" label="Chrome 网络层" text="路径 + 类型匹配" sub="urlFilter + resourceTypes" />
+          <FlowNode kind="chrome" label="Chrome 网络层" text="发起页过滤" sub="initiatorDomains 限定项目页面" />
+          <FlowArrowRight label="页面命中" />
+          <FlowNode kind="chrome" label="Chrome 网络层" text="目标 + 路径匹配" sub="requestDomains + urlFilter" />
           <FlowArrowRight label="全部命中" />
           <FlowNode kind="ext" label="重定向" text="替换 URL" sub="redirect / regexSub" />
           <FlowArrowRight />
@@ -420,10 +432,16 @@ function AssetRedirectFlow() {
         </div>
       </div>
       <p className="about-guide" style={{ margin: 0, fontSize: 12 }}>
-        规则的 <code>match.host</code> 和 <code>pathGlob</code> 在注册时转为 Chrome DNR 条件，全局生效。
-        浏览器每次请求都会经过 Chrome 网络层，依次检查 <strong>域名</strong>（requestDomains）→
-        <strong>路径</strong>（urlFilter / regexFilter）→ <strong>资源类型</strong>（script / stylesheet / image / font），
+        规则的 <code>match.host</code> 和 <code>pathGlob</code> 在注册时转为 Chrome DNR 条件，
+        同时把项目的 <code>siteHosts</code> 写入 <code>initiatorDomains</code>。浏览器每次请求都会经过 Chrome 网络层，依次检查
+        <strong>发起页面</strong>（initiatorDomains，限定为项目站点）→
+        <strong>目标域名</strong>（requestDomains）→
+        <strong>路径</strong>（urlFilter / regexFilter）→
+        <strong>资源类型</strong>（script / stylesheet / image / font），
         全部通过才执行重定向。
+      </p>
+      <p className="about-guide" style={{ margin: 0, marginTop: 6, fontSize: 12, color: "var(--muted)" }}>
+        例外：当项目的 <code>siteHosts</code> 为空或包含 <code>*</code>（真 global 项目）时不绑 initiatorDomains，会对任何页面发起的命中请求生效。
       </p>
     </div>
   );

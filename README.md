@@ -57,7 +57,7 @@ pnpm test           # 运行全部测试
 
 - `Project`: scopes sites and default enable state
 - `RuleSet`: groups rules for enable/disable and import/export
-- `asset_redirect`: converts matched asset requests into HTTPS redirects via dynamic DNR rules
+- `asset_redirect`: converts matched asset requests into HTTPS redirects via dynamic DNR rules. Rules are scoped to the owning project's `siteHosts` via `initiatorDomains`, so they only fire on pages within the project's site scope — wildcard / global projects intentionally skip this restriction.
 - `api_forward`: intercepts `fetch` and `XMLHttpRequest` in the page bridge, then proxies through the local service
 
 ## Current boundaries

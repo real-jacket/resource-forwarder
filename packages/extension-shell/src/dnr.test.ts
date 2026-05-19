@@ -208,7 +208,7 @@ describe("dnr helpers", () => {
     expect(groups.dynamicRules).toHaveLength(1);
     expect(groups.dynamicRules[0]?.condition.tabIds).toBeUndefined();
     expect(groups.dynamicRules[0]?.condition.requestDomains).toEqual(["co-dev-17.shimorelease.com"]);
-    expect(groups.dynamicRules[0]?.condition.initiatorDomains).toBeUndefined();
+    expect(groups.dynamicRules[0]?.condition.initiatorDomains).toEqual(["co-dev-17.shimorelease.com"]);
     expect(groups.sessionRules).toHaveLength(0);
   });
 
@@ -252,6 +252,49 @@ describe("dnr helpers", () => {
     expect(groups.dynamicRules).toHaveLength(1);
     expect(groups.dynamicRules[0]?.condition.tabIds).toBeUndefined();
     expect(groups.dynamicRules[0]?.condition.requestDomains).toEqual(["co-dev-17.shimorelease.com"]);
+    expect(groups.dynamicRules[0]?.condition.initiatorDomains).toEqual(["co-dev-17.shimorelease.com"]);
+    expect(groups.sessionRules).toHaveLength(0);
+  });
+
+  it("treats host-only projects (no siteMatchPatterns) as host-wide, not global, so initiatorDomains is bound", () => {
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [
+          project({
+            siteHosts: ["co-dev-18.shimorelease.com"],
+            siteMatchPatterns: undefined,
+          }),
+        ],
+        ruleSets: [
+          {
+            id: "rs-host-only",
+            projectId: "project-1",
+            name: "Host only",
+            enabled: true,
+            ruleIds: ["rule-zebra"],
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        rules: [
+          {
+            ...assetRule("rule-zebra", "co-dev-18.shimorelease.com", "http://localhost:8000/zebra.js"),
+            match: {
+              host: ["co-dev-18.shimorelease.com"],
+              pathGlob: "/minio/shimo-assets/table/zebra.*.js",
+              resourceType: ["script"],
+              tabScope: { mode: "all" },
+            },
+          },
+        ],
+      },
+      [],
+    );
+
+    expect(groups.dynamicRules).toHaveLength(1);
+    expect(groups.dynamicRules[0]?.condition.initiatorDomains).toEqual(["co-dev-18.shimorelease.com"]);
     expect(groups.sessionRules).toHaveLength(0);
   });
 });

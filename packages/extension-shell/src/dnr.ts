@@ -114,9 +114,16 @@ function isGlobalProjectScope(project: Project | undefined): boolean {
     return true;
   }
 
+  // 真 global：siteHosts 缺省或包含 "*" 才不限定页面来源。仅有具体 siteHosts
+  // 但没设置 siteMatchPatterns 的项目是 host-wide，不能当成 global，否则会绕过
+  // initiatorDomains 绑定，让规则在任意页面生效。
+  if (project.siteHosts.length === 0 || project.siteHosts.includes("*")) {
+    return true;
+  }
+
   const patterns = project.siteMatchPatterns ?? [];
   if (patterns.length === 0) {
-    return true;
+    return false;
   }
 
   return patterns.some((pattern) => {

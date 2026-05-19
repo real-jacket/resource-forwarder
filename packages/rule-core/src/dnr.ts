@@ -32,7 +32,7 @@ export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicR
     : undefined;
 
   const redirectUrl = rule.target.redirectUrl ?? "";
-  const initiatorDomains = resolveInitiatorDomains(projectSiteHosts, rule.match.host);
+  const initiatorDomains = resolveInitiatorDomains(projectSiteHosts);
 
   if (redirectUrl.includes("*")) {
     const wildcard = buildWildcardRedirect(rule.match, redirectUrl);
@@ -78,23 +78,21 @@ export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicR
  * Returns undefined (no restriction) when:
  * - siteHosts is not provided or empty
  * - siteHosts contains the wildcard "*"
- * - siteHosts only lists the same hosts as the rule's own match.host
- *   (self-referential: the rule targets the same domain the page is on)
+ *
+ * Same-origin asset rules (rule.match.host == project.siteHosts) used to skip
+ * initiatorDomains as well, but that meant the rule fired for any page that
+ * fetched the resource — including pages whose project was disabled or not
+ * matched at all. We now always bind to the project's siteHosts so DNR matches
+ * the sidepanel's "matched site" view.
  */
 function resolveInitiatorDomains(
   projectSiteHosts: string[] | undefined,
-  ruleMatchHosts: string[],
 ): string[] | undefined {
   if (!projectSiteHosts || projectSiteHosts.length === 0) return undefined;
   if (projectSiteHosts.includes("*")) return undefined;
 
   const concrete = projectSiteHosts.filter((h) => h !== "*" && !h.startsWith("*."));
   if (concrete.length === 0) return undefined;
-
-  const concreteRuleHosts = ruleMatchHosts.filter((h) => h !== "*" && !h.includes("*"));
-  if (concreteRuleHosts.length > 0 && concrete.every((host) => concreteRuleHosts.includes(host))) {
-    return undefined;
-  }
 
   return concrete;
 }
