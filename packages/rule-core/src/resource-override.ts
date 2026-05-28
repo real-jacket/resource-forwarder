@@ -128,7 +128,7 @@ export function parseResourceOverrideExport(content: string): {
     workspace.ruleSets.push({
       id: ruleSetId,
       projectId,
-      name: `${buildImportedProjectName(siteHosts[0] ?? domainLabel)} 规则组`,
+      name: `${buildImportedProjectName(siteHosts[0] ?? domainLabel)} 默认分组`,
       enabled: true,
       ruleIds,
       note: "Imported from Resource Override",

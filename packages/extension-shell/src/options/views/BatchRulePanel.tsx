@@ -7,6 +7,7 @@ export interface BatchRulePanelProps {
   drafts: BatchRuleDraft[];
   selectedProject: Project | undefined;
   selectedRuleSet: RuleSet | undefined;
+  projectRuleSets: RuleSet[];
   busy: boolean;
 
   /** Patch a single draft's fields, identified by `localId`. */
@@ -28,6 +29,7 @@ export function BatchRulePanel({
   drafts,
   selectedProject,
   selectedRuleSet,
+  projectRuleSets,
   busy,
   updateDraft,
   appendDraft,
@@ -35,7 +37,18 @@ export function BatchRulePanel({
   onClose,
   onSave,
 }: BatchRulePanelProps) {
-  const canSave = !busy && !!selectedProject && !!selectedRuleSet;
+  const canSave = !busy && !!selectedProject && !!selectedRuleSet && drafts.every((d) => !!d.ruleSetId);
+
+  // The "target group" applies to every draft in this batch — splitting groups
+  // mid-batch would force users to think about ruleSet ids per row, which is
+  // the opposite of why batch mode exists. Pick the first draft's ruleSetId as
+  // the source of truth and propagate any change to all drafts at once.
+  const activeRuleSetId = drafts[0]?.ruleSetId ?? selectedRuleSet?.id ?? "";
+  function changeTargetRuleSet(nextId: string) {
+    for (const draft of drafts) {
+      updateDraft(draft.localId, { ruleSetId: nextId });
+    }
+  }
 
   return (
     <aside className="rule-panel">
@@ -62,6 +75,26 @@ export function BatchRulePanel({
             }}
           >
             所属站点：<strong style={{ color: "var(--ink)" }}>{selectedProject.name}</strong>
+          </div>
+        )}
+
+        {projectRuleSets.length > 0 && (
+          <div className="form-group">
+            <label className="form-label">目标分组</label>
+            <select
+              className="form-input"
+              value={activeRuleSetId}
+              onChange={(e) => changeTargetRuleSet(e.target.value)}
+              disabled={busy}
+            >
+              {projectRuleSets.map((rs) => (
+                <option key={rs.id} value={rs.id}>
+                  {rs.name}
+                  {rs.enabled ? "" : "（已停用）"}
+                </option>
+              ))}
+            </select>
+            <span className="form-hint">本次新增的所有规则都将归到此分组下。</span>
           </div>
         )}
 

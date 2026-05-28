@@ -30,6 +30,21 @@ export interface ProjectDraft {
 }
 
 /**
+ * Form-friendly mirror of `RuleSet`. Tracks which Project this group belongs to
+ * because the modal is opened in two scenarios — "edit existing" and "new under
+ * the currently selected project" — and only the latter has a real id yet.
+ */
+export interface RuleSetDraft {
+  id: string;
+  projectId: string;
+  name: string;
+  enabled: boolean;
+  /** CSV form for the optional group-scope patterns input. Empty = follow project. */
+  siteMatchPatterns: string;
+  note: string;
+}
+
+/**
  * Form-friendly mirror of `Rule`. Same string-bag rationale as ProjectDraft;
  * fields like `host`, `method`, `tags` are CSV strings while in the editor.
  */

@@ -8,6 +8,7 @@ import type {
   ProjectsResponse,
   RequestContext,
   RuleBinding,
+  RuleSet,
   RulesResponse,
   ServiceHealthResponse,
   SupportedExportFormat,
@@ -215,6 +216,37 @@ function registerRoutes(
       }
 
       const workspace = await storage.upsertRule(request.body);
+      return { workspace, warnings: collectWorkspaceWarnings(workspace) };
+    },
+  );
+
+  app.put<{ Params: { id: string }; Body: { ruleSet: RuleSet } }>(
+    "/rule-sets/:id",
+    {
+      schema: {
+        params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] },
+        body: upsertRuleSetBodySchema,
+      },
+    },
+    async (request, reply) => {
+      if (request.params.id !== request.body.ruleSet.id) {
+        return reply.status(400).send({ message: "Rule set id mismatch." });
+      }
+
+      const workspace = await storage.upsertRuleSet(request.body.ruleSet);
+      return { workspace, warnings: collectWorkspaceWarnings(workspace) };
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>(
+    "/rule-sets/:id",
+    {
+      schema: {
+        params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] },
+      },
+    },
+    async (request) => {
+      const workspace = await storage.deleteRuleSet(request.params.id);
       return { workspace, warnings: collectWorkspaceWarnings(workspace) };
     },
   );
@@ -472,6 +504,15 @@ const upsertRuleBodySchema = {
   properties: {
     rule: ruleSchema,
     ruleSetId: { type: "string", maxLength: 200 },
+  },
+  additionalProperties: false,
+} as const;
+
+const upsertRuleSetBodySchema = {
+  type: "object",
+  required: ["ruleSet"],
+  properties: {
+    ruleSet: ruleSetSchema,
   },
   additionalProperties: false,
 } as const;

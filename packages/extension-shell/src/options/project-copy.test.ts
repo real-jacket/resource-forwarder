@@ -32,7 +32,7 @@ const workspace: WorkspaceSnapshot = {
     {
       id: "ruleset-1",
       projectId: "project-1",
-      name: "默认规则组",
+      name: "默认分组",
       enabled: true,
       ruleIds: ["rule-api", "rule-asset"],
       createdAt: "2026-01-01T00:00:00.000Z",

@@ -4,6 +4,7 @@ import type {
   ImportWorkspacePayload,
   LogsResponse,
   ProjectsResponse,
+  RuleSet,
   RulesResponse,
   RuntimeState,
   ServiceHealthResponse,
@@ -16,6 +17,7 @@ import {
   applyPendingDeletions,
   applyUpsertProject,
   applyUpsertRule,
+  applyUpsertRuleSet,
   assertWorkspace,
   collectWorkspaceWarnings,
   createEmptyWorkspace,
@@ -26,6 +28,7 @@ import {
   parseWorkspace,
   planDeleteProject,
   planDeleteRule,
+  planDeleteRuleSet,
   serializeWorkspace,
   trimWorkspaceForUrl,
   type PendingDeletions,
@@ -184,6 +187,10 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
       return handleUpsertRule(message.payload);
     case "delete-rule":
       return handleDeleteRule(message.ruleId);
+    case "upsert-rule-set":
+      return handleUpsertRuleSet(message.payload.ruleSet);
+    case "delete-rule-set":
+      return handleDeleteRuleSet(message.ruleSetId);
     case "get-logs":
       return serviceJson<LogsResponse>(
         `/logs?limit=${message.limit ?? 50}${message.projectId ? `&projectId=${encodeURIComponent(message.projectId)}` : ""}`,
@@ -523,6 +530,50 @@ async function handleDeleteRule(ruleId: string): Promise<RuntimeState & { warnin
           // Persist the deleted rule id so that even after a future merge-pull
           // brings the rule back from the service, syncWorkspace knows to
           // re-apply the removal before pushing replace mode.
+          await appendPendingDeletions(deletions);
+          await markPushFailed(opId);
+        } else {
+          await clearPendingPushOp(opId);
+          runtimeState.health = health;
+        }
+      }),
+    );
+    return result;
+  });
+}
+
+async function handleUpsertRuleSet(ruleSet: RuleSet): Promise<RuntimeState & { warnings: string[] }> {
+  return withWriteLock(async () => {
+    const localWorkspace = await readLocalWorkspace();
+    const nextWorkspace = applyUpsertRuleSet(localWorkspace, ruleSet);
+    const serviceUrl = await getServiceUrl();
+
+    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
+    schedulePush((opId) =>
+      tryServiceCall(serviceUrl, async () => {
+        await serviceJson(`/rule-sets/${ruleSet.id}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          serviceUrl,
+          body: JSON.stringify({ ruleSet }),
+        });
+      }).then((health) => recordPushResult(opId, health)),
+    );
+    return result;
+  });
+}
+
+async function handleDeleteRuleSet(ruleSetId: string): Promise<RuntimeState & { warnings: string[] }> {
+  return withWriteLock(async () => {
+    const localWorkspace = await readLocalWorkspace();
+    const { workspace: nextWorkspace, deletions } = planDeleteRuleSet(localWorkspace, ruleSetId);
+
+    const serviceUrl = await getServiceUrl();
+    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
+
+    schedulePush((opId) =>
+      pushWorkspaceReplace(serviceUrl, nextWorkspace).then(async (health) => {
+        if (!health) {
           await appendPendingDeletions(deletions);
           await markPushFailed(opId);
         } else {
@@ -890,7 +941,11 @@ async function applyDynamicRules(workspace: WorkspaceSnapshot): Promise<void> {
     sessionRules,
   );
 
-  await Promise.all([
+  // Run dynamic + session updates independently so a Chrome rejection in one
+  // bucket (e.g. a single malformed urlFilter) doesn't cancel the other. Each
+  // bucket is still all-or-nothing internally — Chrome has no partial-success
+  // mode for updateDynamicRules — but at least the unrelated bucket survives.
+  const results = await Promise.allSettled([
     chrome.declarativeNetRequest.updateDynamicRules({
       removeRuleIds: dynamicUpdate.removeRuleIds,
       addRules: dynamicUpdate.addRules as chrome.declarativeNetRequest.Rule[],
@@ -899,15 +954,25 @@ async function applyDynamicRules(workspace: WorkspaceSnapshot): Promise<void> {
       removeRuleIds: sessionUpdate.removeRuleIds,
       addRules: sessionUpdate.addRules as chrome.declarativeNetRequest.Rule[],
     }),
-  ]).catch((error) => {
+  ]);
+
+  const failures = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (failures.length > 0) {
     // Reset the fingerprint so the next commitWorkspace / refreshDnrForTabs
     // tick re-attempts the same plan instead of being short-circuited by the
     // identical-fingerprint check. Without this, a single transient failure
     // (Chrome rate-limit, quota error) would leave DNR permanently out of sync
     // with the workspace until the worker restarts or the workspace changes.
     lastAppliedDnrFingerprint = undefined;
-    throw error;
-  });
+    const reasons = failures.map((f) => f.reason);
+    for (const reason of reasons) {
+      console.error("[resource-forwarder] DNR update failed:", reason);
+    }
+    const message = reasons
+      .map((r) => (r instanceof Error ? r.message : String(r)))
+      .join("; ");
+    throw new Error(`DNR update failed: ${message}`);
+  }
 
   lastAppliedDnrFingerprint = fingerprint;
   await chrome.storage.local.set({

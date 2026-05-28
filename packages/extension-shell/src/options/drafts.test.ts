@@ -25,7 +25,7 @@ const baseProject: Project = {
 const baseRuleSet: RuleSet = {
   id: "ruleset-1",
   projectId: "project-1",
-  name: "默认规则组",
+  name: "默认分组",
   enabled: true,
   ruleIds: [],
   createdAt: "2025-01-01T00:00:00.000Z",
@@ -133,7 +133,7 @@ describe("fromProject", () => {
 describe("toRule", () => {
   it("throws when ruleSetId is missing", () => {
     const draft = createRuleDraft({ kind: "api_forward" });
-    expect(() => toRule(draft, emptyWorkspace, baseProject)).toThrow(/规则组/);
+    expect(() => toRule(draft, emptyWorkspace, baseProject)).toThrow(/分组/);
   });
 
   it("converts api_forward draft into a Rule with parsed headers", () => {
@@ -175,6 +175,14 @@ describe("toRule", () => {
     const rule = toRule(draft, workspace, baseProject);
     expect(rule.createdAt).toBe("2024-01-01T00:00:00.000Z");
     expect(rule.updatedAt).not.toBe("2024-01-01T00:00:00.000Z");
+  });
+
+  it("auto-strips scheme + host when user pastes a full URL into pathGlob", () => {
+    const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, kind: "asset_redirect" });
+    draft.pathGlob = "https://uccp-dev.shimorelease.com/minio/weboffice-assets/docx/sdk-*.js";
+    draft.redirectUrl = "http://localhost:54321/editor-document/sdk.js";
+    const rule = toRule(draft, emptyWorkspace, baseProject);
+    expect(rule.match.pathGlob).toBe("/minio/weboffice-assets/docx/sdk-*.js");
   });
 });
 

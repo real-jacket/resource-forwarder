@@ -3,6 +3,7 @@ import type {
   ForwardRequestPayload,
   ImportWorkspacePayload,
   LogsResponse,
+  RuleSet,
   RuntimeState,
   ServiceHealthResponse,
   SiteContextPayload,
@@ -37,6 +38,8 @@ export type RuntimeRequest =
   | { type: "delete-project"; projectId: string }
   | { type: "upsert-rule"; payload: UpsertRulePayload }
   | { type: "delete-rule"; ruleId: string }
+  | { type: "upsert-rule-set"; payload: { ruleSet: RuleSet } }
+  | { type: "delete-rule-set"; ruleSetId: string }
   | { type: "get-logs"; limit?: number; projectId?: string }
   | { type: "import-workspace"; payload: ImportWorkspacePayload }
   | { type: "export-workspace"; projectIds: string[]; format: "json" | "yaml" }

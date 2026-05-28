@@ -39,6 +39,15 @@ export interface RuleSet {
   name: string;
   enabled: boolean;
   ruleIds: string[];
+  /**
+   * Optional URL match patterns scoping this group below the parent project.
+   * When non-empty, this group only "activates" (shows in sidepanel, surfaces
+   * in the current-tab views) when the current URL matches one of these
+   * patterns AND the parent project also matches. When empty or undefined,
+   * the group inherits the project's siteMatchPatterns — keeping the legacy
+   * single-group projects working without migration.
+   */
+  siteMatchPatterns?: string[];
   note?: string;
   createdAt: string;
   updatedAt: string;

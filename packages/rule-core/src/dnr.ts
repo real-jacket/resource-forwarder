@@ -5,7 +5,7 @@ import type {
   Rule,
   WorkspaceSnapshot,
 } from "@resource-forwarder/shared-types";
-import { buildHostRegexSource, buildRegexFilter, escapeRegex, globToUrlFilter, stablePositiveHash } from "./glob.js";
+import { buildHostRegexSource, buildRegexFilter, escapeRegex, globToUrlFilter, sanitizePathGlob, stablePositiveHash } from "./glob.js";
 import { getEnabledRuleBindings } from "./matchers.js";
 
 const ASSET_RESOURCE_TYPES: MatchResourceType[] = ["script", "stylesheet", "image", "font"];
@@ -33,9 +33,17 @@ export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicR
 
   const redirectUrl = rule.target.redirectUrl ?? "";
   const initiatorDomains = resolveInitiatorDomains(projectSiteHosts);
+  // Defensive: strip any scheme+host from pathGlob before it flows into the
+  // urlFilter / regexFilter builders. Users sometimes paste a full URL into
+  // the "匹配路径" field, and a single malformed urlFilter is enough to make
+  // Chrome reject the whole updateDynamicRules batch.
+  const match: typeof rule.match = {
+    ...rule.match,
+    pathGlob: sanitizePathGlob(rule.match.pathGlob || "**"),
+  };
 
   if (redirectUrl.includes("*")) {
-    const wildcard = buildWildcardRedirect(rule.match, redirectUrl);
+    const wildcard = buildWildcardRedirect(match, redirectUrl);
     return {
       id: stablePositiveHash(rule.id),
       priority: rule.priority,
@@ -52,7 +60,7 @@ export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicR
     };
   }
 
-  const condition = buildDnrCondition(rule.match);
+  const condition = buildDnrCondition(match);
   return {
     id: stablePositiveHash(rule.id),
     priority: rule.priority,

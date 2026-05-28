@@ -8,6 +8,7 @@ import { formatRuleTarget, formatTimestamp } from "../formatters.js";
 export interface RuleRow {
   rule: Rule;
   project: Project | null;
+  ruleSet: RuleSet | null;
 }
 
 export interface RulesViewProps {
@@ -23,8 +24,12 @@ export interface RulesViewProps {
   /** Mirror of selectedProject?.id, used by the filter <CustomSelect>. */
   selectedProjectId: string;
   setSelectedProjectId: (id: string) => void;
-  /** First ruleSet for the selected project, gates "新建规则" availability. */
+  /** Active rule set within the selected project; the create-rule button targets this one. */
   selectedRuleSet: RuleSet | undefined;
+  selectedRuleSetId: string;
+  setSelectedRuleSetId: (id: string) => void;
+  /** All rule sets belonging to the currently selected project. */
+  projectRuleSets: RuleSet[];
 
   /** Pre-sorted rule rows (all of them; the parent computes filteredRuleRows separately). */
   allRuleRows: RuleRow[];
@@ -51,6 +56,7 @@ export interface RulesViewProps {
   actions: {
     refresh: () => void | Promise<void>;
     openProjectModal: (project?: Project) => void;
+    openRuleSetModal: (ruleSet?: RuleSet) => void;
     openRulePanel: (kind: Rule["kind"], rule?: Rule) => void;
     openBatchRulePanel: (kind?: Rule["kind"]) => void;
     duplicateRule: (rule: Rule) => void;
@@ -58,16 +64,14 @@ export interface RulesViewProps {
     toggleRule: (rule: Rule) => void | Promise<void>;
     toggleProject: (project: Project) => void | Promise<void>;
     deleteProject: (project: Project) => void | Promise<void>;
+    toggleRuleSet: (ruleSet: RuleSet) => void | Promise<void>;
+    deleteRuleSet: (ruleSet: RuleSet) => void | Promise<void>;
   };
 }
 
 /**
  * Top-level "Rules" view: project / kind / status filters, the rule table
- * with row-level actions, and the bottom status bar.
- *
- * The component is intentionally presentational — every action and state
- * setter is provided by the parent via `actions` so the same view can be
- * re-mounted without re-running data-fetching logic.
+ * grouped by ruleSet with row-level actions, and the bottom status bar.
  */
 export function RulesView(props: RulesViewProps) {
   const hasRules = props.allRuleRows.length > 0;
@@ -106,7 +110,14 @@ export function RulesView(props: RulesViewProps) {
             }}
           />
         ) : (
-          <RuleTable rows={props.filteredRuleRows} busy={props.busy} actions={props.actions} dashboard={props.dashboard} />
+          <GroupedRuleTable
+            rows={props.filteredRuleRows}
+            busy={props.busy}
+            actions={props.actions}
+            dashboard={props.dashboard}
+            selectedProjectId={props.selectedProjectId}
+            projectRuleSets={props.projectRuleSets}
+          />
         )}
       </div>
 
@@ -159,7 +170,7 @@ function StatusTabs(props: RulesViewProps) {
 }
 
 function Toolbar(props: RulesViewProps) {
-  const { selectedProject, projects, busy, actions } = props;
+  const { selectedProject, projects, busy, actions, projectRuleSets } = props;
   return (
     <div className="page-toolbar">
       <div className="toolbar-filters">
@@ -167,7 +178,7 @@ function Toolbar(props: RulesViewProps) {
           className="cs-wide"
           value={props.selectedProjectId}
           options={[
-            { value: "", label: "全部分组" },
+            { value: "", label: "全部站点" },
             ...projects.map((p) => ({
               value: p.id,
               label: `${p.name}${p.enabled ? "" : "（已停用）"}`,
@@ -181,7 +192,7 @@ function Toolbar(props: RulesViewProps) {
           <div className="toolbar-group-actions">
             <button
               className="btn btn-ghost btn-sm"
-              title="编辑分组"
+              title="编辑站点"
               onClick={() => actions.openProjectModal(selectedProject)}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" aria-hidden="true">
@@ -190,7 +201,7 @@ function Toolbar(props: RulesViewProps) {
             </button>
             <button
               className={`btn btn-ghost btn-sm ${!selectedProject.enabled ? "is-off" : ""}`}
-              title={selectedProject.enabled ? "停用分组" : "启用分组"}
+              title={selectedProject.enabled ? "停用站点" : "启用站点"}
               onClick={() => void actions.toggleProject(selectedProject)}
               disabled={busy}
             >
@@ -202,7 +213,7 @@ function Toolbar(props: RulesViewProps) {
             </button>
             <button
               className="btn btn-ghost btn-sm btn-danger"
-              title="删除分组"
+              title="删除站点"
               onClick={() => void actions.deleteProject(selectedProject)}
               disabled={busy}
             >
@@ -212,6 +223,33 @@ function Toolbar(props: RulesViewProps) {
               </svg>
             </button>
           </div>
+        )}
+
+        {selectedProject && (
+          <>
+            <div className="toolbar-divider" />
+            <CustomSelect
+              value={props.selectedRuleSetId || (props.selectedRuleSet?.id ?? "")}
+              options={[
+                ...projectRuleSets.map((rs) => ({
+                  value: rs.id,
+                  label: `${rs.name}${rs.enabled ? "" : "（已停用）"}`,
+                })),
+              ]}
+              onChange={props.setSelectedRuleSetId}
+            />
+            <button
+              className="btn btn-ghost btn-sm"
+              title="新建分组"
+              onClick={() => actions.openRuleSetModal()}
+              disabled={busy}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" aria-hidden="true">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+          </>
         )}
 
         <CustomSelect
@@ -355,17 +393,62 @@ function EmptyState({
   );
 }
 
-function RuleTable({
-  rows,
-  busy,
-  actions,
-  dashboard,
-}: {
+interface GroupedRuleTableProps {
   rows: RuleRow[];
   busy: boolean;
   actions: RulesViewProps["actions"];
   dashboard: DashboardState | null;
-}) {
+  selectedProjectId: string;
+  projectRuleSets: RuleSet[];
+}
+
+/**
+ * Renders the rule table grouped by ruleSet. A "group header" row precedes
+ * each group's rules with the group's name, enable toggle, and management
+ * actions. When no project filter is active, also shows orphan rules (no
+ * ruleSet) at the bottom in a sentinel group.
+ */
+function GroupedRuleTable({
+  rows,
+  busy,
+  actions,
+  dashboard,
+  selectedProjectId,
+  projectRuleSets,
+}: GroupedRuleTableProps) {
+  // Preserve sort order from the parent — we just bucket rows by ruleSet id.
+  // The parent already filters by project, so when a project is selected, the
+  // only groups that show up belong to that project.
+  const grouped = new Map<string, { ruleSet: RuleSet | null; rows: RuleRow[] }>();
+  for (const row of rows) {
+    const key = row.ruleSet?.id ?? "__orphan__";
+    const bucket = grouped.get(key);
+    if (bucket) {
+      bucket.rows.push(row);
+    } else {
+      grouped.set(key, { ruleSet: row.ruleSet, rows: [row] });
+    }
+  }
+
+  // When a project is selected, also include any of its empty groups so the
+  // user can see "tables (0 条规则)" instead of an invisible group they just
+  // created. Empty groups only appear when the project filter is active to
+  // avoid cluttering the "all sites" view.
+  if (selectedProjectId) {
+    for (const ruleSet of projectRuleSets) {
+      if (!grouped.has(ruleSet.id)) {
+        grouped.set(ruleSet.id, { ruleSet, rows: [] });
+      }
+    }
+  }
+
+  const groups = Array.from(grouped.values()).sort((a, b) => {
+    if (!a.ruleSet && b.ruleSet) return 1;
+    if (a.ruleSet && !b.ruleSet) return -1;
+    if (!a.ruleSet || !b.ruleSet) return 0;
+    return a.ruleSet.name.localeCompare(b.ruleSet.name);
+  });
+
   return (
     <div className="rule-table-card">
       <table className="rule-table">
@@ -382,14 +465,24 @@ function RuleTable({
           </tr>
         </thead>
         <tbody>
-          {rows.map(({ rule }, index) => (
-            <RuleTableRow
-              key={rule.id}
-              rule={rule}
-              index={index}
-              busy={busy}
-              actions={actions}
-            />
+          {groups.map((group, gi) => (
+            <React.Fragment key={group.ruleSet?.id ?? `orphan-${gi}`}>
+              <GroupHeaderRow
+                ruleSet={group.ruleSet}
+                ruleCount={group.rows.length}
+                busy={busy}
+                actions={actions}
+              />
+              {group.rows.map(({ rule }, index) => (
+                <RuleTableRow
+                  key={rule.id}
+                  rule={rule}
+                  index={index}
+                  busy={busy}
+                  actions={actions}
+                />
+              ))}
+            </React.Fragment>
           ))}
         </tbody>
       </table>
@@ -403,6 +496,84 @@ function RuleTable({
         )}
       </div>
     </div>
+  );
+}
+
+function GroupHeaderRow({
+  ruleSet,
+  ruleCount,
+  busy,
+  actions,
+}: {
+  ruleSet: RuleSet | null;
+  ruleCount: number;
+  busy: boolean;
+  actions: RulesViewProps["actions"];
+}) {
+  if (!ruleSet) {
+    return (
+      <tr className="rule-group-row">
+        <td colSpan={8}>
+          <div className="rule-group-header is-orphan">
+            <span className="rule-group-name">未归类规则</span>
+            <span className="rule-group-meta">{ruleCount} 条</span>
+          </div>
+        </td>
+      </tr>
+    );
+  }
+
+  return (
+    <tr className={`rule-group-row${ruleSet.enabled ? "" : " is-disabled"}`}>
+      <td colSpan={8}>
+        <div className="rule-group-header">
+          <label className="toggle-switch toggle-switch-sm" title={ruleSet.enabled ? "停用此分组" : "启用此分组"}>
+            <input
+              type="checkbox"
+              checked={ruleSet.enabled}
+              onChange={() => void actions.toggleRuleSet(ruleSet)}
+              disabled={busy}
+            />
+            <span className="toggle-track" />
+          </label>
+          <span className="rule-group-name">{ruleSet.name}</span>
+          <span className="rule-group-meta">{ruleCount} 条规则</span>
+          {(ruleSet.siteMatchPatterns ?? []).length > 0 && (
+            <span
+              className="rule-group-patterns"
+              title={(ruleSet.siteMatchPatterns ?? []).join(", ")}
+            >
+              {(ruleSet.siteMatchPatterns ?? []).join(", ")}
+            </span>
+          )}
+          {!ruleSet.enabled && <span className="rule-group-badge">已停用</span>}
+          <div className="rule-group-actions">
+            <button
+              className="btn-icon"
+              title="编辑分组"
+              onClick={() => actions.openRuleSetModal(ruleSet)}
+              disabled={busy}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+              </svg>
+            </button>
+            <button
+              className="btn-icon btn-icon-danger"
+              title="删除分组"
+              onClick={() => void actions.deleteRuleSet(ruleSet)}
+              disabled={busy}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </td>
+    </tr>
   );
 }
 

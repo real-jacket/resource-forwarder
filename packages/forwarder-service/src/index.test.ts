@@ -227,6 +227,91 @@ describe("forwarder-service", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("upserts a rule set via PUT /rule-sets/:id", async () => {
+    const now = new Date().toISOString();
+    const response = await app.inject({
+      method: "PUT",
+      url: "/rule-sets/ruleset-tables",
+      payload: {
+        ruleSet: {
+          id: "ruleset-tables",
+          projectId: "project-1",
+          name: "Tables",
+          enabled: true,
+          ruleIds: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const workspace = (await storage.readWorkspace());
+    const inserted = workspace.ruleSets.find((rs) => rs.id === "ruleset-tables");
+    expect(inserted?.name).toBe("Tables");
+    expect(workspace.ruleSets.find((rs) => rs.id === "ruleset-1")).toBeDefined();
+  });
+
+  it("toggles a rule set's enabled flag via PUT /rule-sets/:id", async () => {
+    const baseline = await storage.readWorkspace();
+    const target = baseline.ruleSets[0];
+    const response = await app.inject({
+      method: "PUT",
+      url: `/rule-sets/${target.id}`,
+      payload: { ruleSet: { ...target, enabled: false } },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const after = await storage.readWorkspace();
+    expect(after.ruleSets.find((rs) => rs.id === target.id)?.enabled).toBe(false);
+  });
+
+  it("rejects PUT /rule-sets/:id when the path id mismatches the body id", async () => {
+    const now = new Date().toISOString();
+    const response = await app.inject({
+      method: "PUT",
+      url: "/rule-sets/ruleset-x",
+      payload: {
+        ruleSet: {
+          id: "ruleset-y",
+          projectId: "project-1",
+          name: "Mismatch",
+          enabled: true,
+          ruleIds: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("cascades rule deletion when DELETE /rule-sets/:id removes a rule set", async () => {
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/rule-sets/ruleset-1",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const after = await storage.readWorkspace();
+    expect(after.ruleSets.find((rs) => rs.id === "ruleset-1")).toBeUndefined();
+    expect(after.rules.find((rule) => rule.id === "rule-api")).toBeUndefined();
+    expect(after.rules.find((rule) => rule.id === "rule-disabled")).toBeUndefined();
+  });
+
+  it("treats DELETE /rule-sets/:id for a missing id as a no-op", async () => {
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/rule-sets/does-not-exist",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const after = await storage.readWorkspace();
+    expect(after.ruleSets).toHaveLength(1);
+    expect(after.rules).toHaveLength(2);
+  });
+
   it("rejects /import payloads with the wrong format enum value", async () => {
     const response = await app.inject({
       method: "POST",

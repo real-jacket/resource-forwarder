@@ -22,6 +22,7 @@ export {
   detectFormat,
   isTextualContentType,
   matchesProjectSite,
+  matchesRuleSetSite,
   normalizeImportedHost,
   parseWorkspace,
   serializeWorkspace,
@@ -49,7 +50,7 @@ export { toDynamicNetRequestRules, toDynamicRule } from "./dnr.js";
 
 // Glob/regex primitives — exported because page-bridge / matcher-cache need
 // access to the same compilation logic the matchers use.
-export { buildRegexFilter, globToPathRegexSource } from "./glob.js";
+export { buildRegexFilter, globToPathRegexSource, sanitizePathGlob } from "./glob.js";
 
 // Resource Override import
 export { parseResourceOverrideExport } from "./resource-override.js";
@@ -68,12 +69,14 @@ export {
   applyPendingDeletions,
   applyUpsertProject,
   applyUpsertRule,
+  applyUpsertRuleSet,
   emptyPendingDeletions,
   isPendingDeletionsEmpty,
   mergePendingDeletions,
   mergeWorkspaces,
   planDeleteProject,
   planDeleteRule,
+  planDeleteRuleSet,
   stampUpdated,
   upsertById,
 } from "./workspace-mutations.js";

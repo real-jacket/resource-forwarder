@@ -121,6 +121,25 @@ export function escapeRegex(value: string): string {
 }
 
 /**
+ * Normalise a user-entered pathGlob: if it looks like a full URL
+ * (`scheme://host/path`), strip the scheme + host and keep only the path.
+ * Path-only inputs pass through unchanged.
+ *
+ * This exists because the rule editor's "匹配路径" field is a path glob, but
+ * users occasionally paste a full URL there. Without this, the DNR urlFilter
+ * pipeline ends up emitting a garbage filter that Chrome rejects — and a
+ * single rejected rule takes down the entire updateDynamicRules batch with it.
+ *
+ * Returns `/` for inputs like `https://host` that have no path component so
+ * callers always get a leading-slash path glob.
+ */
+export function sanitizePathGlob(pathGlob: string): string {
+  const match = pathGlob.match(/^[a-z][a-z0-9+.\-]*:\/\/[^/]*(\/.*)?$/i);
+  if (match) return match[1] ?? "/";
+  return pathGlob;
+}
+
+/**
  * Build the host portion of a DNR regexFilter. When all hosts are wildcards
  * (or the wildcard `*` is present) `wildcardSource` is returned so callers can
  * pick the most permissive bracket (`.*` for general regex matching, `[^/]+`

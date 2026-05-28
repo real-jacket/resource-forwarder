@@ -5,6 +5,7 @@ import type {
   RuleSet,
   WorkspaceSnapshot,
 } from "@resource-forwarder/shared-types";
+import { sanitizePathGlob } from "@resource-forwarder/rule-core";
 import { createId, joinCsv, normalizeHostInput, splitCsv } from "../shared/helpers.js";
 import {
   defaultApiTypes,
@@ -134,7 +135,7 @@ export function fromProject(project: Project): ProjectDraft {
  */
 export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: Project): Rule {
   if (!draft.ruleSetId) {
-    throw new Error("当前站点还没有规则组，请先保存站点后再添加规则。");
+    throw new Error("当前站点还没有分组，请先保存站点后再添加规则。");
   }
   const existing = workspace.rules.find((r) => r.id === draft.id);
   const now = new Date().toISOString();
@@ -154,7 +155,7 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
     priority: Number.isFinite(draft.priority) ? draft.priority : 100,
     match: {
       host: host.length > 0 ? host : project.siteHosts,
-      pathGlob: draft.pathGlob || "**",
+      pathGlob: sanitizePathGlob(draft.pathGlob || "**"),
       resourceType:
         resourceType.length > 0
           ? resourceType

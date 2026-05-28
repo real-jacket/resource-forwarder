@@ -5,6 +5,7 @@ import type {
   ExportWorkspaceResponse,
   HitRecord,
   ImportWorkspacePayload,
+  RuleSet,
   SupportedExportFormat,
   UpsertProjectPayload,
   UpsertRulePayload,
@@ -13,9 +14,11 @@ import type {
 import {
   applyUpsertProject,
   applyUpsertRule,
+  applyUpsertRuleSet,
   createEmptyWorkspace,
   mergeWorkspaces,
   parseWorkspace,
+  planDeleteRuleSet,
   serializeWorkspace,
 } from "@resource-forwarder/rule-core";
 import { SecretsManager } from "./secrets.js";
@@ -124,6 +127,14 @@ export class WorkspaceStorage {
 
   async upsertRule(payload: UpsertRulePayload): Promise<WorkspaceSnapshot> {
     return this.mutateWorkspace((workspace) => applyUpsertRule(workspace, payload));
+  }
+
+  async upsertRuleSet(ruleSet: RuleSet): Promise<WorkspaceSnapshot> {
+    return this.mutateWorkspace((workspace) => applyUpsertRuleSet(workspace, ruleSet));
+  }
+
+  async deleteRuleSet(ruleSetId: string): Promise<WorkspaceSnapshot> {
+    return this.mutateWorkspace((workspace) => planDeleteRuleSet(workspace, ruleSetId).workspace);
   }
 
   async importWorkspace(payload: ImportWorkspacePayload): Promise<WorkspaceSnapshot> {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { matchesProjectSite, sortRules } from "@resource-forwarder/rule-core";
-import type { Project, Rule } from "@resource-forwarder/shared-types";
+import { matchesProjectSite, matchesRuleSetSite, sortRules } from "@resource-forwarder/rule-core";
+import type { Project, Rule, RuleSet } from "@resource-forwarder/shared-types";
 import { joinCsv } from "../shared/helpers.js";
 import type { GetDashboardStateResponse, UpsertMutationResponse } from "../shared/messages.js";
 import { runtimeRequest } from "../shared/messages.js";
@@ -75,21 +75,45 @@ function App() {
     return dashboard.workspace.projects.filter((project) => matchesProjectSite(project, currentUrl));
   }, [dashboard, currentUrl]);
 
-  const matchedProjectIds = useMemo(
-    () => new Set(matchedProjects.map((project) => project.id)),
+  const matchedProjectById = useMemo(
+    () => new Map(matchedProjects.map((p) => [p.id, p])),
     [matchedProjects],
   );
 
-  const matchedRuleIds = useMemo(() => {
-    if (!dashboard) {
-      return new Set<string>();
+  // Two-level URL match: only show rule sets whose own siteMatchPatterns line
+  // up with the current URL. Groups without their own patterns inherit the
+  // parent project (so legacy single-group projects keep working).
+  const matchedRuleSets = useMemo(() => {
+    if (!dashboard || !currentUrl) return [];
+    return dashboard.workspace.ruleSets.filter((ruleSet) => {
+      const project = matchedProjectById.get(ruleSet.projectId);
+      if (!project) return false;
+      return matchesRuleSetSite(ruleSet, project, currentUrl);
+    });
+  }, [dashboard, currentUrl, matchedProjectById]);
+
+  const matchedRuleSetsByProject = useMemo(() => {
+    const map = new Map<string, typeof matchedRuleSets>();
+    for (const rs of matchedRuleSets) {
+      const arr = map.get(rs.projectId) ?? [];
+      arr.push(rs);
+      map.set(rs.projectId, arr);
     }
-    return new Set(
-      dashboard.workspace.ruleSets
-        .filter((ruleSet) => matchedProjectIds.has(ruleSet.projectId))
-        .flatMap((ruleSet) => ruleSet.ruleIds),
-    );
-  }, [dashboard, matchedProjectIds]);
+    return map;
+  }, [matchedRuleSets]);
+
+  // Only projects with at least one matching rule set surface in the list — a
+  // project whose every group has narrower patterns that all miss the current
+  // URL is effectively dormant on this page.
+  const visibleProjects = useMemo(
+    () => matchedProjects.filter((p) => (matchedRuleSetsByProject.get(p.id) ?? []).length > 0),
+    [matchedProjects, matchedRuleSetsByProject],
+  );
+
+  const matchedRuleIds = useMemo(
+    () => new Set(matchedRuleSets.flatMap((ruleSet) => ruleSet.ruleIds)),
+    [matchedRuleSets],
+  );
 
   const matchedRules = useMemo(
     () =>
@@ -103,6 +127,31 @@ function App() {
         : [],
     [dashboard, matchedRuleIds],
   );
+
+  // Visual & interaction model: a rule is "effectively off" when its own
+  // enabled flag is false OR its owning ruleSet/project is disabled. The toggle
+  // itself stays operable when only `rule.enabled` is false (so users can flip
+  // it back on); it's locked when the parents are off, because flipping a
+  // single child while the parent is dormant has no observable effect.
+  const ruleGroups = useMemo(() => {
+    if (!dashboard) return [] as Array<{
+      project: Project;
+      ruleSet: RuleSet;
+      rules: Rule[];
+    }>;
+    const ruleById = new Map(dashboard.workspace.rules.map((r) => [r.id, r] as const));
+    const groups: Array<{ project: Project; ruleSet: RuleSet; rules: Rule[] }> = [];
+    for (const project of visibleProjects) {
+      const projectRuleSets = matchedRuleSetsByProject.get(project.id) ?? [];
+      for (const ruleSet of projectRuleSets) {
+        const rules = sortRules(
+          ruleSet.ruleIds.map((id) => ruleById.get(id)).filter((r): r is Rule => Boolean(r)),
+        ).sort((a, b) => (a.enabled === b.enabled ? 0 : a.enabled ? -1 : 1));
+        if (rules.length > 0) groups.push({ project, ruleSet, rules });
+      }
+    }
+    return groups;
+  }, [dashboard, visibleProjects, matchedRuleSetsByProject]);
 
   const activeRuleCount = useMemo(
     () => matchedRules.filter((rule) => rule.enabled).length,
@@ -180,10 +229,30 @@ function App() {
     }
   }
 
-  const projectRuleCount = (projectId: string) =>
-    dashboard?.workspace.ruleSets
-      .filter((rs) => rs.projectId === projectId)
-      .reduce((sum, rs) => sum + rs.ruleIds.length, 0) ?? 0;
+  async function toggleRuleSet(ruleSet: RuleSet): Promise<void> {
+    if (!dashboard) return;
+    setBusy(true);
+    try {
+      const state = await runtimeRequest<UpsertMutationResponse>({
+        type: "upsert-rule-set",
+        payload: { ruleSet: { ...ruleSet, enabled: !ruleSet.enabled } },
+      });
+      setDashboard({ ...state, logs: dashboard.logs, currentTab: dashboard.currentTab });
+      setStatus(`分组「${ruleSet.name}」已${ruleSet.enabled ? "停用" : "启用"}。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "切换分组状态失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const ruleSetRuleCount = (ruleSet: RuleSet): { total: number; enabled: number } => {
+    if (!dashboard) return { total: 0, enabled: 0 };
+    const ids = new Set(ruleSet.ruleIds);
+    const total = ids.size;
+    const enabled = dashboard.workspace.rules.filter((rule) => ids.has(rule.id) && rule.enabled).length;
+    return { total, enabled };
+  };
 
   return (
     <div className="sp">
@@ -205,8 +274,8 @@ function App() {
             <span className="sp-badge-dot" />
             {dashboard?.health ? "服务在线" : "离线"}
           </span>
-          <span className={`sp-badge ${matchedProjects.length > 0 ? "matched" : "unmatched"}`}>
-            {matchedProjects.length > 0 ? `${matchedProjects.length} 个站点` : "未匹配"}
+          <span className={`sp-badge ${visibleProjects.length > 0 ? "matched" : "unmatched"}`}>
+            {visibleProjects.length > 0 ? `${visibleProjects.length} 个站点` : "未匹配"}
           </span>
           <span className="sp-badge neutral">{activeRuleCount} / {matchedRules.length} 条规则生效</span>
           {dnrRegisteredCount > 0 && (
@@ -223,37 +292,73 @@ function App() {
       {/* Matched sites */}
       <div className="sp-section">
         <div className="sp-section-title">命中站点</div>
-        {matchedProjects.length === 0 ? (
+        {visibleProjects.length === 0 ? (
           <div className="sp-empty">
-            当前页面未匹配到任何站点，请在规则页添加 Host。
+            当前页面未匹配到任何站点或分组，请在规则页添加站点 / 分组匹配 URL。
           </div>
         ) : (
           <div className="sp-site-list">
-            {matchedProjects.map((project) => (
-              <div className={`sp-site-item${!project.enabled ? " is-off" : ""}`} key={project.id}>
-                <div className="sp-site-info">
-                  <div className="sp-site-name-row">
-                    <span className="sp-site-name">{project.name}</span>
-                    <span className={`site-list-badge ${project.enabled ? "active" : "disabled"}`}>
-                      {project.enabled ? "启用" : "停用"}
-                    </span>
-                    {project.envLabel && <span className="site-list-badge disabled">{project.envLabel}</span>}
+            {visibleProjects.map((project) => {
+              const ruleSets = matchedRuleSetsByProject.get(project.id) ?? [];
+              return (
+                <div className={`sp-site-item${!project.enabled ? " is-off" : ""}`} key={project.id}>
+                  <div className="sp-site-info">
+                    <div className="sp-site-name-row">
+                      <span className="sp-site-name">{project.name}</span>
+                      <span className={`site-list-badge ${project.enabled ? "active" : "disabled"}`}>
+                        {project.enabled ? "启用" : "停用"}
+                      </span>
+                      {project.envLabel && <span className="site-list-badge disabled">{project.envLabel}</span>}
+                    </div>
+                    <div className="sp-site-meta">
+                      {joinCsv(project.siteMatchPatterns ?? project.siteHosts) || "未填写站点匹配"} · {ruleSets.reduce((sum, rs) => sum + rs.ruleIds.length, 0)} 条规则
+                    </div>
                   </div>
-                  <div className="sp-site-meta">
-                    {joinCsv(project.siteMatchPatterns ?? project.siteHosts) || "未填写站点匹配"} · {projectRuleCount(project.id)} 条规则
+                  <div className="sp-site-actions">
+                    <button
+                      className={`btn btn-ghost btn-sm${!project.enabled ? " is-off" : ""}`}
+                      onClick={() => void toggleProject(project)}
+                      disabled={busy}
+                    >
+                      {project.enabled ? "停用" : "启用"}
+                    </button>
                   </div>
+                  {ruleSets.length > 0 && (
+                    <div className="sp-rule-set-list">
+                      {ruleSets.map((ruleSet) => {
+                        const counts = ruleSetRuleCount(ruleSet);
+                        const patterns = (ruleSet.siteMatchPatterns ?? []).join(", ");
+                        return (
+                          <div
+                            key={ruleSet.id}
+                            className={`sp-rule-set-item${ruleSet.enabled ? "" : " is-off"}`}
+                          >
+                            <label className="toggle-switch toggle-switch-sm">
+                              <input
+                                type="checkbox"
+                                checked={ruleSet.enabled}
+                                onChange={() => void toggleRuleSet(ruleSet)}
+                                disabled={busy || !project.enabled}
+                              />
+                              <span className="toggle-track" />
+                            </label>
+                            <span className="sp-rule-set-name">{ruleSet.name}</span>
+                            {patterns && (
+                              <span className="sp-rule-set-patterns" title={patterns}>
+                                {patterns}
+                              </span>
+                            )}
+                            <span className="sp-rule-set-meta">
+                              {counts.enabled} / {counts.total} 条
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-                <div className="sp-site-actions">
-                  <button
-                    className={`btn btn-ghost btn-sm${!project.enabled ? " is-off" : ""}`}
-                    onClick={() => void toggleProject(project)}
-                    disabled={busy}
-                  >
-                    {project.enabled ? "停用" : "启用"}
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -261,35 +366,69 @@ function App() {
       {/* Active rules */}
       <div className="sp-section">
         <div className="sp-section-title">生效规则</div>
-        {matchedRules.length === 0 ? (
+        {ruleGroups.length === 0 ? (
           <div className="sp-empty">
             {matchedProjects.length > 0 ? "匹配到站点但暂无规则。" : "先匹配站点后显示规则。"}
           </div>
         ) : (
-          <div className="sp-rule-list">
-            {matchedRules.map((rule) => (
-              <div className={`sp-rule-item${rule.enabled ? "" : " is-off"}`} key={rule.id}>
-                <label className="toggle-switch toggle-switch-sm">
-                  <input
-                    type="checkbox"
-                    checked={rule.enabled}
-                    onChange={() => void toggleRule(rule)}
-                    disabled={busy}
-                  />
-                  <span className="toggle-track" />
-                </label>
-                <div className="sp-rule-info">
-                  <div className="sp-rule-name-row">
-                    <span className="sp-rule-name">{rule.name}</span>
-                    <span className={`match-badge ${rule.kind === "api_forward" ? "api" : "asset"}`}>
-                      {formatKind(rule.kind)}
+          <div className="sp-rule-groups">
+            {ruleGroups.map(({ project, ruleSet, rules }) => {
+              const parentDisabled = !project.enabled || !ruleSet.enabled;
+              const enabledCount = rules.filter((r) => r.enabled).length;
+              const blockedBy = !project.enabled ? "站点" : !ruleSet.enabled ? "分组" : null;
+              return (
+                <div
+                  className={`sp-rule-group${parentDisabled ? " is-off" : ""}`}
+                  key={ruleSet.id}
+                >
+                  <div className="sp-rule-group-header">
+                    <span className="sp-rule-group-name">{ruleSet.name}</span>
+                    <span className="sp-rule-group-meta">
+                      {enabledCount} / {rules.length} 条
+                    </span>
+                    {blockedBy && (
+                      <span className="sp-rule-group-blocked" title={`${blockedBy}停用，规则不会生效`}>
+                        被{blockedBy}停用
+                      </span>
+                    )}
+                    <span className="sp-rule-group-project" title={project.name}>
+                      {project.name}
                     </span>
                   </div>
-                  <div className="sp-rule-path">{rule.match.pathGlob}</div>
-                  <div className="sp-rule-target">{formatRuleTarget(rule)}</div>
+                  <div className="sp-rule-list">
+                    {rules.map((rule) => {
+                      const visuallyOff = !rule.enabled || parentDisabled;
+                      return (
+                        <div
+                          className={`sp-rule-item${visuallyOff ? " is-off" : ""}`}
+                          key={rule.id}
+                        >
+                          <label className="toggle-switch toggle-switch-sm">
+                            <input
+                              type="checkbox"
+                              checked={rule.enabled}
+                              onChange={() => void toggleRule(rule)}
+                              disabled={busy || parentDisabled}
+                            />
+                            <span className="toggle-track" />
+                          </label>
+                          <div className="sp-rule-info">
+                            <div className="sp-rule-name-row">
+                              <span className="sp-rule-name">{rule.name}</span>
+                              <span className={`match-badge ${rule.kind === "api_forward" ? "api" : "asset"}`}>
+                                {formatKind(rule.kind)}
+                              </span>
+                            </div>
+                            <div className="sp-rule-path">{rule.match.pathGlob}</div>
+                            <div className="sp-rule-target">{formatRuleTarget(rule)}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

@@ -4,9 +4,11 @@ import {
   collectProjectWarnings,
   collectUnsupportedRuleWarnings,
   matchesProjectSite,
+  matchesRuleSetSite,
   parseWorkspace,
   parseResourceOverrideExport,
   pickMatchingRule,
+  sanitizePathGlob,
   serializeWorkspace,
   toDynamicNetRequestRules,
   toDynamicRule,
@@ -191,6 +193,37 @@ describe("rule-core", () => {
       target: { redirectUrl: "http://localhost:3000/app.js" },
     });
     expect(warnings).toHaveLength(0);
+  });
+
+  it("sanitizePathGlob strips scheme + host from full-URL pathGlobs", () => {
+    expect(sanitizePathGlob("https://host.example.com/api/v1/*.js")).toBe("/api/v1/*.js");
+    expect(sanitizePathGlob("http://host.example.com/")).toBe("/");
+    expect(sanitizePathGlob("https://host.example.com")).toBe("/");
+    expect(sanitizePathGlob("ftp://host.example.com/x/*")).toBe("/x/*");
+  });
+
+  it("sanitizePathGlob leaves path-only inputs untouched", () => {
+    expect(sanitizePathGlob("/api/**")).toBe("/api/**");
+    expect(sanitizePathGlob("**")).toBe("**");
+    expect(sanitizePathGlob("/minio/x/sdk-*.js")).toBe("/minio/x/sdk-*.js");
+  });
+
+  it("warns when a rule's pathGlob contains a URL scheme", () => {
+    const warnings = collectUnsupportedRuleWarnings({
+      ...assetRule,
+      match: { ...assetRule.match, pathGlob: "https://app.example.com/assets/**" },
+    });
+    expect(warnings.some((w) => w.includes("匹配路径"))).toBe(true);
+  });
+
+  it("toDynamicRule sanitizes a full-URL pathGlob into a path-only urlFilter", () => {
+    const dnr = toDynamicRule({
+      ...assetRule,
+      match: { ...assetRule.match, pathGlob: "https://app.example.com/assets/sdk-*.js" },
+      target: { redirectUrl: "http://localhost:54321/sdk.js" },
+    });
+    expect(dnr.condition.urlFilter).toBe("|*://*/assets/sdk-*.js");
+    expect(dnr.condition.urlFilter).not.toContain("https://app.example.com");
   });
 
   it("converts supported Resource Override exports into workspace rules", () => {
@@ -515,6 +548,30 @@ describe("rule-core", () => {
     ).toBe(true);
     expect(matchesProjectSite(project, "https://co-dev-18.shimorelease.com/tables/")).toBe(true);
     expect(matchesProjectSite(project, "https://co-dev-18.shimorelease.com/sheets/abc")).toBe(false);
+  });
+
+  it("matchesRuleSetSite falls back to the project when group has no patterns", () => {
+    const project = { siteHosts: ["shimo.im"], siteMatchPatterns: ["https://shimo.im/*"] };
+    const ruleSet = {}; // no siteMatchPatterns
+    expect(matchesRuleSetSite(ruleSet, project, "https://shimo.im/anything")).toBe(true);
+    expect(matchesRuleSetSite(ruleSet, project, "https://other.com/anything")).toBe(false);
+  });
+
+  it("matchesRuleSetSite gates on group patterns when they are set", () => {
+    const project = { siteHosts: ["shimo.im"], siteMatchPatterns: ["https://shimo.im/*"] };
+    const sheetGroup = { siteMatchPatterns: ["https://shimo.im/sheet/*"] };
+    const tableGroup = { siteMatchPatterns: ["https://shimo.im/tables/*"] };
+
+    expect(matchesRuleSetSite(sheetGroup, project, "https://shimo.im/sheet/abc")).toBe(true);
+    expect(matchesRuleSetSite(sheetGroup, project, "https://shimo.im/tables/abc")).toBe(false);
+    expect(matchesRuleSetSite(tableGroup, project, "https://shimo.im/tables/abc")).toBe(true);
+    expect(matchesRuleSetSite(tableGroup, project, "https://shimo.im/sheet/abc")).toBe(false);
+  });
+
+  it("matchesRuleSetSite treats an empty patterns array the same as undefined", () => {
+    const project = { siteHosts: ["shimo.im"], siteMatchPatterns: ["https://shimo.im/*"] };
+    const ruleSet = { siteMatchPatterns: [] };
+    expect(matchesRuleSetSite(ruleSet, project, "https://shimo.im/anywhere")).toBe(true);
   });
 
   it("matchesProjectSite falls back to siteHosts when siteMatchPatterns is empty", () => {

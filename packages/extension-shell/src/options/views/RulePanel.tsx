@@ -16,6 +16,7 @@ export interface RulePanelProps {
   /** Project / ruleset context shown in the header card and used to gate save. */
   selectedProject: Project | undefined;
   selectedRuleSet: RuleSet | undefined;
+  projectRuleSets: RuleSet[];
 
   /** Quick templates filtered to the active rule kind. */
   activeTemplates: RuleTemplatePreset[];
@@ -44,6 +45,7 @@ export function RulePanel({
   setTab,
   selectedProject,
   selectedRuleSet,
+  projectRuleSets,
   activeTemplates,
   applyTemplate,
   conflicts,
@@ -90,6 +92,7 @@ export function RulePanel({
             setDraft={setDraft}
             selectedProject={selectedProject}
             selectedRuleSet={selectedRuleSet}
+            projectRuleSets={projectRuleSets}
             activeTemplates={activeTemplates}
             applyTemplate={applyTemplate}
             conflicts={conflicts}
@@ -129,6 +132,7 @@ function BasicTab({
   setDraft,
   selectedProject,
   selectedRuleSet,
+  projectRuleSets,
   activeTemplates,
   applyTemplate,
   conflicts,
@@ -138,6 +142,7 @@ function BasicTab({
   setDraft: RulePanelProps["setDraft"];
   selectedProject: Project | undefined;
   selectedRuleSet: RuleSet | undefined;
+  projectRuleSets: RuleSet[];
   activeTemplates: RuleTemplatePreset[];
   applyTemplate: (preset: RuleTemplatePreset) => void;
   conflicts: RuleConflict[];
@@ -157,7 +162,24 @@ function BasicTab({
           }}
         >
           所属站点：<strong style={{ color: "var(--ink)" }}>{selectedProject.name}</strong>
-          {selectedRuleSet ? `　规则组：${selectedRuleSet.name}` : ""}
+        </div>
+      )}
+
+      {projectRuleSets.length > 0 && (
+        <div className="form-group">
+          <label className="form-label">所属分组</label>
+          <select
+            className="form-input"
+            value={draft.ruleSetId || selectedRuleSet?.id || ""}
+            onChange={(e) => setDraft((v) => ({ ...v, ruleSetId: e.target.value }))}
+          >
+            {projectRuleSets.map((rs) => (
+              <option key={rs.id} value={rs.id}>
+                {rs.name}
+                {rs.enabled ? "" : "（已停用）"}
+              </option>
+            ))}
+          </select>
         </div>
       )}
 

@@ -108,6 +108,16 @@ export function planDeleteRule(
   };
 }
 
+export function planDeleteRuleSet(
+  workspace: WorkspaceSnapshot,
+  ruleSetId: string,
+): { workspace: WorkspaceSnapshot; deletions: PendingDeletions } {
+  const target = workspace.ruleSets.find((ruleSet) => ruleSet.id === ruleSetId);
+  const ruleIds = target ? Array.from(new Set(target.ruleIds)) : [];
+  const deletions: PendingDeletions = { projectIds: [], ruleSetIds: [ruleSetId], ruleIds };
+  return { workspace: applyPendingDeletions(workspace, deletions), deletions };
+}
+
 export function applyUpsertProject(
   workspace: WorkspaceSnapshot,
   payload: UpsertProjectPayload,
@@ -139,6 +149,21 @@ export function applyUpsertRule(
     );
   }
   return { ...workspace, rules, ruleSets, updatedAt: new Date().toISOString() };
+}
+
+/**
+ * Upsert a single rule set without touching the surrounding project. Mirrors
+ * applyUpsertRule so callers (sidepanel toggles, options group editors) can
+ * push a focused mutation rather than re-sending the project's full ruleSets
+ * array via applyUpsertProject — which would bump updatedAt on every sibling
+ * group and could fight last-write-wins merges later.
+ */
+export function applyUpsertRuleSet(
+  workspace: WorkspaceSnapshot,
+  ruleSet: RuleSet,
+): WorkspaceSnapshot {
+  const ruleSets = upsertById(workspace.ruleSets, stampUpdated(ruleSet));
+  return { ...workspace, ruleSets, updatedAt: new Date().toISOString() };
 }
 
 export function mergeWorkspaces(

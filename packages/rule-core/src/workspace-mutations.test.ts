@@ -4,12 +4,14 @@ import {
   applyPendingDeletions,
   applyUpsertProject,
   applyUpsertRule,
+  applyUpsertRuleSet,
   emptyPendingDeletions,
   isPendingDeletionsEmpty,
   mergePendingDeletions,
   mergeWorkspaces,
   planDeleteProject,
   planDeleteRule,
+  planDeleteRuleSet,
   upsertById,
 } from "./workspace-mutations.js";
 
@@ -96,6 +98,53 @@ describe("workspace-mutations", () => {
       const rs1 = workspace.ruleSets.find((rs) => rs.id === "rs1");
       expect(rs1?.ruleIds).toEqual(["r2"]);
       expect(deletions.ruleIds).toEqual(["r1"]);
+    });
+  });
+
+  describe("planDeleteRuleSet", () => {
+    it("removes the rule set and cascades its rules", () => {
+      const { workspace, deletions } = planDeleteRuleSet(baseWorkspace(), "rs1");
+
+      expect(workspace.ruleSets.map((rs) => rs.id)).toEqual(["rs2"]);
+      expect(workspace.rules.map((r) => r.id)).toEqual(["r3"]);
+      expect(workspace.projects).toHaveLength(2);
+      expect(deletions.ruleSetIds).toEqual(["rs1"]);
+      expect(deletions.ruleIds).toEqual(["r1", "r2"]);
+      expect(deletions.projectIds).toEqual([]);
+    });
+
+    it("is a no-op for an unknown rule set id", () => {
+      const { workspace, deletions } = planDeleteRuleSet(baseWorkspace(), "missing");
+      expect(workspace.ruleSets).toHaveLength(2);
+      expect(workspace.rules).toHaveLength(3);
+      expect(deletions.ruleIds).toEqual([]);
+    });
+  });
+
+  describe("applyUpsertRuleSet", () => {
+    it("inserts a new rule set without touching others", () => {
+      const ws = baseWorkspace();
+      const updated = applyUpsertRuleSet(ws, {
+        id: "rs3",
+        projectId: "p1",
+        name: "Extra",
+        enabled: true,
+        ruleIds: [],
+        createdAt: ts,
+        updatedAt: ts,
+      });
+      expect(updated.ruleSets.map((rs) => rs.id).sort()).toEqual(["rs1", "rs2", "rs3"]);
+      const rs1 = updated.ruleSets.find((rs) => rs.id === "rs1");
+      expect(rs1?.updatedAt).toBe(ts);
+    });
+
+    it("replaces an existing rule set and stamps updatedAt", () => {
+      const ws = baseWorkspace();
+      const updated = applyUpsertRuleSet(ws, { ...ws.ruleSets[0], name: "Renamed", enabled: false });
+      const target = updated.ruleSets.find((rs) => rs.id === "rs1");
+      expect(target?.name).toBe("Renamed");
+      expect(target?.enabled).toBe(false);
+      expect(target?.updatedAt).not.toBe(ts);
     });
   });
 

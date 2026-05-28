@@ -15,7 +15,7 @@ import type {
   RuleSet,
   WorkspaceSnapshot,
 } from "@resource-forwarder/shared-types";
-import { createId, splitCsv } from "../shared/helpers.js";
+import { createId, joinCsv, splitCsv } from "../shared/helpers.js";
 import { createProjectCopyBundle } from "./project-copy.js";
 import type {
   DashboardState,
@@ -35,6 +35,7 @@ import {
   type ProjectDraft,
   type RuleDraft,
   type RulePanelTab,
+  type RuleSetDraft,
   type RuleStatusTab,
   type RuleTemplatePreset,
 } from "./types.js";
@@ -44,6 +45,7 @@ import { AboutView } from "./views/AboutView.js";
 import { SettingsView } from "./views/SettingsView.js";
 import { ImportExportView } from "./views/ImportExportView.js";
 import { ProjectModal } from "./views/ProjectModal.js";
+import { RuleSetModal } from "./views/RuleSetModal.js";
 import { ImportPreviewModal } from "./views/ImportPreviewModal.js";
 import { RulesView } from "./views/RulesView.js";
 import { RulePanel } from "./views/RulePanel.js";
@@ -67,14 +69,26 @@ const emptyProjectDraft = (): ProjectDraft => ({
   enabled: true,
 });
 
+const emptyRuleSetDraft = (projectId = ""): RuleSetDraft => ({
+  id: "",
+  projectId,
+  name: "",
+  enabled: true,
+  siteMatchPatterns: "",
+  note: "",
+});
+
 function App() {
   const [view, setView] = useState<AppView>("rules");
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [selectedRuleSetId, setSelectedRuleSetId] = useState("");
   const [panelMode, setPanelMode] = useState<PanelMode>(null);
   const [rulePanelTab, setRulePanelTab] = useState<RulePanelTab>("basic");
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [projectDraft, setProjectDraft] = useState<ProjectDraft>(emptyProjectDraft());
+  const [showRuleSetModal, setShowRuleSetModal] = useState(false);
+  const [ruleSetDraft, setRuleSetDraft] = useState<RuleSetDraft>(emptyRuleSetDraft());
   const [ruleDraft, setRuleDraft] = useState<RuleDraft>(createRuleDraft());
   const [batchRuleDrafts, setBatchRuleDrafts] = useState<BatchRuleDraft[]>([]);
   const [serviceUrl, setServiceUrl] = useState("");
@@ -127,6 +141,7 @@ function App() {
   // Wired here at the top level so the rule-of-hooks is honoured even though
   // the modals themselves are rendered by helper functions further down.
   useModalDismiss(showProjectModal, () => setShowProjectModal(false));
+  useModalDismiss(showRuleSetModal, () => setShowRuleSetModal(false));
   useModalDismiss(resourceOverridePreview !== null, () => {
     if (busy) return;
     setResourceOverridePreview(null);
@@ -155,7 +170,12 @@ function App() {
     [ruleSets, selectedProject?.id],
   );
 
-  const selectedRuleSet = selectedProjectRuleSets[0];
+  const selectedRuleSet = useMemo(() => {
+    if (!selectedProject) return undefined;
+    return (
+      selectedProjectRuleSets.find((rs) => rs.id === selectedRuleSetId) ?? selectedProjectRuleSets[0]
+    );
+  }, [selectedProjectRuleSets, selectedRuleSetId, selectedProject]);
 
   const selectedRuleIds = useMemo(
     () => new Set(selectedProjectRuleSets.flatMap((rs) => rs.ruleIds)),
@@ -193,7 +213,7 @@ function App() {
     return sortRules(rules).map((rule) => {
       const ruleSet = ruleSetByRuleId.get(rule.id);
       const project = ruleSet ? projectById.get(ruleSet.projectId) ?? null : null;
-      return { rule, project };
+      return { rule, project, ruleSet: ruleSet ?? null };
     });
   }, [rules, ruleSetByRuleId, projectById]);
 
@@ -327,9 +347,45 @@ function App() {
     });
   }
 
+  // When the selected project changes (either via user click or by hydrate),
+  // reset selectedRuleSetId to that project's first group if the current
+  // selection no longer belongs to the project. Keeping the id around when it
+  // is still valid lets users navigate rules → settings → rules without losing
+  // their group focus.
+  useEffect(() => {
+    if (!selectedProject) {
+      setSelectedRuleSetId("");
+      return;
+    }
+    const stillValid = selectedProjectRuleSets.some((rs) => rs.id === selectedRuleSetId);
+    if (!stillValid) {
+      setSelectedRuleSetId(selectedProjectRuleSets[0]?.id ?? "");
+    }
+  }, [selectedProject?.id, selectedProjectRuleSets, selectedRuleSetId]);
+
   function openProjectModal(project?: Project): void {
     setProjectDraft(project ? fromProject(project) : emptyProjectDraft());
     setShowProjectModal(true);
+  }
+
+  function openRuleSetModal(ruleSet?: RuleSet): void {
+    if (!selectedProject && !ruleSet) {
+      setStatus("请先选择一个站点，再创建分组。");
+      return;
+    }
+    setRuleSetDraft(
+      ruleSet
+        ? {
+            id: ruleSet.id,
+            projectId: ruleSet.projectId,
+            name: ruleSet.name,
+            enabled: ruleSet.enabled,
+            siteMatchPatterns: joinCsv(ruleSet.siteMatchPatterns ?? []),
+            note: ruleSet.note ?? "",
+          }
+        : emptyRuleSetDraft(selectedProject?.id ?? ""),
+    );
+    setShowRuleSetModal(true);
   }
 
   function openRulePanel(kind: Rule["kind"], rule?: Rule): void {
@@ -458,7 +514,7 @@ function App() {
                 {
                   id: createId("ruleset"),
                   projectId,
-                  name: `${projectDraft.name.trim()} 默认规则组`,
+                  name: `${projectDraft.name.trim()} 默认分组`,
                   enabled: true,
                   ruleIds: [],
                   createdAt: now,
@@ -474,6 +530,89 @@ function App() {
       setStatus(`站点「${payload.project.name}」已保存。`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "保存站点失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveRuleSet(): Promise<void> {
+    if (!ruleSetDraft.name.trim()) {
+      setStatus("请输入分组名称。");
+      return;
+    }
+    if (!ruleSetDraft.projectId) {
+      setStatus("请先选择一个站点，再创建分组。");
+      return;
+    }
+    setBusy(true);
+    try {
+      const now = new Date().toISOString();
+      const existing = ruleSets.find((rs) => rs.id === ruleSetDraft.id);
+      const siteMatchPatterns = splitCsv(ruleSetDraft.siteMatchPatterns);
+      const ruleSet: RuleSet = {
+        id: ruleSetDraft.id || createId("ruleset"),
+        projectId: ruleSetDraft.projectId,
+        name: ruleSetDraft.name.trim(),
+        enabled: ruleSetDraft.enabled,
+        ruleIds: existing?.ruleIds ?? [],
+        siteMatchPatterns: siteMatchPatterns.length > 0 ? siteMatchPatterns : undefined,
+        note: ruleSetDraft.note.trim() || undefined,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+      const state = await runtimeRequest<UpsertMutationResponse>({
+        type: "upsert-rule-set",
+        payload: { ruleSet },
+      });
+      hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      setSelectedRuleSetId(ruleSet.id);
+      setShowRuleSetModal(false);
+      setRuleSetDraft(emptyRuleSetDraft());
+      setStatus(`分组「${ruleSet.name}」已保存。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "保存分组失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleRuleSet(ruleSet: RuleSet): Promise<void> {
+    setBusy(true);
+    try {
+      const state = await runtimeRequest<UpsertMutationResponse>({
+        type: "upsert-rule-set",
+        payload: { ruleSet: { ...ruleSet, enabled: !ruleSet.enabled } },
+      });
+      hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      setStatus(`分组「${ruleSet.name}」已${ruleSet.enabled ? "停用" : "启用"}。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "切换分组状态失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteRuleSet(ruleSet: RuleSet): Promise<void> {
+    const ruleCount = ruleSet.ruleIds.length;
+    const confirmed = await confirm({
+      title: "删除分组",
+      message: `确认删除分组「${ruleSet.name}」？\n将同时删除其下 ${ruleCount} 条规则，此操作不可撤销。`,
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    setBusy(true);
+    try {
+      const state = await runtimeRequest<UpsertMutationResponse>({
+        type: "delete-rule-set",
+        ruleSetId: ruleSet.id,
+      });
+      hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      if (selectedRuleSetId === ruleSet.id) setSelectedRuleSetId("");
+      setStatus(`分组「${ruleSet.name}」已删除。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "删除分组失败。");
     } finally {
       setBusy(false);
     }
@@ -1044,6 +1183,9 @@ function App() {
               selectedProjectId={selectedProjectId}
               setSelectedProjectId={setSelectedProjectId}
               selectedRuleSet={selectedRuleSet}
+              selectedRuleSetId={selectedRuleSetId}
+              setSelectedRuleSetId={setSelectedRuleSetId}
+              projectRuleSets={selectedProjectRuleSets}
               allRuleRows={allRuleRows}
               filteredRuleRows={filteredRuleRows}
               ruleStatusTab={ruleStatusTab}
@@ -1059,6 +1201,7 @@ function App() {
               actions={{
                 refresh,
                 openProjectModal,
+                openRuleSetModal,
                 openRulePanel,
                 openBatchRulePanel,
                 duplicateRule,
@@ -1066,6 +1209,8 @@ function App() {
                 toggleRule,
                 toggleProject,
                 deleteProject,
+                toggleRuleSet,
+                deleteRuleSet,
               }}
             />
           )}
@@ -1164,6 +1309,7 @@ function App() {
             setTab={setRulePanelTab}
             selectedProject={selectedProject}
             selectedRuleSet={selectedRuleSet}
+            projectRuleSets={selectedProjectRuleSets}
             activeTemplates={activeRuleTemplates}
             applyTemplate={applyRuleTemplate}
             conflicts={ruleConflicts}
@@ -1179,6 +1325,7 @@ function App() {
             drafts={batchRuleDrafts}
             selectedProject={selectedProject}
             selectedRuleSet={selectedRuleSet}
+            projectRuleSets={selectedProjectRuleSets}
             busy={busy}
             updateDraft={updateBatchRuleDraft}
             appendDraft={appendBatchRuleDraft}
@@ -1196,6 +1343,17 @@ function App() {
           setDraft={setProjectDraft}
           onClose={() => setShowProjectModal(false)}
           onSave={saveProject}
+          busy={busy}
+        />
+      )}
+
+      {/* RuleSet modal */}
+      {showRuleSetModal && (
+        <RuleSetModal
+          draft={ruleSetDraft}
+          setDraft={setRuleSetDraft}
+          onClose={() => setShowRuleSetModal(false)}
+          onSave={saveRuleSet}
           busy={busy}
         />
       )}

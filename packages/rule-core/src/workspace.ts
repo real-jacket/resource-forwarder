@@ -146,6 +146,27 @@ export function matchesProjectSite(
   }
 }
 
+/**
+ * Check whether a rule set is active for the given page URL. A rule set with
+ * its own siteMatchPatterns gates on those patterns (so co-existing groups
+ * under one project — sheet vs. table — only surface when the URL path lines
+ * up). When the rule set has no patterns of its own, it inherits the project's
+ * site scope; this keeps legacy single-group projects working without
+ * migration. The parent project's matching is intentionally NOT re-checked
+ * here because callers already filter by project at a higher level.
+ */
+export function matchesRuleSetSite(
+  ruleSet: { siteMatchPatterns?: string[] },
+  fallbackProject: { siteHosts: string[]; siteMatchPatterns?: string[] },
+  pageUrl: string,
+): boolean {
+  const patterns = ruleSet.siteMatchPatterns ?? [];
+  if (patterns.length === 0) {
+    return matchesProjectSite(fallbackProject, pageUrl);
+  }
+  return patterns.some((pattern) => matchesSitePattern(pattern, pageUrl));
+}
+
 function matchesSitePattern(pattern: string, pageUrl: string): boolean {
   const trimmed = pattern.trim();
   if (!trimmed || trimmed === "*" || trimmed === "<all_urls>") return true;
