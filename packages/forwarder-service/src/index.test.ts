@@ -495,6 +495,171 @@ describe("forwarder-service", () => {
     expect(sentHeaders.get("cookie")).toBeNull();
   });
 
+  describe("AI analysis endpoints", () => {
+    it("GET /schema returns the five request-body schemas", async () => {
+      const response = await app.inject({ method: "GET", url: "/schema" });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.serviceVersion).toBeTruthy();
+      expect(Object.keys(body.schemas).sort()).toEqual(
+        ["forward", "import", "project", "rule", "ruleSet"].sort(),
+      );
+    });
+
+    it("POST /match dry-runs a matching api_forward rule without hitting upstream", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/match",
+        payload: {
+          url: "https://app.example.com/api/profile?view=full",
+          method: "GET",
+          resourceType: "fetch",
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.matched).toBe(true);
+      expect(body.binding.ruleId).toBe("rule-api");
+      expect(body.binding.kind).toBe("api_forward");
+      expect(body.binding.projectId).toBe("project-1");
+      expect(body.binding.ruleSetId).toBe("ruleset-1");
+      // Same rewrite the real /forward path produces — proves we reuse buildForwardTargetUrl.
+      expect(body.rewrittenUrl).toBe("http://upstream.test/api/profile?view=full");
+      // The defining dry-run contract: selection runs, the upstream is never called.
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /match reports matched:false with a diagnostic trace when nothing fires", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/match",
+        payload: { url: "https://app.example.com/other/thing", method: "GET" },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.matched).toBe(false);
+      expect(body.binding).toBeUndefined();
+      // host matches app.example.com, but /other/thing is outside /api/** — the
+      // trace pinpoints the path condition as the reason rule-api did not fire.
+      const apiTrace = body.trace.find((entry: { ruleId: string }) => entry.ruleId === "rule-api");
+      expect(apiTrace.conditions.host).toBe(true);
+      expect(apiTrace.conditions.path).toBe(false);
+      expect(apiTrace.wouldMatch).toBe(false);
+      // A disabled rule still appears in the trace, flagged enabled:false.
+      const disabledTrace = body.trace.find((entry: { ruleId: string }) => entry.ruleId === "rule-disabled");
+      expect(disabledTrace.enabled).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /match returns 400 for a malformed url instead of crashing", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/match",
+        payload: { url: "not-a-url", method: "GET" },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /rules/validate accepts a sound rule with no warnings or conflicts", async () => {
+      const now = new Date().toISOString();
+      const response = await app.inject({
+        method: "POST",
+        url: "/rules/validate",
+        payload: {
+          rule: {
+            id: "rule-draft",
+            name: "Draft",
+            enabled: true,
+            kind: "api_forward",
+            priority: 10,
+            match: { host: ["app.example.com"], pathGlob: "/v2/**", method: ["GET"], tabScope: { mode: "all" } },
+            target: { forwardProfile: { targetBaseUrl: "http://v2-upstream.test" } },
+            tags: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.valid).toBe(true);
+      expect(body.warnings).toEqual([]);
+      expect(body.conflicts).toEqual([]);
+    });
+
+    it("POST /rules/validate warns about an api_forward rule missing its forward profile", async () => {
+      const now = new Date().toISOString();
+      const response = await app.inject({
+        method: "POST",
+        url: "/rules/validate",
+        payload: {
+          rule: {
+            id: "rule-no-profile",
+            name: "No Profile",
+            enabled: true,
+            kind: "api_forward",
+            priority: 10,
+            match: { host: ["app.example.com"], pathGlob: "/v3/**", tabScope: { mode: "all" } },
+            target: {},
+            tags: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      // warnings are advisory: the rule is still structurally valid.
+      expect(body.valid).toBe(true);
+      expect(body.warnings.some((w: string) => /forward profile/i.test(w))).toBe(true);
+    });
+
+    it("POST /rules/validate flags a draft overlapping an existing rule as a conflict", async () => {
+      const now = new Date().toISOString();
+      const response = await app.inject({
+        method: "POST",
+        url: "/rules/validate",
+        payload: {
+          rule: {
+            id: "rule-overlap",
+            name: "Overlap",
+            enabled: true,
+            kind: "api_forward",
+            priority: 10,
+            // Same host + pathGlob as the fixture's rule-api → flagged as overlap.
+            match: { host: ["app.example.com"], pathGlob: "/api/**", tabScope: { mode: "all" } },
+            target: { forwardProfile: { targetBaseUrl: "http://other-upstream.test" } },
+            tags: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.conflicts.length).toBeGreaterThan(0);
+      expect(body.conflicts.some((c: { ruleId: string }) => c.ruleId === "rule-api")).toBe(true);
+    });
+
+    it("POST /rules/validate rejects a structurally invalid rule with a 400", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/rules/validate",
+        payload: {
+          // Missing `target` → fails the shared upsert body schema (required).
+          rule: { id: "rule-bad", name: "Bad", kind: "api_forward", match: { host: ["x"], pathGlob: "/**" } },
+        },
+      });
+      expect(response.statusCode).toBe(400);
+    });
+  });
+
   describe("auth + host-header guard", () => {
     let secured: ReturnType<typeof buildServer>;
 
@@ -524,6 +689,16 @@ describe("forwarder-service", () => {
           headers: {},
           resourceType: "fetch",
         },
+      });
+      expect(response.statusCode).toBe(401);
+    });
+
+    it("requires a bearer token on /match (inherits the scoped guard)", async () => {
+      const response = await secured.inject({
+        method: "POST",
+        url: "/match",
+        headers: { host: "127.0.0.1:5178" },
+        payload: { url: "https://app.example.com/api/profile", method: "GET" },
       });
       expect(response.statusCode).toBe(401);
     });

@@ -3,6 +3,7 @@ import type {
   ForwardProfile,
   ForwardRequestPayload,
   ForwardResponsePayload,
+  MatchResourceType,
   RequestContext,
   RuleBinding,
 } from "@resource-forwarder/shared-types";
@@ -20,7 +21,19 @@ export const STREAMING_UNSUPPORTED = "STREAMING_UNSUPPORTED";
 /** Hard cap above which we tell the page to fetch directly (~4 MiB). */
 const MAX_FORWARDABLE_BODY_BYTES = 4 * 1024 * 1024;
 
-export function createRequestContext(payload: ForwardRequestPayload): RequestContext {
+// Accepts a structural subset rather than the full ForwardRequestPayload so the
+// read-only /match endpoint can reuse the same URL parsing + field defaults
+// while passing the wider MatchResourceType set (script/image/font/...), which
+// the narrower ForwardRequestPayload.resourceType ("fetch"|"xmlhttprequest")
+// can't express. A ForwardRequestPayload still satisfies this shape, so
+// /forward's call site is unchanged.
+export function createRequestContext(payload: {
+  url: string;
+  method: string;
+  tabId?: number;
+  resourceType?: MatchResourceType;
+  headers?: Record<string, string>;
+}): RequestContext {
   const url = new URL(payload.url);
   return {
     url: url.toString(),

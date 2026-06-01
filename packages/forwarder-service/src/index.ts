@@ -5,18 +5,35 @@ import type {
   ForwardRequestPayload,
   ImportWorkspacePayload,
   LogsResponse,
+  MatchRequestPayload,
+  MatchResponse,
+  MatchTraceEntry,
   ProjectsResponse,
   RequestContext,
   RuleBinding,
   RuleSet,
   RulesResponse,
+  SchemaResponse,
   ServiceHealthResponse,
   SupportedExportFormat,
   UpsertProjectPayload,
   UpsertRulePayload,
+  ValidateRuleResponse,
 } from "@resource-forwarder/shared-types";
-import { collectWorkspaceWarnings, matchesRule, pickMatchingRule, resolveRuleBinding } from "@resource-forwarder/rule-core";
-import { createRequestContext, forwardThroughRule, STREAMING_UNSUPPORTED } from "./proxy.js";
+import {
+  collectRuleConflicts,
+  collectUnsupportedRuleWarnings,
+  collectWorkspaceWarnings,
+  matchesHost,
+  matchesMethod,
+  matchesPath,
+  matchesResourceType,
+  matchesRule,
+  matchesTabScope,
+  pickMatchingRule,
+  resolveRuleBinding,
+} from "@resource-forwarder/rule-core";
+import { buildForwardTargetUrl, createRequestContext, forwardThroughRule, STREAMING_UNSUPPORTED } from "./proxy.js";
 import { WorkspaceStorage } from "./storage.js";
 import { HitLogger } from "./hit-logger.js";
 
@@ -404,6 +421,130 @@ function registerRoutes(
       return exported;
     },
   );
+
+  // --- AI-facing analysis endpoints --------------------------------------
+  // Read-only and side-effect-free: an agent can pull the request contract,
+  // validate a draft rule, and dry-run a match without writing to disk or
+  // touching an upstream. All three live inside this scoped plugin, so they
+  // inherit the same bearer-token + host-header guards as every non-/health
+  // route — no special-casing required.
+
+  app.get("/schema", async (): Promise<SchemaResponse> => ({
+    serviceVersion: SERVICE_VERSION,
+    schemas: {
+      project: projectSchema,
+      rule: ruleSchema,
+      ruleSet: ruleSetSchema,
+      forward: forwardRequestBodySchema,
+      import: importWorkspaceBodySchema,
+    },
+  }));
+
+  app.post<{ Body: UpsertRulePayload }>(
+    "/rules/validate",
+    { schema: { body: upsertRuleBodySchema } },
+    async (request): Promise<ValidateRuleResponse> => {
+      // Reuse the upsert body schema so "valid here" implies "upsertable": ajv
+      // rejects a structurally broken rule (e.g. missing target) with a 400
+      // before we reach this handler. warnings/conflicts are advisory — a sound
+      // rule stays valid:true even when they're non-empty.
+      const workspace = await storage.readWorkspace();
+      const { rule } = request.body;
+      return {
+        valid: true,
+        warnings: collectUnsupportedRuleWarnings(rule),
+        conflicts: collectRuleConflicts(workspace, rule),
+      };
+    },
+  );
+
+  app.post<{ Body: MatchRequestPayload }>(
+    "/match",
+    { schema: { body: matchRequestBodySchema } },
+    async (request, reply) => {
+      let context: RequestContext;
+      try {
+        context = createRequestContext({
+          url: request.body.url,
+          method: request.body.method,
+          headers: request.body.headers ?? {},
+          tabId: request.body.tabId,
+          resourceType: request.body.resourceType,
+        });
+      } catch {
+        // createRequestContext throws on a non-absolute / malformed url; the
+        // ajv schema only checks it's a bounded string. Surface the parse
+        // failure as a 400 rather than letting it become a 500.
+        return reply.status(400).send({ message: `Invalid url: ${request.body.url}` });
+      }
+
+      const workspace = await storage.readWorkspace();
+      // No kind filter: dry-run both asset_redirect and api_forward selection.
+      const binding = pickMatchingRule(workspace, context);
+
+      // Trace EVERY rule (not just enabled ones) with per-condition booleans so
+      // a caller can pinpoint exactly why a rule did not fire — the core value
+      // of /match for an agent iterating on a draft. Reuses the same matcher
+      // primitives selection uses, so the trace can't drift from reality.
+      const trace: MatchTraceEntry[] = workspace.rules.map((rule) => {
+        const resolved = resolveRuleBinding(workspace, rule.id);
+        const enabled =
+          rule.enabled &&
+          (resolved?.ruleSet ? resolved.ruleSet.enabled : true) &&
+          (resolved?.project ? resolved.project.enabled : true);
+        const conditions = {
+          host: matchesHost(rule.match.host, context.host),
+          path: matchesPath(rule.match.pathGlob, context.pathname),
+          method: matchesMethod(rule.match, context.method),
+          resourceType: matchesResourceType(rule.match, context.resourceType),
+          tabScope: matchesTabScope(rule.match, context.tabId),
+        };
+        const wouldMatch =
+          enabled &&
+          conditions.host &&
+          conditions.path &&
+          conditions.method &&
+          conditions.resourceType &&
+          conditions.tabScope;
+        return { ruleId: rule.id, ruleName: rule.name, kind: rule.kind, enabled, conditions, wouldMatch };
+      });
+
+      if (!binding) {
+        const miss: MatchResponse = { matched: false, trace };
+        return miss;
+      }
+
+      // Compute the rewritten URL without issuing the request. Wrapped so a
+      // malformed forward profile degrades to "no rewrittenUrl" instead of 500.
+      let rewrittenUrl: string | undefined;
+      try {
+        if (binding.rule.kind === "api_forward" && binding.rule.target.forwardProfile) {
+          rewrittenUrl = buildForwardTargetUrl(
+            binding.rule.target.forwardProfile,
+            new URL(request.body.url),
+          ).toString();
+        } else if (binding.rule.kind === "asset_redirect") {
+          rewrittenUrl = binding.rule.target.redirectUrl;
+        }
+      } catch {
+        rewrittenUrl = undefined;
+      }
+
+      const hit: MatchResponse = {
+        matched: true,
+        binding: {
+          ruleId: binding.rule.id,
+          ruleName: binding.rule.name,
+          kind: binding.rule.kind,
+          projectId: binding.project?.id,
+          ruleSetId: binding.ruleSet?.id,
+        },
+        rewrittenUrl,
+        trace,
+      };
+      return hit;
+    },
+  );
 }
 
 function isUsableForwardBinding(binding: RuleBinding, context: RequestContext): boolean {
@@ -541,6 +682,26 @@ const forwardRequestBodySchema = {
     tabId: { type: ["number", "null"] },
   },
   additionalProperties: true,
+} as const;
+
+// Read-only subset of the forward body for POST /match: no `body` (never
+// replayed) and resourceType widens to the full MatchResourceType set so
+// asset_redirect rules can be dry-run too. additionalProperties:false keeps the
+// AI-facing contract tight — a typo'd field is a 400, not a silent no-op.
+const matchRequestBodySchema = {
+  type: "object",
+  required: ["url", "method"],
+  properties: {
+    url: { type: "string", maxLength: 8192 },
+    method: { type: "string", maxLength: 16 },
+    resourceType: {
+      type: "string",
+      enum: ["script", "stylesheet", "image", "font", "fetch", "xmlhttprequest", "other"],
+    },
+    tabId: { type: ["number", "null"] },
+    headers: { type: "object", additionalProperties: { type: "string" } },
+  },
+  additionalProperties: false,
 } as const;
 
 function resolveLogger(option: BuildLoggerOption | undefined): boolean | { level: string } {

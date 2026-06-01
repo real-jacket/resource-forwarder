@@ -241,6 +241,94 @@ export interface RuntimeState {
   workspace: WorkspaceSnapshot;
 }
 
+// --- AI-facing analysis endpoints (/match, /rules/validate, /schema) ---
+// Read-only, side-effect-free contracts that let an agent (or any script)
+// complete the "pull contract -> draft rule -> validate -> dry-run match" loop
+// without writing to disk or hitting an upstream.
+
+/**
+ * Body for `POST /match`: a read-only subset of {@link ForwardRequestPayload}
+ * (no `body` — the request is never replayed upstream). `resourceType` widens
+ * to the full {@link MatchResourceType} set so asset_redirect rules (which key
+ * off script/stylesheet/image/font) can be dry-run too.
+ */
+export interface MatchRequestPayload {
+  url: string;
+  method: string;
+  resourceType?: MatchResourceType;
+  tabId?: number;
+  headers?: Record<string, string>;
+}
+
+/** The rule `POST /match` selected, flattened to ids for an external caller. */
+export interface MatchedRuleBinding {
+  ruleId: string;
+  ruleName: string;
+  kind: RuleKind;
+  projectId?: string;
+  ruleSetId?: string;
+}
+
+/**
+ * Per-rule diagnostic emitted by `POST /match`. Covers EVERY rule (not just the
+ * enabled ones that participate in selection) so a caller debugging "why didn't
+ * my rule fire" can see exactly which condition — or the enabled chain — failed.
+ */
+export interface MatchTraceEntry {
+  ruleId: string;
+  ruleName: string;
+  kind: RuleKind;
+  /** Combined rule + ruleSet + project enabled chain. */
+  enabled: boolean;
+  conditions: {
+    host: boolean;
+    path: boolean;
+    method: boolean;
+    resourceType: boolean;
+    tabScope: boolean;
+  };
+  /** `enabled` && every condition passed. */
+  wouldMatch: boolean;
+}
+
+export interface MatchResponse {
+  matched: boolean;
+  binding?: MatchedRuleBinding;
+  /**
+   * For api_forward: the rewritten upstream URL (via the same builder `/forward`
+   * uses). For asset_redirect: the redirect target. Undefined when unmatched or
+   * not computable (e.g. malformed forward profile).
+   */
+  rewrittenUrl?: string;
+  trace: MatchTraceEntry[];
+}
+
+/**
+ * Mirror of rule-core's `RuleConflict` shape, inlined here so shared-types keeps
+ * its one-way dependency direction (it must not import from rule-core).
+ */
+export interface RuleConflictInfo {
+  ruleId: string;
+  reason: string;
+}
+
+/**
+ * Response for `POST /rules/validate`. warnings/conflicts are advisory, not
+ * errors, so `valid` stays true for a structurally sound rule — only a payload
+ * that fails the route's ajv schema is rejected (400) before reaching here.
+ */
+export interface ValidateRuleResponse {
+  valid: boolean;
+  warnings: string[];
+  conflicts: RuleConflictInfo[];
+}
+
+/** Response for `GET /schema`: the service's request-body ajv schemas, verbatim. */
+export interface SchemaResponse {
+  serviceVersion: string;
+  schemas: Record<string, unknown>;
+}
+
 export interface DynamicRedirectRule {
   id: number;
   priority: number;
