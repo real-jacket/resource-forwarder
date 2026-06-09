@@ -256,6 +256,82 @@ describe("dnr helpers", () => {
     expect(groups.sessionRules).toHaveLength(0);
   });
 
+  it("resolves relative asset redirect targets with rule set baseUrl first, then project baseUrl", () => {
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [
+          project({
+            id: "tables",
+            siteHosts: ["app.example.com"],
+            siteMatchPatterns: ["https://app.example.com/tables/*"],
+            baseUrl: "http://project-local.test/project-base/",
+          }),
+        ],
+        ruleSets: [
+          {
+            id: "rs-tables",
+            projectId: "tables",
+            name: "Tables",
+            enabled: true,
+            ruleIds: ["rule-rs", "rule-project"],
+            siteMatchPatterns: ["https://app.example.com/tables/*"],
+            baseUrl: "http://ruleset-local.test/group-base/",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        rules: [
+          assetRule("rule-rs", "cdn.example.com", "bundle/app.js"),
+          {
+            ...assetRule("rule-project", "cdn.example.com", "bundle/project.js"),
+            priority: 50,
+          },
+        ],
+      },
+      [{ id: 2, url: "https://app.example.com/tables/abc" }],
+    );
+
+    expect(groups.sessionRules.map((item) => item.action.redirect.url)).toEqual([
+      "http://ruleset-local.test/group-base/bundle/app.js",
+      "http://ruleset-local.test/group-base/bundle/project.js",
+    ]);
+
+    const fallbackGroups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [
+          project({
+            id: "tables",
+            siteHosts: ["app.example.com"],
+            siteMatchPatterns: ["https://app.example.com/tables/*"],
+            baseUrl: "http://project-local.test/project-base/",
+          }),
+        ],
+        ruleSets: [
+          {
+            id: "rs-tables",
+            projectId: "tables",
+            name: "Tables",
+            enabled: true,
+            ruleIds: ["rule-project"],
+            siteMatchPatterns: ["https://app.example.com/tables/*"],
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        rules: [assetRule("rule-project", "cdn.example.com", "bundle/project.js")],
+      },
+      [{ id: 2, url: "https://app.example.com/tables/abc" }],
+    );
+
+    expect(fallbackGroups.sessionRules.map((item) => item.action.redirect.url)).toEqual([
+      "http://project-local.test/project-base/bundle/project.js",
+    ]);
+  });
+
   it("treats host-only projects (no siteMatchPatterns) as host-wide, not global, so initiatorDomains is bound", () => {
     const groups = buildScopedDnrRuleGroups(
       {

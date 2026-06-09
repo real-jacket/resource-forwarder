@@ -64,6 +64,7 @@ const emptyProjectDraft = (): ProjectDraft => ({
   id: "",
   name: "",
   siteMatchPatterns: "",
+  baseUrl: "",
   envLabel: "",
   note: "",
   enabled: true,
@@ -75,6 +76,7 @@ const emptyRuleSetDraft = (projectId = ""): RuleSetDraft => ({
   name: "",
   enabled: true,
   siteMatchPatterns: "",
+  baseUrl: "",
   note: "",
 });
 
@@ -258,7 +260,13 @@ function App() {
       if (siteStatusFilter === "enabled" && !project.enabled) return false;
       if (siteStatusFilter === "disabled" && project.enabled) return false;
       if (deferredSiteQuery) {
-        const text = [project.name, ...project.siteHosts, ...(project.siteMatchPatterns ?? []), project.envLabel ?? ""].join(" ").toLowerCase();
+        const text = [
+          project.name,
+          ...project.siteHosts,
+          ...(project.siteMatchPatterns ?? []),
+          project.baseUrl ?? "",
+          project.envLabel ?? "",
+        ].join(" ").toLowerCase();
         return text.includes(deferredSiteQuery);
       }
       return true;
@@ -381,6 +389,7 @@ function App() {
             name: ruleSet.name,
             enabled: ruleSet.enabled,
             siteMatchPatterns: joinCsv(ruleSet.siteMatchPatterns ?? []),
+            baseUrl: ruleSet.baseUrl ?? "",
             note: ruleSet.note ?? "",
           }
         : emptyRuleSetDraft(selectedProject?.id ?? ""),
@@ -500,6 +509,7 @@ function App() {
           enabled: projectDraft.enabled,
           siteHosts: deriveSiteHosts(siteMatchPatterns),
           siteMatchPatterns,
+          baseUrl: projectDraft.baseUrl.trim() || undefined,
           envLabel: projectDraft.envLabel.trim() || undefined,
           note: projectDraft.note.trim() || undefined,
           tags: [],
@@ -556,6 +566,7 @@ function App() {
         enabled: ruleSetDraft.enabled,
         ruleIds: existing?.ruleIds ?? [],
         siteMatchPatterns: siteMatchPatterns.length > 0 ? siteMatchPatterns : undefined,
+        baseUrl: ruleSetDraft.baseUrl.trim() || undefined,
         note: ruleSetDraft.note.trim() || undefined,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,

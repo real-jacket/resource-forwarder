@@ -7,7 +7,7 @@ import type {
   RequestContext,
   RuleBinding,
 } from "@resource-forwarder/shared-types";
-import { isTextualContentType } from "@resource-forwarder/rule-core";
+import { isTextualContentType, resolveForwardProfile } from "@resource-forwarder/rule-core";
 import { DEFAULT_FORWARD_TIMEOUT_MS } from "./defaults.js";
 
 /**
@@ -29,6 +29,7 @@ const MAX_FORWARDABLE_BODY_BYTES = 4 * 1024 * 1024;
 // /forward's call site is unchanged.
 export function createRequestContext(payload: {
   url: string;
+  pageUrl?: string;
   method: string;
   tabId?: number;
   resourceType?: MatchResourceType;
@@ -37,6 +38,7 @@ export function createRequestContext(payload: {
   const url = new URL(payload.url);
   return {
     url: url.toString(),
+    pageUrl: payload.pageUrl,
     method: payload.method,
     host: url.host,
     pathname: url.pathname,
@@ -50,7 +52,7 @@ export async function forwardThroughRule(
   binding: RuleBinding,
   payload: ForwardRequestPayload,
 ): Promise<{ response: ForwardResponsePayload; targetUrl: string }> {
-  const profile = binding.rule.target.forwardProfile;
+  const profile = resolveForwardProfile(binding);
   if (!profile) {
     throw new Error(`Rule ${binding.rule.id} does not have a forward profile.`);
   }

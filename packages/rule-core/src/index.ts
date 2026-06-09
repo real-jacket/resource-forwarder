@@ -48,6 +48,13 @@ export {
 // DNR conversion
 export { toDynamicNetRequestRules, toDynamicRule } from "./dnr.js";
 
+// Target resolution
+export {
+  resolveBindingBaseUrl,
+  resolveForwardProfile,
+  resolveRuleTargetValue,
+} from "./target-resolution.js";
+
 // Glob/regex primitives — exported because page-bridge / matcher-cache need
 // access to the same compilation logic the matchers use.
 export { buildRegexFilter, globToPathRegexSource, sanitizePathGlob } from "./glob.js";

@@ -104,6 +104,46 @@ describe("rule-core", () => {
     expect(match?.rule.id).toBe("rule-api");
   });
 
+  it("only matches a rule when the current page passes both project and rule set scope", () => {
+    const scopedWorkspace: WorkspaceSnapshot = {
+      ...workspace,
+      ruleSets: [
+        {
+          ...workspace.ruleSets[0]!,
+          siteMatchPatterns: ["https://app.example.com/tables/*"],
+        },
+      ],
+    };
+
+    const tablePage = pickMatchingRule(
+      scopedWorkspace,
+      {
+        url: "https://app.example.com/api/profile",
+        pageUrl: "https://app.example.com/tables/abc",
+        method: "GET",
+        host: "app.example.com",
+        pathname: "/api/profile",
+        resourceType: "fetch",
+      },
+      "api_forward",
+    );
+    const sheetPage = pickMatchingRule(
+      scopedWorkspace,
+      {
+        url: "https://app.example.com/api/profile",
+        pageUrl: "https://app.example.com/sheets/abc",
+        method: "GET",
+        host: "app.example.com",
+        pathname: "/api/profile",
+        resourceType: "fetch",
+      },
+      "api_forward",
+    );
+
+    expect(tablePage?.rule.id).toBe("rule-api");
+    expect(sheetPage).toBeUndefined();
+  });
+
   it("serializes and parses workspace snapshots", () => {
     const yaml = serializeWorkspace(workspace, "yaml");
     expect(parseWorkspace(yaml)).toEqual(workspace);
@@ -633,6 +673,56 @@ describe("rule-core", () => {
     const nonMatchingPage = trimWorkspaceForUrl(scopedWorkspace, "https://shimo.im/sheets/abc");
     expect(nonMatchingPage.projects).toHaveLength(0);
     expect(nonMatchingPage.rules).toHaveLength(0);
+  });
+
+  it("trims workspace by rule set site scope inside a matched project", () => {
+    const scopedWorkspace: WorkspaceSnapshot = {
+      version: 1,
+      updatedAt: "2024-01-01T00:00:00.000Z",
+      projects: [
+        {
+          id: "p1",
+          name: "App",
+          enabled: true,
+          siteHosts: ["app.example.com"],
+          siteMatchPatterns: ["https://app.example.com/*"],
+          tags: [],
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        },
+      ],
+      ruleSets: [
+        {
+          id: "tables",
+          projectId: "p1",
+          name: "Tables",
+          enabled: true,
+          ruleIds: ["rule-api"],
+          siteMatchPatterns: ["https://app.example.com/tables/*"],
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        },
+        {
+          id: "sheets",
+          projectId: "p1",
+          name: "Sheets",
+          enabled: true,
+          ruleIds: ["rule-asset"],
+          siteMatchPatterns: ["https://app.example.com/sheets/*"],
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        },
+      ],
+      rules: [apiRule, assetRule],
+    };
+
+    const tablePage = trimWorkspaceForUrl(scopedWorkspace, "https://app.example.com/tables/abc");
+    const sheetPage = trimWorkspaceForUrl(scopedWorkspace, "https://app.example.com/sheets/abc");
+
+    expect(tablePage.ruleSets.map((ruleSet) => ruleSet.id)).toEqual(["tables"]);
+    expect(tablePage.rules.map((rule) => rule.id)).toEqual(["rule-api"]);
+    expect(sheetPage.ruleSets.map((ruleSet) => ruleSet.id)).toEqual(["sheets"]);
+    expect(sheetPage.rules.map((rule) => rule.id)).toEqual(["rule-asset"]);
   });
 
   it("uses regexFilter instead of path-only urlFilter for wildcard DNR hosts", () => {

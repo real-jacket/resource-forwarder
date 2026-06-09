@@ -14,6 +14,7 @@ const workspace: WorkspaceSnapshot = {
       enabled: true,
       siteHosts: ["shimo.im"],
       siteMatchPatterns: ["https://shimo.im/tables/*"],
+      baseUrl: "https://dev.shimo.im/base/",
       tags: ["prod"],
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
@@ -35,6 +36,7 @@ const workspace: WorkspaceSnapshot = {
       name: "默认分组",
       enabled: true,
       ruleIds: ["rule-api", "rule-asset"],
+      baseUrl: "https://dev.shimo.im/tables/",
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
     },
@@ -95,6 +97,7 @@ describe("createProjectCopyBundle", () => {
       name: "生产环境 副本 2",
       siteHosts: ["shimo.im"],
       siteMatchPatterns: ["https://shimo.im/tables/*"],
+      baseUrl: "https://dev.shimo.im/base/",
       createdAt: now,
       updatedAt: now,
     });
@@ -103,6 +106,7 @@ describe("createProjectCopyBundle", () => {
         id: "ruleset-copy",
         projectId: "project-copy",
         ruleIds: ["rule-api-copy", "rule-asset-copy"],
+        baseUrl: "https://dev.shimo.im/tables/",
       }),
     ]);
     expect(bundle.rules.map((rule) => rule.id)).toEqual(["rule-api-copy", "rule-asset-copy"]);

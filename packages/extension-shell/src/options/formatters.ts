@@ -1,4 +1,4 @@
-import type { Rule } from "@resource-forwarder/shared-types";
+import type { Project, Rule, RuleSet } from "@resource-forwarder/shared-types";
 import { joinCsv } from "../shared/helpers.js";
 
 /**
@@ -33,6 +33,25 @@ export function formatRuleTarget(rule: Rule): string {
     return rule.target.redirectUrl || "未填写 HTTPS 地址";
   }
   return rule.target.forwardProfile?.targetBaseUrl || "未填写目标地址";
+}
+
+export function formatProjectScopeSummary(project: Project): string {
+  const scope = joinCsv(project.siteMatchPatterns ?? project.siteHosts) || "未填写站点匹配";
+  return project.baseUrl ? `${scope} · 基础路径 ${project.baseUrl}` : scope;
+}
+
+export function formatRuleSetScopeSummary(ruleSet: RuleSet): string {
+  const scope = joinCsv(ruleSet.siteMatchPatterns ?? []);
+  if (scope && ruleSet.baseUrl) {
+    return `${scope} · 基础路径 ${ruleSet.baseUrl}`;
+  }
+  if (scope) {
+    return scope;
+  }
+  if (ruleSet.baseUrl) {
+    return `基础路径 ${ruleSet.baseUrl}`;
+  }
+  return "";
 }
 
 /**

@@ -3,7 +3,7 @@ import type { Project, Rule, RuleSet } from "@resource-forwarder/shared-types";
 import type { DashboardState } from "../../shared/messages.js";
 import type { AppView, RuleStatusTab } from "../types.js";
 import { CustomSelect } from "../components/CustomSelect.js";
-import { formatRuleTarget, formatTimestamp } from "../formatters.js";
+import { formatProjectScopeSummary, formatRuleSetScopeSummary, formatRuleTarget, formatTimestamp } from "../formatters.js";
 
 export interface RuleRow {
   rule: Rule;
@@ -305,7 +305,7 @@ function Toolbar(props: RulesViewProps) {
 
 function SiteScopeBanner({ project }: { project: Project | undefined }) {
   if (!project) return null;
-  const patterns = project.siteMatchPatterns ?? [];
+  const summary = formatProjectScopeSummary(project);
   return (
     <div className={`site-scope-banner${project.enabled ? "" : " is-disabled"}`}>
       <div className="site-scope-label">
@@ -316,13 +316,9 @@ function SiteScopeBanner({ project }: { project: Project | undefined }) {
         站点匹配
       </div>
       <div className="site-scope-patterns">
-        {patterns.length > 0 ? (
-          patterns.map((p, i) => (
-            <span className="site-scope-pattern" key={i}>{p}</span>
-          ))
-        ) : (
-          <span className="site-scope-empty">未设置（全局生效）</span>
-        )}
+        <span className={project.siteMatchPatterns?.length ? "site-scope-pattern" : "site-scope-empty"}>
+          {summary}
+        </span>
       </div>
       {!project.enabled && <span className="site-scope-status">已停用</span>}
     </div>
@@ -538,12 +534,12 @@ function GroupHeaderRow({
           </label>
           <span className="rule-group-name">{ruleSet.name}</span>
           <span className="rule-group-meta">{ruleCount} 条规则</span>
-          {(ruleSet.siteMatchPatterns ?? []).length > 0 && (
+          {formatRuleSetScopeSummary(ruleSet) && (
             <span
               className="rule-group-patterns"
-              title={(ruleSet.siteMatchPatterns ?? []).join(", ")}
+              title={formatRuleSetScopeSummary(ruleSet)}
             >
-              {(ruleSet.siteMatchPatterns ?? []).join(", ")}
+              {formatRuleSetScopeSummary(ruleSet)}
             </span>
           )}
           {!ruleSet.enabled && <span className="rule-group-badge">已停用</span>}

@@ -54,6 +54,17 @@ export function RuleSetModal({ draft, setDraft, onClose, onSave, busy }: RuleSet
           </div>
 
           <div className="form-group">
+            <label className="form-label">分组基础路径</label>
+            <input
+              className="form-input"
+              value={draft.baseUrl}
+              onChange={(e) => setDraft((v) => ({ ...v, baseUrl: e.target.value }))}
+              placeholder="https://dev.example.com/tables/"
+            />
+            <span className="form-hint">规则目标填相对路径时优先使用这里；留空时回退到站点基础路径。</span>
+          </div>
+
+          <div className="form-group">
             <label className="form-label" style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <input
                 type="checkbox"

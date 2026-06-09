@@ -7,6 +7,7 @@ import type {
   RuleKind,
   WorkspaceSnapshot,
 } from "@resource-forwarder/shared-types";
+import { prepareMatcher } from "./matcher-cache.js";
 import { escapeRegex, globToPathRegexSource } from "./glob.js";
 import type { RuleConflict } from "./warnings.js";
 
@@ -108,7 +109,7 @@ export function pickMatchingRule(
   context: RequestContext,
   kind?: RuleKind,
 ): RuleBinding | undefined {
-  return getEnabledRuleBindings(workspace, kind).find((binding) => matchesRule(binding.rule, context));
+  return prepareMatcher(workspace).pick(context, kind);
 }
 
 export function collectRuleConflicts(workspace: WorkspaceSnapshot, draft: Rule): RuleConflict[] {

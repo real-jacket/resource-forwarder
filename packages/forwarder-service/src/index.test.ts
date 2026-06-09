@@ -20,7 +20,7 @@ beforeAll(async () => {
   app = buildServer({ storage, logger: false, disableRateLimit: true });
 
   vi.stubGlobal("fetch", fetchMock);
-  fetchMock.mockResolvedValue(
+  fetchMock.mockImplementation(async () =>
     new Response(JSON.stringify({ ok: true }), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -61,6 +61,7 @@ function createWorkspace(): WorkspaceSnapshot {
           name: "App",
           enabled: true,
           siteHosts: ["app.example.com"],
+          siteMatchPatterns: ["https://app.example.com/*"],
           tags: [],
           createdAt: now,
           updatedAt: now,
@@ -202,6 +203,254 @@ describe("forwarder-service", () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(response.statusCode).toBe(404);
+  });
+
+  it("does not forward through a matchedRuleId when the current page misses the rule set scope", async () => {
+    const now = new Date().toISOString();
+    await storage.importWorkspace({
+      format: "json",
+      merge: false,
+      content: JSON.stringify({
+        version: 1,
+        updatedAt: now,
+        projects: [
+          {
+            id: "project-1",
+            name: "App",
+            enabled: true,
+            siteHosts: ["app.example.com"],
+            siteMatchPatterns: ["https://app.example.com/*"],
+            tags: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        ruleSets: [
+          {
+            id: "ruleset-1",
+            projectId: "project-1",
+            name: "Tables",
+            enabled: true,
+            ruleIds: ["rule-api"],
+            siteMatchPatterns: ["https://app.example.com/tables/*"],
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        rules: [
+          {
+            id: "rule-api",
+            name: "Forward API",
+            enabled: true,
+            kind: "api_forward",
+            priority: 100,
+            match: {
+              host: ["app.example.com"],
+              pathGlob: "/api/**",
+              resourceType: ["fetch"],
+              method: ["GET"],
+              tabScope: { mode: "all" },
+            },
+            target: {
+              forwardProfile: {
+                targetBaseUrl: "http://upstream.test",
+              },
+            },
+            tags: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/forward",
+      payload: {
+        url: "https://app.example.com/api/profile",
+        pageUrl: "https://app.example.com/sheets/abc",
+        method: "GET",
+        headers: {},
+        resourceType: "fetch",
+        matchedRuleId: "rule-api",
+      },
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("resolves relative forward targets with rule set baseUrl first, then project baseUrl", async () => {
+    const now = new Date().toISOString();
+    await storage.importWorkspace({
+      format: "json",
+      merge: false,
+      content: JSON.stringify({
+        version: 1,
+        updatedAt: now,
+        projects: [
+          {
+            id: "project-1",
+            name: "App",
+            enabled: true,
+            siteHosts: ["app.example.com"],
+            siteMatchPatterns: ["https://app.example.com/*"],
+            baseUrl: "http://project-upstream.test/project-base/",
+            tags: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        ruleSets: [
+          {
+            id: "ruleset-1",
+            projectId: "project-1",
+            name: "Tables",
+            enabled: true,
+            ruleIds: ["rule-group", "rule-project"],
+            siteMatchPatterns: ["https://app.example.com/tables/*"],
+            baseUrl: "http://ruleset-upstream.test/group-base/",
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        rules: [
+          {
+            id: "rule-group",
+            name: "Group Base",
+            enabled: true,
+            kind: "api_forward",
+            priority: 200,
+            match: {
+              host: ["app.example.com"],
+              pathGlob: "/group/**",
+              resourceType: ["fetch"],
+              method: ["GET"],
+              tabScope: { mode: "all" },
+            },
+            target: {
+              forwardProfile: {
+                targetBaseUrl: "svc/",
+              },
+            },
+            tags: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+          {
+            id: "rule-project",
+            name: "Project Base",
+            enabled: true,
+            kind: "api_forward",
+            priority: 100,
+            match: {
+              host: ["app.example.com"],
+              pathGlob: "/project/**",
+              resourceType: ["fetch"],
+              method: ["GET"],
+              tabScope: { mode: "all" },
+            },
+            target: {
+              forwardProfile: {
+                targetBaseUrl: "svc/",
+              },
+            },
+            tags: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+      }),
+    });
+
+    const groupResponse = await app.inject({
+      method: "POST",
+      url: "/forward",
+      payload: {
+        url: "https://app.example.com/group/profile",
+        pageUrl: "https://app.example.com/tables/abc",
+        method: "GET",
+        headers: {},
+        resourceType: "fetch",
+      },
+    });
+    expect(groupResponse.statusCode).toBe(200);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://ruleset-upstream.test/group-base/svc/group/profile");
+
+    fetchMock.mockClear();
+
+    await storage.importWorkspace({
+      format: "json",
+      merge: false,
+      content: JSON.stringify({
+        version: 1,
+        updatedAt: now,
+        projects: [
+          {
+            id: "project-1",
+            name: "App",
+            enabled: true,
+            siteHosts: ["app.example.com"],
+            siteMatchPatterns: ["https://app.example.com/*"],
+            baseUrl: "http://project-upstream.test/project-base/",
+            tags: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        ruleSets: [
+          {
+            id: "ruleset-1",
+            projectId: "project-1",
+            name: "Tables",
+            enabled: true,
+            ruleIds: ["rule-project"],
+            siteMatchPatterns: ["https://app.example.com/tables/*"],
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        rules: [
+          {
+            id: "rule-project",
+            name: "Project Base",
+            enabled: true,
+            kind: "api_forward",
+            priority: 100,
+            match: {
+              host: ["app.example.com"],
+              pathGlob: "/project/**",
+              resourceType: ["fetch"],
+              method: ["GET"],
+              tabScope: { mode: "all" },
+            },
+            target: {
+              forwardProfile: {
+                targetBaseUrl: "svc/",
+              },
+            },
+            tags: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+      }),
+    });
+
+    const projectResponse = await app.inject({
+      method: "POST",
+      url: "/forward",
+      payload: {
+        url: "https://app.example.com/project/profile",
+        pageUrl: "https://app.example.com/tables/abc",
+        method: "GET",
+        headers: {},
+        resourceType: "fetch",
+      },
+    });
+    expect(projectResponse.statusCode).toBe(200);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://project-upstream.test/project-base/svc/project/profile");
   });
 
   it("does not grant browser CORS access to ordinary web origins", async () => {

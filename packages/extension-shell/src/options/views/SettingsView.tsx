@@ -1,10 +1,9 @@
 import React from "react";
 import { matchesProjectSite } from "@resource-forwarder/rule-core";
 import type { Project } from "@resource-forwarder/shared-types";
-import { joinCsv } from "../../shared/helpers.js";
 import type { DashboardState } from "../../shared/messages.js";
 import type { AppView } from "../types.js";
-import { formatTimestamp, localizeWarning } from "../formatters.js";
+import { formatProjectScopeSummary, formatTimestamp, localizeWarning } from "../formatters.js";
 
 /**
  * Props are grouped by feature (service, filters, selection, …) instead of
@@ -400,7 +399,7 @@ function SiteRow({
         </div>
         <div className="site-list-meta">
           <span className="site-list-hosts">
-            {joinCsv(project.siteMatchPatterns ?? project.siteHosts) || "未填写站点匹配"}
+            {formatProjectScopeSummary(project)}
           </span>
           <span className="site-list-dot">·</span>
           <span>{ruleCount} 条规则</span>

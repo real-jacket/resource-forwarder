@@ -57,6 +57,17 @@ export function ProjectModal({ draft, setDraft, onClose, onSave, busy }: Project
             <span className="form-hint">规则仅在当前页面匹配此模式时生效，多个用逗号分隔。支持 * 通配符</span>
           </div>
 
+          <div className="form-group">
+            <label className="form-label">站点基础路径</label>
+            <input
+              className="form-input"
+              value={draft.baseUrl}
+              onChange={(e) => setDraft((v) => ({ ...v, baseUrl: e.target.value }))}
+              placeholder="https://dev.example.com/base/"
+            />
+            <span className="form-hint">规则目标填相对路径时，会优先使用分组基础路径；未填写分组基础路径时回退到这里。</span>
+          </div>
+
           <div className="form-row">
             <div className="form-group">
               <label className="form-label">环境标签</label>

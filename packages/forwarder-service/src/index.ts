@@ -27,11 +27,15 @@ import {
   matchesHost,
   matchesMethod,
   matchesPath,
+  matchesProjectSite,
   matchesResourceType,
   matchesRule,
+  matchesRuleSetSite,
   matchesTabScope,
   pickMatchingRule,
+  resolveForwardProfile,
   resolveRuleBinding,
+  resolveRuleTargetValue,
 } from "@resource-forwarder/rule-core";
 import { buildForwardTargetUrl, createRequestContext, forwardThroughRule, STREAMING_UNSUPPORTED } from "./proxy.js";
 import { WorkspaceStorage } from "./storage.js";
@@ -466,6 +470,7 @@ function registerRoutes(
       try {
         context = createRequestContext({
           url: request.body.url,
+          pageUrl: request.body.pageUrl,
           method: request.body.method,
           headers: request.body.headers ?? {},
           tabId: request.body.tabId,
@@ -519,12 +524,12 @@ function registerRoutes(
       let rewrittenUrl: string | undefined;
       try {
         if (binding.rule.kind === "api_forward" && binding.rule.target.forwardProfile) {
-          rewrittenUrl = buildForwardTargetUrl(
-            binding.rule.target.forwardProfile,
-            new URL(request.body.url),
-          ).toString();
+          const profile = resolveForwardProfile(binding);
+          rewrittenUrl = profile
+            ? buildForwardTargetUrl(profile, new URL(request.body.url)).toString()
+            : undefined;
         } else if (binding.rule.kind === "asset_redirect") {
-          rewrittenUrl = binding.rule.target.redirectUrl;
+          rewrittenUrl = resolveRuleTargetValue(binding.rule.target.redirectUrl, binding);
         }
       } catch {
         rewrittenUrl = undefined;
@@ -553,6 +558,14 @@ function isUsableForwardBinding(binding: RuleBinding, context: RequestContext): 
     binding.rule.enabled &&
     (binding.ruleSet ? binding.ruleSet.enabled : true) &&
     (binding.project ? binding.project.enabled : true) &&
+    (!context.pageUrl || !binding.project || matchesProjectSite(binding.project, context.pageUrl)) &&
+    (!context.pageUrl ||
+      !binding.ruleSet ||
+      matchesRuleSetSite(
+        binding.ruleSet,
+        binding.project ?? { siteHosts: [], siteMatchPatterns: [] },
+        context.pageUrl,
+      )) &&
     matchesRule(binding.rule, context)
   );
 }
@@ -586,6 +599,7 @@ const projectSchema = {
     enabled: { type: "boolean" },
     siteHosts: { type: "array", items: { type: "string" } },
     siteMatchPatterns: { type: "array", items: { type: "string" } },
+    baseUrl: optionalString,
     envLabel: optionalString,
     tags: stringArray,
     createdAt: optionalString,
@@ -604,6 +618,8 @@ const ruleSetSchema = {
     description: optionalString,
     enabled: { type: "boolean" },
     ruleIds: { type: "array", items: { type: "string" } },
+    siteMatchPatterns: { type: "array", items: { type: "string" } },
+    baseUrl: optionalString,
     createdAt: optionalString,
     updatedAt: optionalString,
   },
@@ -674,6 +690,7 @@ const forwardRequestBodySchema = {
   required: ["url", "method"],
   properties: {
     url: { type: "string", maxLength: 8192 },
+    pageUrl: optionalString,
     method: { type: "string", maxLength: 16 },
     headers: { type: "object", additionalProperties: { type: "string" } },
     body: optionalString,
@@ -693,6 +710,7 @@ const matchRequestBodySchema = {
   required: ["url", "method"],
   properties: {
     url: { type: "string", maxLength: 8192 },
+    pageUrl: optionalString,
     method: { type: "string", maxLength: 16 },
     resourceType: {
       type: "string",

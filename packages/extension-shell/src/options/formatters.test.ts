@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type { Rule } from "@resource-forwarder/shared-types";
-import { buildRuleSearchText, formatRuleTarget, formatTimestamp, localizeWarning } from "./formatters.js";
+import type { Project, Rule, RuleSet } from "@resource-forwarder/shared-types";
+import {
+  buildRuleSearchText,
+  formatProjectScopeSummary,
+  formatRuleSetScopeSummary,
+  formatRuleTarget,
+  formatTimestamp,
+  localizeWarning,
+} from "./formatters.js";
 
 const baseRule: Rule = {
   id: "rule-1",
@@ -18,6 +25,30 @@ const baseRule: Rule = {
   target: { forwardProfile: { targetBaseUrl: "http://localhost:3000", headers: {} } },
   note: "调试",
   tags: ["staging"],
+  createdAt: "2025-01-01T00:00:00.000Z",
+  updatedAt: "2025-01-01T00:00:00.000Z",
+};
+
+const baseProject: Project = {
+  id: "project-1",
+  name: "示例站点",
+  enabled: true,
+  siteHosts: ["example.com"],
+  siteMatchPatterns: ["https://example.com/tables/*"],
+  baseUrl: "https://dev.example.com/base/",
+  tags: [],
+  createdAt: "2025-01-01T00:00:00.000Z",
+  updatedAt: "2025-01-01T00:00:00.000Z",
+};
+
+const baseRuleSet: RuleSet = {
+  id: "ruleset-1",
+  projectId: "project-1",
+  name: "Tables",
+  enabled: true,
+  ruleIds: [],
+  siteMatchPatterns: ["https://example.com/tables/*"],
+  baseUrl: "https://dev.example.com/tables/",
   createdAt: "2025-01-01T00:00:00.000Z",
   updatedAt: "2025-01-01T00:00:00.000Z",
 };
@@ -65,6 +96,30 @@ describe("formatTimestamp", () => {
   it("drops the year when short=true", () => {
     const out = formatTimestamp("2025-03-04T10:20:30Z", true);
     expect(out).toMatch(/^\d{2}-\d{2} \d{2}:\d{2}$/);
+  });
+});
+
+describe("scope summaries", () => {
+  it("formats project scope with both match patterns and baseUrl", () => {
+    expect(formatProjectScopeSummary(baseProject)).toBe(
+      "https://example.com/tables/* · 基础路径 https://dev.example.com/base/",
+    );
+  });
+
+  it("falls back to hosts when project siteMatchPatterns are missing", () => {
+    expect(formatProjectScopeSummary({ ...baseProject, siteMatchPatterns: undefined })).toBe(
+      "example.com · 基础路径 https://dev.example.com/base/",
+    );
+  });
+
+  it("formats rule set scope summary with both scope and baseUrl", () => {
+    expect(formatRuleSetScopeSummary(baseRuleSet)).toBe(
+      "https://example.com/tables/* · 基础路径 https://dev.example.com/tables/",
+    );
+  });
+
+  it("returns an empty string when the rule set has neither patterns nor baseUrl", () => {
+    expect(formatRuleSetScopeSummary({ ...baseRuleSet, siteMatchPatterns: undefined, baseUrl: undefined })).toBe("");
   });
 });
 

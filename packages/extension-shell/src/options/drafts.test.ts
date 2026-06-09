@@ -15,6 +15,7 @@ const baseProject: Project = {
   enabled: true,
   siteHosts: ["example.com"],
   siteMatchPatterns: ["https://example.com/*"],
+  baseUrl: "https://project.example.com/base/",
   envLabel: "dev",
   note: "demo",
   tags: [],
@@ -28,6 +29,7 @@ const baseRuleSet: RuleSet = {
   name: "默认分组",
   enabled: true,
   ruleIds: [],
+  baseUrl: "https://ruleset.example.com/tables/",
   createdAt: "2025-01-01T00:00:00.000Z",
   updatedAt: "2025-01-01T00:00:00.000Z",
 };
@@ -126,6 +128,7 @@ describe("fromProject", () => {
   it("preserves explicit siteMatchPatterns", () => {
     const draft = fromProject(baseProject);
     expect(draft.siteMatchPatterns).toBe("https://example.com/*");
+    expect(draft.baseUrl).toBe("https://project.example.com/base/");
     expect(draft.envLabel).toBe("dev");
   });
 });

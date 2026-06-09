@@ -26,6 +26,7 @@ export interface Project {
   enabled: boolean;
   siteHosts: string[];
   siteMatchPatterns?: string[];
+  baseUrl?: string;
   envLabel?: string;
   tags: string[];
   note?: string;
@@ -48,6 +49,7 @@ export interface RuleSet {
    * single-group projects working without migration.
    */
   siteMatchPatterns?: string[];
+  baseUrl?: string;
   note?: string;
   createdAt: string;
   updatedAt: string;
@@ -125,6 +127,7 @@ export interface RuleBinding {
 
 export interface RequestContext {
   url: string;
+  pageUrl?: string;
   method: string;
   host: string;
   pathname: string;
@@ -151,6 +154,7 @@ export interface HitRecord {
 
 export interface ForwardRequestPayload {
   url: string;
+  pageUrl?: string;
   method: string;
   headers: Record<string, string>;
   body?: string;
@@ -254,6 +258,7 @@ export interface RuntimeState {
  */
 export interface MatchRequestPayload {
   url: string;
+  pageUrl?: string;
   method: string;
   resourceType?: MatchResourceType;
   tabId?: number;

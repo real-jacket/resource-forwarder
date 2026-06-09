@@ -8,6 +8,7 @@ import type {
   WorkspaceSnapshot,
 } from "@resource-forwarder/shared-types";
 import { globToPathRegexSource } from "./glob.js";
+import { matchesProjectSite, matchesRuleSetSite } from "./workspace.js";
 
 /**
  * Hot-path matcher reused across many requests.
@@ -87,6 +88,7 @@ export function prepareMatcher(workspace: WorkspaceSnapshot): MatcherCache {
     pick(context, kind) {
       const bucket = bucketFor(kind);
       for (const entry of bucket) {
+        if (!matchesSiteScope(entry.binding, getPageUrl(context))) continue;
         if (!entry.matchHost(context.host)) continue;
         if (!entry.matchPath(context.pathname)) continue;
         if (!matchesResourceType(entry.match, context.resourceType)) continue;
@@ -100,6 +102,27 @@ export function prepareMatcher(workspace: WorkspaceSnapshot): MatcherCache {
       return bucketFor(kind).map((entry) => entry.binding);
     },
   };
+}
+
+function matchesSiteScope(binding: RuleBinding, pageUrl: string | undefined): boolean {
+  if (!pageUrl) {
+    return true;
+  }
+  if (binding.project && !matchesProjectSite(binding.project, pageUrl)) {
+    return false;
+  }
+  if (binding.ruleSet) {
+    return matchesRuleSetSite(
+      binding.ruleSet,
+      binding.project ?? { siteHosts: [], siteMatchPatterns: [] },
+      pageUrl,
+    );
+  }
+  return true;
+}
+
+function getPageUrl(context: RequestContext): string | undefined {
+  return (context as RequestContext & { pageUrl?: string }).pageUrl;
 }
 
 function sortRulesInPlace(rules: Rule[]): Rule[] {

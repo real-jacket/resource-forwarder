@@ -122,6 +122,7 @@ export function fromProject(project: Project): ProjectDraft {
     id: project.id,
     name: project.name,
     siteMatchPatterns: joinCsv(project.siteMatchPatterns ?? project.siteHosts.map((h) => `https://${h}/*`)),
+    baseUrl: project.baseUrl ?? "",
     envLabel: project.envLabel ?? "",
     note: project.note ?? "",
     enabled: project.enabled,

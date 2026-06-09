@@ -472,6 +472,7 @@ function buildContext(urlString: string, method: string, resourceType: "fetch" |
   const url = new URL(urlString, location.href);
   return {
     url: url.toString(),
+    pageUrl: state.currentUrl,
     method,
     host: url.host,
     pathname: url.pathname,
@@ -488,6 +489,7 @@ async function createForwardPayload(request: Request, resourceType: "fetch" | "x
   }
   return {
     url: request.url,
+    pageUrl: state.currentUrl,
     method: request.method,
     headers: Object.fromEntries(request.headers.entries()),
     body: bodyBuffer ? bytesToBase64(bodyBuffer) : undefined,
@@ -506,6 +508,7 @@ async function createForwardPayloadFromBody(xhr: XhrState, body: Document | XMLH
   }
   return {
     url: xhr.url,
+    pageUrl: state.currentUrl,
     method: xhr.method,
     headers: xhr.requestHeaders,
     body: buffer ? bytesToBase64(buffer) : undefined,

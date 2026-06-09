@@ -7,6 +7,7 @@ import type {
 } from "@resource-forwarder/shared-types";
 import { buildHostRegexSource, buildRegexFilter, escapeRegex, globToUrlFilter, sanitizePathGlob, stablePositiveHash } from "./glob.js";
 import { getEnabledRuleBindings } from "./matchers.js";
+import { resolveRuleTargetValue } from "./target-resolution.js";
 
 const ASSET_RESOURCE_TYPES: MatchResourceType[] = ["script", "stylesheet", "image", "font"];
 
@@ -19,8 +20,23 @@ const DNR_RESOURCE_TYPES: Record<string, Array<"script" | "stylesheet" | "image"
 
 export function toDynamicNetRequestRules(workspace: WorkspaceSnapshot): DynamicRedirectRule[] {
   return getEnabledRuleBindings(workspace, "asset_redirect")
-    .filter((binding) => Boolean(binding.rule.target.redirectUrl))
-    .map((binding) => toDynamicRule(binding.rule, binding.project?.siteHosts));
+    .map((binding) => {
+      const redirectUrl = resolveRuleTargetValue(binding.rule.target.redirectUrl, binding);
+      if (!redirectUrl) {
+        return undefined;
+      }
+      return toDynamicRule(
+        {
+          ...binding.rule,
+          target: {
+            ...binding.rule.target,
+            redirectUrl,
+          },
+        },
+        binding.project?.siteHosts,
+      );
+    })
+    .filter((rule): rule is DynamicRedirectRule => Boolean(rule));
 }
 
 export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicRedirectRule {

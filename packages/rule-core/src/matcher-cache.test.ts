@@ -25,7 +25,18 @@ function workspace(rules: Rule[]): WorkspaceSnapshot {
   return {
     version: 1,
     updatedAt: ts,
-    projects: [{ id: "p", name: "App", enabled: true, siteHosts: ["app.example.com"], tags: [], createdAt: ts, updatedAt: ts }],
+    projects: [
+      {
+        id: "p",
+        name: "App",
+        enabled: true,
+        siteHosts: ["app.example.com"],
+        siteMatchPatterns: ["https://app.example.com/*"],
+        tags: [],
+        createdAt: ts,
+        updatedAt: ts,
+      },
+    ],
     ruleSets: [
       { id: "rs", projectId: "p", name: "Default", enabled: true, ruleIds: rules.map((r) => r.id), createdAt: ts, updatedAt: ts },
     ],
@@ -110,6 +121,51 @@ describe("prepareMatcher", () => {
     ).toBe("r");
     expect(
       matcher.pick({ url: "https://app.example.com/x", method: "GET", host: "app.example.com", pathname: "/x", resourceType: "fetch", tabId: 7 }, "api_forward"),
+    ).toBeUndefined();
+  });
+
+  it("drops bindings when the current page misses the rule set scope", () => {
+    const matcher = prepareMatcher({
+      ...workspace([rule({ id: "scoped" })]),
+      ruleSets: [
+        {
+          id: "rs",
+          projectId: "p",
+          name: "Tables",
+          enabled: true,
+          ruleIds: ["scoped"],
+          siteMatchPatterns: ["https://app.example.com/tables/*"],
+          createdAt: ts,
+          updatedAt: ts,
+        },
+      ],
+    });
+
+    expect(
+      matcher.pick(
+        {
+          url: "https://app.example.com/api/x",
+          pageUrl: "https://app.example.com/tables/abc",
+          method: "GET",
+          host: "app.example.com",
+          pathname: "/api/x",
+          resourceType: "fetch",
+        },
+        "api_forward",
+      )?.rule.id,
+    ).toBe("scoped");
+    expect(
+      matcher.pick(
+        {
+          url: "https://app.example.com/api/x",
+          pageUrl: "https://app.example.com/sheets/abc",
+          method: "GET",
+          host: "app.example.com",
+          pathname: "/api/x",
+          resourceType: "fetch",
+        },
+        "api_forward",
+      ),
     ).toBeUndefined();
   });
 

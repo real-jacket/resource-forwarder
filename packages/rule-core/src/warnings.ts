@@ -10,7 +10,9 @@ export function collectUnsupportedRuleWarnings(rule: Rule): string[] {
 
   if (rule.kind === "asset_redirect") {
     const redirectUrl = rule.target.redirectUrl ?? "";
+    const isRelativeTarget = redirectUrl.length > 0 && !redirectUrl.includes("://");
     const isValidTarget =
+      isRelativeTarget ||
       redirectUrl.startsWith("https://") ||
       redirectUrl.startsWith("http://localhost") ||
       redirectUrl.startsWith("http://127.0.0.1");

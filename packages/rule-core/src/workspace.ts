@@ -212,8 +212,20 @@ export function trimWorkspaceForUrl(
       .filter((project) => matchesProjectSite(project, urlString))
       .map((project) => project.id),
   );
+  const allowedProjects = new Map(
+    workspace.projects
+      .filter((project) => allowedProjectIds.has(project.id))
+      .map((project) => [project.id, project] as const),
+  );
   const allowedRuleSets = workspace.ruleSets.filter(
-    (ruleSet) => ruleSet.enabled && allowedProjectIds.has(ruleSet.projectId),
+    (ruleSet) =>
+      ruleSet.enabled &&
+      allowedProjectIds.has(ruleSet.projectId) &&
+      matchesRuleSetSite(
+        ruleSet,
+        allowedProjects.get(ruleSet.projectId) ?? { siteHosts: [], siteMatchPatterns: [] },
+        urlString,
+      ),
   );
   const allowedRuleIds = new Set(allowedRuleSets.flatMap((ruleSet) => ruleSet.ruleIds));
 

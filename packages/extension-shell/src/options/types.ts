@@ -24,6 +24,7 @@ export interface ProjectDraft {
   id: string;
   name: string;
   siteMatchPatterns: string;
+  baseUrl: string;
   envLabel: string;
   note: string;
   enabled: boolean;
@@ -41,6 +42,7 @@ export interface RuleSetDraft {
   enabled: boolean;
   /** CSV form for the optional group-scope patterns input. Empty = follow project. */
   siteMatchPatterns: string;
+  baseUrl: string;
   note: string;
 }
 

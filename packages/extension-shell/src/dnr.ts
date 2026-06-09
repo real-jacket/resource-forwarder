@@ -1,4 +1,4 @@
-import { getEnabledRuleBindings, matchesProjectSite, toDynamicRule } from "@resource-forwarder/rule-core";
+import { getEnabledRuleBindings, matchesProjectSite, resolveRuleTargetValue, toDynamicRule } from "@resource-forwarder/rule-core";
 import type { DynamicRedirectRule, Project, WorkspaceSnapshot } from "@resource-forwarder/shared-types";
 
 export interface TabUrlSnapshot {
@@ -67,7 +67,21 @@ export function buildScopedDnrRuleGroups(
       continue;
     }
 
-    const rule = toDynamicRule(binding.rule, binding.project?.siteHosts);
+    const redirectUrl = resolveRuleTargetValue(binding.rule.target.redirectUrl, binding);
+    if (!redirectUrl) {
+      continue;
+    }
+
+    const rule = toDynamicRule(
+      {
+        ...binding.rule,
+        target: {
+          ...binding.rule.target,
+          redirectUrl,
+        },
+      },
+      binding.project?.siteHosts,
+    );
     if (
       isGlobalProjectScope(binding.project) ||
       isHostWideProjectScope(binding.project) ||
