@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   collectRuleConflicts,
   collectUnsupportedRuleWarnings,
+  detectFormat,
   deriveSiteHosts,
   matchesProjectSite,
   parseResourceOverrideExport,
@@ -17,6 +18,7 @@ import type {
 } from "@resource-forwarder/shared-types";
 import { createId, joinCsv, splitCsv } from "../shared/helpers.js";
 import { createProjectCopyBundle } from "./project-copy.js";
+import { detectImportSource } from "./import-source.js";
 import type {
   DashboardState,
   ExportWorkspaceRuntimeResponse,
@@ -926,13 +928,21 @@ function App() {
       setStatus("请先粘贴要导入的 JSON 或 YAML。");
       return;
     }
+
+    const detectedSource = detectImportSource(importText);
+    if (detectedSource === "resource-override") {
+      setImportSource("resource-override");
+      setStatus("已识别为 Resource Override 配置，请先点击“预览导入”。");
+      return;
+    }
+
     setBusy(true);
     try {
       const state = await runtimeRequest<UpsertMutationResponse>({
         type: "import-workspace",
         payload: {
           content: importText,
-          format: importText.trim().startsWith("{") ? "json" : "yaml",
+          format: detectFormat(importText),
           merge,
         },
       });
@@ -1010,6 +1020,13 @@ function App() {
       return;
     }
 
+    const detectedSource = detectImportSource(importText);
+    if (detectedSource === "workspace") {
+      setImportSource("workspace");
+      setStatus("已识别为本工具导出的 Workspace 快照，请直接选择“合并导入”或“整体替换”。");
+      return;
+    }
+
     setBusy(true);
     try {
       const preview = parseResourceOverrideExport(importText);
@@ -1074,6 +1091,28 @@ function App() {
     anchor.click();
     URL.revokeObjectURL(url);
     setStatus(`已下载导出文件。`);
+  }
+
+  function applyImportText(value: string): void {
+    setImportText(value);
+    const detectedSource = detectImportSource(value);
+    if (detectedSource) setImportSource(detectedSource);
+  }
+
+  async function loadImportFile(file: File): Promise<void> {
+    const text = await file.text();
+    applyImportText(text);
+
+    const detectedSource = detectImportSource(text);
+    if (detectedSource === "workspace") {
+      setStatus(`已载入 ${file.name}，识别为本工具导出的 Workspace 快照。`);
+      return;
+    }
+    if (detectedSource === "resource-override") {
+      setStatus(`已载入 ${file.name}，识别为 Resource Override 配置。`);
+      return;
+    }
+    setStatus(`已载入 ${file.name}，但暂未识别文件类型，请检查内容是否为导出的 JSON/YAML。`);
   }
 
   // ── RENDER ──────────────────────────────────────────────────────────────
@@ -1233,7 +1272,7 @@ function App() {
               status={status}
               import={{
                 text: importText,
-                setText: setImportText,
+                setText: applyImportText,
                 source: importSource,
                 setSource: setImportSource,
                 feedback: importFeedback,
@@ -1241,6 +1280,7 @@ function App() {
                 setResourceOverridePreview,
                 previewResourceOverride: previewResourceOverrideImport,
                 workspace: importWorkspace,
+                loadFile: loadImportFile,
               }}
               export={{
                 scope: exportScope,

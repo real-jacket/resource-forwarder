@@ -30,6 +30,8 @@ export interface ImportExportViewProps {
     previewResourceOverride: () => void | Promise<void>;
     /** Workspace import; merge=true keeps existing rules. */
     workspace: (merge: boolean) => void | Promise<void>;
+    /** Reads a local export file into the import textarea. */
+    loadFile: (file: File) => void | Promise<void>;
   };
 
   export: {
@@ -83,8 +85,11 @@ function ImportCard({
   setResourceOverridePreview,
   previewResourceOverride,
   workspace,
+  loadFile,
   busy,
 }: ImportExportViewProps["import"] & { busy: boolean }) {
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
   // Selecting a different source or editing the textarea invalidates any
   // in-flight preview; we collapse it eagerly so the UI doesn't show stale
   // results next to fresh input.
@@ -93,12 +98,21 @@ function ImportCard({
     setFeedback(null);
   }
 
+  async function handleImportFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    clearPendingPreview();
+    await loadFile(file);
+    event.target.value = "";
+  }
+
   return (
     <div className="io-card">
       <div className="io-card-header">
         <div className="io-card-title">导入规则</div>
         <div className="io-card-desc">
-          支持从 Resource Override 导入，或粘贴本工具的 JSON / YAML 快照
+          支持直接选择本工具导出的 JSON / YAML 文件，也支持 Resource Override 配置
         </div>
       </div>
       <div className="io-card-body">
@@ -119,9 +133,28 @@ function ImportCard({
               clearPendingPreview();
             }}
           >
-            Workspace 快照
+            Workspace 快照（本工具导出）
           </button>
         </div>
+
+        <button
+          type="button"
+          className="drop-zone"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={busy}
+        >
+          <div className="drop-zone-text">
+            选择本地导出文件，或继续直接粘贴内容
+          </div>
+          <div className="drop-zone-link">支持 `.json` / `.yaml` / `.yml`</div>
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".json,.yaml,.yml,application/json,text/yaml,text/x-yaml,text/plain"
+          style={{ display: "none" }}
+          onChange={(e) => void handleImportFileChange(e)}
+        />
 
         <textarea
           className="io-import-textarea"
