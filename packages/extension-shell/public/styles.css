@@ -481,48 +481,135 @@ summary {
   color: var(--primary);
 }
 
-/* Toolbar */
-.page-toolbar {
+/* Rules toolbar redesign */
+.rules-context-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 24px;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px 12px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  flex-wrap: wrap;
 }
 
-.toolbar-filters {
+.rules-context-main {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 14px;
+  flex-wrap: wrap;
+  min-width: 0;
+  flex: 1;
 }
 
-.toolbar-group-actions {
+.rules-context-section {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  margin-left: -4px;
-}
-.toolbar-group-actions .btn-sm {
-  padding: 3px 5px;
-  min-height: auto;
-  line-height: 1;
-}
-.toolbar-group-actions .is-off {
-  color: var(--danger);
+  gap: 8px;
+  min-width: 0;
 }
 
-.toolbar-divider {
-  width: 1px;
-  height: 18px;
-  background: var(--border-strong);
+.rules-context-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.rules-context-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rules-context-actions .btn,
+.toolbar-primary-actions .btn,
+.rules-filter-actions .btn,
+.toolbar-overflow-menu > .btn {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 12px;
+}
+
+.rules-group-select .cs-trigger {
+  min-width: 200px;
+}
+
+.toolbar-toggle-state {
+  font-weight: 500;
+}
+
+.toolbar-toggle-state.is-primary {
+  color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 22%, var(--border-strong));
+  background: var(--primary-soft);
+}
+
+.toolbar-toggle-state.is-primary:hover {
+  color: var(--primary-active);
+  border-color: color-mix(in srgb, var(--primary) 40%, var(--border-strong));
+  background: color-mix(in srgb, var(--primary-soft) 82%, #fff);
+}
+
+.toolbar-toggle-state.is-neutral {
+  color: var(--muted);
+  border-color: var(--border-strong);
+  background: var(--surface-soft);
+}
+
+.toolbar-toggle-state.is-neutral:hover {
+  color: var(--ink-secondary);
+  border-color: color-mix(in srgb, var(--border-strong) 80%, var(--line-strong));
+  background: #f3f4f6;
+}
+
+.toolbar-primary-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   flex-shrink: 0;
-  margin: 0 2px;
+}
+
+.rules-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 24px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.rules-filter-tabs.status-tabs {
+  padding: 0;
+  background: transparent;
+  border-bottom: none;
+}
+
+.rules-filter-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.rules-filter-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .toolbar-search-wrap {
   position: relative;
+  min-width: 0;
+  flex: 1;
 }
 
 .toolbar-search-icon {
@@ -537,7 +624,8 @@ summary {
 }
 
 .toolbar-search-input {
-  width: 240px;
+  width: 100%;
+  min-width: 320px;
   height: 30px;
   min-height: 30px;
   padding: 0 10px 0 30px;
@@ -554,11 +642,61 @@ summary {
   box-shadow: 0 0 0 2px var(--primary-soft);
 }
 
-.toolbar-actions {
-  margin-left: auto;
+.toolbar-overflow-menu {
+  position: relative;
+}
+
+.toolbar-overflow-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 136px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  z-index: 40;
+}
+
+.toolbar-overflow-item {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+}
+
+.toolbar-overflow-item svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.toolbar-overflow-item:hover {
+  background: var(--surface-soft);
+}
+
+.toolbar-overflow-item.danger {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger-soft) 72%, #fff);
+  border: 1px solid color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.toolbar-overflow-item.danger:hover {
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 22%, transparent);
 }
 
 /* ===================== BUTTONS (NEW) ===================== */
@@ -893,89 +1031,73 @@ summary {
 
 /* ===================== RULE TABLE ===================== */
 
-.site-scope-banner {
+.rules-context-hint {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 24px;
-  background: var(--primary-soft);
-  border-bottom: 1px solid color-mix(in srgb, var(--primary) 12%, transparent);
+  padding: 6px 24px 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
   font-size: 12px;
   line-height: 1.4;
 }
 
-.site-scope-banner.is-disabled {
+.rules-context-hint.is-disabled {
   background: var(--surface-soft);
-  border-bottom-color: var(--border);
 }
 
-.site-scope-label {
+.rules-context-hint-label {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  color: var(--primary);
+  gap: 5px;
+  color: var(--muted);
   white-space: nowrap;
   font-weight: 500;
-  font-size: 11px;
-  letter-spacing: 0.02em;
 }
 
-.site-scope-banner.is-disabled .site-scope-label {
-  color: var(--muted);
-}
-
-.site-scope-label svg {
+.rules-context-hint-label svg {
   width: 13px;
   height: 13px;
   flex-shrink: 0;
-  opacity: 0.7;
+  opacity: 0.72;
 }
 
-.site-scope-patterns {
+.rules-context-hint-content {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  flex: 1;
-  min-width: 0;
   align-items: center;
+  min-width: 0;
+  flex: 1;
 }
 
-.site-scope-pattern {
+.rules-context-hint-pattern {
   display: inline-flex;
   align-items: center;
-  padding: 1px 7px;
-  background: rgba(255, 255, 255, 0.7);
-  border: 1px solid color-mix(in srgb, var(--primary) 15%, transparent);
-  border-radius: 10px;
+  padding: 2px 8px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 999px;
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--primary-active);
+  color: var(--ink-secondary);
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  line-height: 18px;
 }
 
-.site-scope-banner.is-disabled .site-scope-pattern {
-  background: var(--bg);
-  border-color: var(--border);
-  color: var(--muted);
-}
-
-.site-scope-empty {
+.rules-context-hint-empty {
   color: var(--muted);
   font-style: italic;
   font-size: 11px;
 }
 
-.site-scope-status {
+.rules-context-hint-status {
   display: inline-flex;
   align-items: center;
   padding: 1px 7px;
-  background: var(--danger-soft);
-  color: var(--danger-text);
-  border: 1px solid color-mix(in srgb, var(--danger) 15%, transparent);
+  background: var(--warning-soft);
+  color: var(--warning-text);
+  border: 1px solid color-mix(in srgb, var(--warning) 15%, transparent);
   border-radius: 10px;
   font-size: 10px;
   font-weight: 500;
@@ -3557,6 +3679,31 @@ details[open] .import-preview-warnings-summary::before {
   flex-wrap: wrap;
 }
 
+.sp-collapse-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.sp-collapse-btn:hover {
+  background: var(--surface-soft);
+  color: var(--ink-secondary);
+}
+
+.sp-collapse-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
 .sp-site-name {
   font-size: 13px;
   font-weight: 500;
@@ -3748,8 +3895,9 @@ details[open] .import-preview-warnings-summary::before {
 
 /* -- Small button variant -- */
 .btn-sm {
-  height: 26px;
-  padding: 0 10px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 12px;
   font-size: 12px;
 }
 

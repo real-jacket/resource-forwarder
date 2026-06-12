@@ -829,8 +829,8 @@ function App() {
   async function deleteProject(project: Project): Promise<void> {
     const ruleCount = ruleCountByProjectId.get(project.id) ?? 0;
     const confirmed = await confirm({
-      title: "删除分组",
-      message: `确认删除分组「${project.name}」？\n将同时删除其下 ${ruleCount} 条规则，此操作不可撤销。`,
+      title: "删除站点",
+      message: `确认删除站点「${project.name}」？\n将同时删除其下 ${ruleCount} 条规则，此操作不可撤销。`,
       confirmText: "删除",
       danger: true,
     });
@@ -844,9 +844,9 @@ function App() {
       });
       hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
       if (selectedProjectId === project.id) setSelectedProjectId("");
-      setStatus(`分组「${project.name}」已删除。`);
+      setStatus(`站点「${project.name}」已删除。`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "删除分组失败。");
+      setStatus(error instanceof Error ? error.message : "删除站点失败。");
     } finally {
       setBusy(false);
     }

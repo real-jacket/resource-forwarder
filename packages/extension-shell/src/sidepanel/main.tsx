@@ -5,11 +5,14 @@ import type { Project, Rule, RuleSet } from "@resource-forwarder/shared-types";
 import { joinCsv } from "../shared/helpers.js";
 import type { GetDashboardStateResponse, UpsertMutationResponse } from "../shared/messages.js";
 import { runtimeRequest } from "../shared/messages.js";
+import { isRuleEffectivelyDisabled, toggleCollapsedRuleSetIds } from "../options/rule-groups.js";
 
 function App() {
   const [dashboard, setDashboard] = useState<GetDashboardStateResponse | null>(null);
   const [status, setStatus] = useState("正在加载当前页面...");
   const [busy, setBusy] = useState(false);
+  const [collapsedSiteIds, setCollapsedSiteIds] = useState<Set<string>>(new Set());
+  const [collapsedRuleGroupIds, setCollapsedRuleGroupIds] = useState<Set<string>>(new Set());
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -304,6 +307,19 @@ function App() {
                 <div className={`sp-site-item${!project.enabled ? " is-off" : ""}`} key={project.id}>
                   <div className="sp-site-info">
                     <div className="sp-site-name-row">
+                      <button
+                        className="sp-collapse-btn"
+                        type="button"
+                        title={collapsedSiteIds.has(project.id) ? "展开站点分组" : "收起站点分组"}
+                        onClick={() =>
+                          setCollapsedSiteIds((current) => toggleCollapsedRuleSetIds(current, project.id))
+                        }
+                        aria-label={collapsedSiteIds.has(project.id) ? "展开站点分组" : "收起站点分组"}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                          {collapsedSiteIds.has(project.id) ? <polyline points="9 18 15 12 9 6" /> : <polyline points="6 9 12 15 18 9" />}
+                        </svg>
+                      </button>
                       <span className="sp-site-name">{project.name}</span>
                       <span className={`site-list-badge ${project.enabled ? "active" : "disabled"}`}>
                         {project.enabled ? "启用" : "停用"}
@@ -323,7 +339,7 @@ function App() {
                       {project.enabled ? "停用" : "启用"}
                     </button>
                   </div>
-                  {ruleSets.length > 0 && (
+                  {ruleSets.length > 0 && !collapsedSiteIds.has(project.id) && (
                     <div className="sp-rule-set-list">
                       {ruleSets.map((ruleSet) => {
                         const counts = ruleSetRuleCount(ruleSet);
@@ -382,6 +398,19 @@ function App() {
                   key={ruleSet.id}
                 >
                   <div className="sp-rule-group-header">
+                    <button
+                      className="sp-collapse-btn"
+                      type="button"
+                      title={collapsedRuleGroupIds.has(ruleSet.id) ? "展开分组规则" : "收起分组规则"}
+                      onClick={() =>
+                        setCollapsedRuleGroupIds((current) => toggleCollapsedRuleSetIds(current, ruleSet.id))
+                      }
+                      aria-label={collapsedRuleGroupIds.has(ruleSet.id) ? "展开分组规则" : "收起分组规则"}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        {collapsedRuleGroupIds.has(ruleSet.id) ? <polyline points="9 18 15 12 9 6" /> : <polyline points="6 9 12 15 18 9" />}
+                      </svg>
+                    </button>
                     <span className="sp-rule-group-name">{ruleSet.name}</span>
                     <span className="sp-rule-group-meta">
                       {enabledCount} / {rules.length} 条
@@ -395,9 +424,9 @@ function App() {
                       {project.name}
                     </span>
                   </div>
-                  <div className="sp-rule-list">
+                  {!collapsedRuleGroupIds.has(ruleSet.id) && <div className="sp-rule-list">
                     {rules.map((rule) => {
-                      const visuallyOff = !rule.enabled || parentDisabled;
+                      const visuallyOff = isRuleEffectivelyDisabled(rule.enabled, ruleSet.enabled, project.enabled);
                       return (
                         <div
                           className={`sp-rule-item${visuallyOff ? " is-off" : ""}`}
@@ -425,7 +454,7 @@ function App() {
                         </div>
                       );
                     })}
-                  </div>
+                  </div>}
                 </div>
               );
             })}

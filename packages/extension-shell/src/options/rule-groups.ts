@@ -46,3 +46,11 @@ export function toggleCollapsedRuleSetIds(current: Set<string>, ruleSetId: strin
   }
   return next;
 }
+
+export function isRuleEffectivelyDisabled(
+  ruleEnabled: boolean,
+  ruleSetEnabled: boolean,
+  projectEnabled: boolean,
+): boolean {
+  return !ruleEnabled || !ruleSetEnabled || !projectEnabled;
+}

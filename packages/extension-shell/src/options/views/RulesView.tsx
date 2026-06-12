@@ -4,7 +4,8 @@ import type { DashboardState } from "../../shared/messages.js";
 import type { AppView, RuleStatusTab } from "../types.js";
 import { CustomSelect } from "../components/CustomSelect.js";
 import { formatProjectScopeSummary, formatRuleSetScopeSummary, formatRuleTarget, formatTimestamp } from "../formatters.js";
-import { buildRuleGroups, toggleCollapsedRuleSetIds } from "../rule-groups.js";
+import { buildRuleGroups, isRuleEffectivelyDisabled, toggleCollapsedRuleSetIds } from "../rule-groups.js";
+import { buildSiteActionMenuItems, getSiteTogglePresentation, getToolbarLayoutFlags } from "../rules-toolbar.js";
 
 export interface RuleRow {
   rule: Rule;
@@ -78,6 +79,10 @@ export interface RulesViewProps {
  */
 export function RulesView(props: RulesViewProps) {
   const hasRules = props.allRuleRows.length > 0;
+  const layoutFlags = getToolbarLayoutFlags({
+    hasSelectedProject: Boolean(props.selectedProject),
+    hasSelectedRuleSet: Boolean(props.selectedRuleSet),
+  });
 
   return (
     <>
@@ -86,9 +91,9 @@ export function RulesView(props: RulesViewProps) {
         <div className="page-subtitle">管理和查看所有本地代理规则</div>
       </div>
 
-      <StatusTabs {...props} />
-      <Toolbar {...props} />
-      <SiteScopeBanner project={props.selectedProject} />
+      <ContextBar {...props} layoutFlags={layoutFlags} />
+      <ContextHint project={props.selectedProject} />
+      <FilterBar {...props} layoutFlags={layoutFlags} />
 
       <div className="rule-table-container">
         {!hasRules ? (
@@ -134,104 +139,75 @@ export function RulesView(props: RulesViewProps) {
 
 // ── Subcomponents ────────────────────────────────────────────────────
 
-function StatusTabs(props: RulesViewProps) {
-  return (
-    <div className="status-tabs">
-      <div className="status-tabs-left">
-        <button
-          className={`status-tab ${props.ruleStatusTab === "all" ? "active" : ""}`}
-          onClick={() => props.setRuleStatusTab("all")}
-        >
-          全部
-          <span className="status-tab-count">{props.totalCount}</span>
-        </button>
-        <button
-          className={`status-tab ${props.ruleStatusTab === "enabled" ? "active" : ""}`}
-          onClick={() => props.setRuleStatusTab("enabled")}
-        >
-          启用中
-          <span className="status-tab-count">{props.tabEnabledCount}</span>
-        </button>
-        <button
-          className={`status-tab ${props.ruleStatusTab === "disabled" ? "active" : ""}`}
-          onClick={() => props.setRuleStatusTab("disabled")}
-        >
-          已禁用
-          <span className="status-tab-count">{props.tabDisabledCount}</span>
-        </button>
-      </div>
-      <button className="btn btn-default btn-sm" onClick={() => props.actions.openProjectModal()}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 13, height: 13 }} aria-hidden="true">
-          <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-          <line x1="12" y1="11" x2="12" y2="17" />
-          <line x1="9" y1="14" x2="15" y2="14" />
-        </svg>
-        新建站点
-      </button>
-    </div>
-  );
-}
-
-function Toolbar(props: RulesViewProps) {
+function ContextBar(props: RulesViewProps & { layoutFlags: ReturnType<typeof getToolbarLayoutFlags> }) {
   const { selectedProject, projects, busy, actions, projectRuleSets } = props;
+  const siteActionMenuItems = selectedProject ? buildSiteActionMenuItems(selectedProject.enabled) : [];
+  const siteToggle = selectedProject ? getSiteTogglePresentation(selectedProject.enabled) : null;
   return (
-    <div className="page-toolbar">
-      <div className="toolbar-filters">
-        <CustomSelect
-          className="cs-wide"
-          value={props.selectedProjectId}
-          options={[
-            { value: "", label: "全部站点" },
-            ...projects.map((p) => ({
-              value: p.id,
-              label: `${p.name}${p.enabled ? "" : "（已停用）"}`,
-            })),
-          ]}
-          onChange={props.setSelectedProjectId}
-          searchable
-          searchPlaceholder="搜索站点..."
-        />
-        {selectedProject && (
-          <div className="toolbar-group-actions">
+    <div className="rules-context-bar">
+      <div className="rules-context-main">
+        <div className="rules-context-section">
+          <span className="rules-context-label">站点</span>
+          <CustomSelect
+            className="cs-wide"
+            value={props.selectedProjectId}
+            options={[
+              { value: "", label: "全部站点" },
+              ...projects.map((p) => ({
+                value: p.id,
+                label: `${p.name}${p.enabled ? "" : "（已停用）"}`,
+              })),
+            ]}
+            onChange={props.setSelectedProjectId}
+            searchable
+            searchPlaceholder="搜索站点..."
+          />
+        </div>
+        {props.layoutFlags.showSiteActions && selectedProject && (
+          <div className="rules-context-actions">
             <button
-              className="btn btn-ghost btn-sm"
+              className="btn btn-default btn-sm"
               title="编辑站点"
               onClick={() => actions.openProjectModal(selectedProject)}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" aria-hidden="true">
                 <path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5z" />
               </svg>
+              编辑站点
             </button>
             <button
-              className={`btn btn-ghost btn-sm ${!selectedProject.enabled ? "is-off" : ""}`}
-              title={selectedProject.enabled ? "停用站点" : "启用站点"}
+              className={`btn btn-default btn-sm toolbar-toggle-state ${siteToggle?.tone === "primary" ? "is-primary" : "is-neutral"}`}
+              title={siteToggle?.title}
               onClick={() => void actions.toggleProject(selectedProject)}
               disabled={busy}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" aria-hidden="true">
-                <circle cx="12" cy="12" r="10" />
-                <line x1="15" y1="9" x2="9" y2="15" />
-                {!selectedProject.enabled && <line x1="9" y1="9" x2="15" y2="15" />}
+                {selectedProject.enabled ? (
+                  <>
+                    <path d="M18.36 6.64A9 9 0 1 1 5.64 6.64" />
+                    <line x1="12" y1="2" x2="12" y2="12" />
+                  </>
+                ) : (
+                  <>
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M9 12l2 2 4-4" />
+                  </>
+                )}
               </svg>
+              {siteToggle?.label}
             </button>
-            <button
-              className="btn btn-ghost btn-sm btn-danger"
-              title="删除站点"
-              onClick={() => void actions.deleteProject(selectedProject)}
-              disabled={busy}
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" aria-hidden="true">
-                <polyline points="3 6 5 6 21 6" />
-                <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-              </svg>
-            </button>
+            <SiteOverflowMenu
+              items={siteActionMenuItems}
+              onDelete={() => void actions.deleteProject(selectedProject)}
+            />
           </div>
         )}
 
-        {selectedProject && (
-          <>
-            <div className="toolbar-divider" />
+        {props.layoutFlags.showGroupActions && selectedProject && (
+          <div className="rules-context-section">
+            <span className="rules-context-label">分组</span>
             <CustomSelect
+              className="rules-group-select"
               value={props.selectedRuleSetId || (props.selectedRuleSet?.id ?? "")}
               options={[
                 ...projectRuleSets.map((rs) => ({
@@ -242,7 +218,7 @@ function Toolbar(props: RulesViewProps) {
               onChange={props.setSelectedRuleSetId}
             />
             <button
-              className="btn btn-ghost btn-sm"
+              className="btn btn-default btn-sm"
               title="新建分组"
               onClick={() => actions.openRuleSetModal()}
               disabled={busy}
@@ -251,10 +227,67 @@ function Toolbar(props: RulesViewProps) {
                 <line x1="12" y1="5" x2="12" y2="19" />
                 <line x1="5" y1="12" x2="19" y2="12" />
               </svg>
+              新建分组
             </button>
-          </>
+          </div>
         )}
+      </div>
 
+      <div className="toolbar-primary-actions">
+        <button className="btn btn-default btn-sm" onClick={() => props.actions.openProjectModal()}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 13, height: 13 }} aria-hidden="true">
+            <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+            <line x1="12" y1="11" x2="12" y2="17" />
+            <line x1="9" y1="14" x2="15" y2="14" />
+          </svg>
+          新建站点
+        </button>
+        <button
+          className="btn btn-primary"
+          onClick={() => actions.openBatchRulePanel("api_forward")}
+          disabled={!props.layoutFlags.canCreateRule}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          新建规则
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FilterBar(props: RulesViewProps & { layoutFlags: ReturnType<typeof getToolbarLayoutFlags> }) {
+  return (
+    <div className="rules-filter-bar">
+      <div className="status-tabs rules-filter-tabs">
+        <div className="status-tabs-left">
+          <button
+            className={`status-tab ${props.ruleStatusTab === "all" ? "active" : ""}`}
+            onClick={() => props.setRuleStatusTab("all")}
+          >
+            全部
+            <span className="status-tab-count">{props.totalCount}</span>
+          </button>
+          <button
+            className={`status-tab ${props.ruleStatusTab === "enabled" ? "active" : ""}`}
+            onClick={() => props.setRuleStatusTab("enabled")}
+          >
+            启用中
+            <span className="status-tab-count">{props.tabEnabledCount}</span>
+          </button>
+          <button
+            className={`status-tab ${props.ruleStatusTab === "disabled" ? "active" : ""}`}
+            onClick={() => props.setRuleStatusTab("disabled")}
+          >
+            已禁用
+            <span className="status-tab-count">{props.tabDisabledCount}</span>
+          </button>
+        </div>
+      </div>
+
+      <div className="rules-filter-controls">
         <CustomSelect
           value={props.ruleKindFilter}
           options={[
@@ -264,9 +297,6 @@ function Toolbar(props: RulesViewProps) {
           ]}
           onChange={(v) => props.setRuleKindFilter(v as "all" | Rule["kind"])}
         />
-
-        <div className="toolbar-divider" />
-
         <div className="toolbar-search-wrap">
           <svg className="toolbar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
             <circle cx="11" cy="11" r="8" />
@@ -281,8 +311,8 @@ function Toolbar(props: RulesViewProps) {
         </div>
       </div>
 
-      <div className="toolbar-actions">
-        <button className="btn btn-default" onClick={() => void actions.refresh()} disabled={busy}>
+      <div className="rules-filter-actions">
+        <button className="btn btn-default btn-sm" onClick={() => void props.actions.refresh()} disabled={props.busy}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
             <polyline points="23 4 23 10 17 10" />
             <polyline points="1 20 1 14 7 14" />
@@ -290,40 +320,91 @@ function Toolbar(props: RulesViewProps) {
           </svg>
           刷新
         </button>
-        <button
-          className="btn btn-primary"
-          onClick={() => actions.openBatchRulePanel("api_forward")}
-          disabled={!selectedProject || !props.selectedRuleSet}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-          新建规则
-        </button>
       </div>
     </div>
   );
 }
 
-function SiteScopeBanner({ project }: { project: Project | undefined }) {
+function ContextHint({ project }: { project: Project | undefined }) {
   if (!project) return null;
   const summary = formatProjectScopeSummary(project);
   return (
-    <div className={`site-scope-banner${project.enabled ? "" : " is-disabled"}`}>
-      <div className="site-scope-label">
+    <div className={`rules-context-hint${project.enabled ? "" : " is-disabled"}`}>
+      <div className="rules-context-hint-label">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="10" />
           <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10A15.3 15.3 0 0 1 12 2z" />
         </svg>
         站点匹配
       </div>
-      <div className="site-scope-patterns">
-        <span className={project.siteMatchPatterns?.length ? "site-scope-pattern" : "site-scope-empty"}>
+      <div className="rules-context-hint-content">
+        <span className={project.siteMatchPatterns?.length ? "rules-context-hint-pattern" : "rules-context-hint-empty"}>
           {summary}
         </span>
       </div>
-      {!project.enabled && <span className="site-scope-status">已停用</span>}
+      {!project.enabled && <span className="rules-context-hint-status">已停用</span>}
+    </div>
+  );
+}
+
+function SiteOverflowMenu({
+  items,
+  onDelete,
+}: {
+  items: ReturnType<typeof buildSiteActionMenuItems>;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const wrapRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [open]);
+
+  if (items.length === 0) return null;
+
+  return (
+    <div className="toolbar-overflow-menu" ref={wrapRef}>
+      <button
+        type="button"
+        className="btn btn-default btn-sm"
+        onClick={() => setOpen((value) => !value)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        更多
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && <div className="toolbar-overflow-panel" role="menu">
+        {items.map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            className={`toolbar-overflow-item${item.danger ? " danger" : ""}`}
+            onClick={(event) => {
+              onDelete();
+              setOpen(false);
+            }}
+          >
+            {item.danger && (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+              </svg>
+            )}
+            {item.label}
+          </button>
+        ))}
+      </div>}
     </div>
   );
 }
@@ -601,15 +682,16 @@ function RuleTableRow({
   busy: boolean;
   actions: RulesViewProps["actions"];
 }) {
+  const visuallyOff = isRuleEffectivelyDisabled(rule.enabled, ruleSet?.enabled ?? true, project?.enabled ?? true);
   return (
-    <tr className={rule.enabled ? "" : "is-disabled"}>
+    <tr className={visuallyOff ? "is-disabled" : ""}>
       <td>
         <label className="toggle-switch">
           <input
             type="checkbox"
             checked={rule.enabled}
             onChange={() => void actions.toggleRule(rule)}
-            disabled={busy}
+            disabled={busy || !(ruleSet?.enabled ?? true) || !(project?.enabled ?? true)}
           />
           <span className="toggle-track" />
         </label>

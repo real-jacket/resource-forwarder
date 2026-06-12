@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RuleSet } from "@resource-forwarder/shared-types";
-import { buildRuleGroups, toggleCollapsedRuleSetIds } from "./rule-groups.js";
+import { buildRuleGroups, isRuleEffectivelyDisabled, toggleCollapsedRuleSetIds } from "./rule-groups.js";
 
 const ruleSetA: RuleSet = {
   id: "ruleset-a",
@@ -52,5 +52,14 @@ describe("toggleCollapsedRuleSetIds", () => {
     expect(Array.from(original)).toEqual(["ruleset-a"]);
     expect(Array.from(expanded).sort()).toEqual(["ruleset-a", "ruleset-b"]);
     expect(Array.from(collapsed)).toEqual(["ruleset-a"]);
+  });
+});
+
+describe("isRuleEffectivelyDisabled", () => {
+  it("treats a rule as disabled when itself or any parent scope is off", () => {
+    expect(isRuleEffectivelyDisabled(true, true, true)).toBe(false);
+    expect(isRuleEffectivelyDisabled(false, true, true)).toBe(true);
+    expect(isRuleEffectivelyDisabled(true, false, true)).toBe(true);
+    expect(isRuleEffectivelyDisabled(true, true, false)).toBe(true);
   });
 });
