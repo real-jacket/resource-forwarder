@@ -17,7 +17,11 @@ import type {
   WorkspaceSnapshot,
 } from "@resource-forwarder/shared-types";
 import { createId, joinCsv, splitCsv } from "../shared/helpers.js";
-import { createProjectCopyBundle } from "./project-copy.js";
+import {
+  createProjectCopyBundle,
+  createRuleCopy,
+  createRuleSetCopyBundle,
+} from "./project-copy.js";
 import { detectImportSource } from "./import-source.js";
 import type {
   DashboardState,
@@ -31,6 +35,7 @@ import { STORAGE_KEYS } from "../shared/constants.js";
 import {
   type AppView,
   type BatchRuleDraft,
+  type CopyDraft,
   type ImportFeedback,
   type ImportSource,
   type PanelMode,
@@ -52,6 +57,7 @@ import { ImportPreviewModal } from "./views/ImportPreviewModal.js";
 import { RulesView } from "./views/RulesView.js";
 import { RulePanel } from "./views/RulePanel.js";
 import { BatchRulePanel } from "./views/BatchRulePanel.js";
+import { CopyToModal } from "./views/CopyToModal.js";
 import {
   createBatchRuleDraft,
   createRuleDraft,
@@ -82,6 +88,14 @@ const emptyRuleSetDraft = (projectId = ""): RuleSetDraft => ({
   note: "",
 });
 
+function findDefaultCopyTargetProjectId(projects: Project[], sourceProjectId: string): string {
+  return projects.find((project) => project.id !== sourceProjectId)?.id ?? projects[0]?.id ?? "";
+}
+
+function findFirstRuleSetId(ruleSets: RuleSet[], projectId: string): string {
+  return ruleSets.find((ruleSet) => ruleSet.projectId === projectId)?.id ?? "";
+}
+
 function App() {
   const [view, setView] = useState<AppView>("rules");
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
@@ -93,6 +107,7 @@ function App() {
   const [projectDraft, setProjectDraft] = useState<ProjectDraft>(emptyProjectDraft());
   const [showRuleSetModal, setShowRuleSetModal] = useState(false);
   const [ruleSetDraft, setRuleSetDraft] = useState<RuleSetDraft>(emptyRuleSetDraft());
+  const [copyDraft, setCopyDraft] = useState<CopyDraft | null>(null);
   const [ruleDraft, setRuleDraft] = useState<RuleDraft>(createRuleDraft());
   const [batchRuleDrafts, setBatchRuleDrafts] = useState<BatchRuleDraft[]>([]);
   const [serviceUrl, setServiceUrl] = useState("");
@@ -146,6 +161,7 @@ function App() {
   // the modals themselves are rendered by helper functions further down.
   useModalDismiss(showProjectModal, () => setShowProjectModal(false));
   useModalDismiss(showRuleSetModal, () => setShowRuleSetModal(false));
+  useModalDismiss(copyDraft !== null, () => setCopyDraft(null));
   useModalDismiss(resourceOverridePreview !== null, () => {
     if (busy) return;
     setResourceOverridePreview(null);
@@ -180,6 +196,46 @@ function App() {
       selectedProjectRuleSets.find((rs) => rs.id === selectedRuleSetId) ?? selectedProjectRuleSets[0]
     );
   }, [selectedProjectRuleSets, selectedRuleSetId, selectedProject]);
+
+  const copySourceProject = useMemo(
+    () => (copyDraft ? projects.find((project) => project.id === copyDraft.sourceProjectId) : undefined),
+    [copyDraft, projects],
+  );
+  const copySourceRuleSet = useMemo(
+    () => (copyDraft ? ruleSets.find((ruleSet) => ruleSet.id === copyDraft.sourceRuleSetId) : undefined),
+    [copyDraft, ruleSets],
+  );
+  const copySourceRule = useMemo(
+    () =>
+      copyDraft?.mode === "rule"
+        ? rules.find((rule) => rule.id === copyDraft.sourceRuleId)
+        : undefined,
+    [copyDraft, rules],
+  );
+  const copyTargetRuleSets = useMemo(
+    () => (copyDraft?.targetProjectId ? ruleSets.filter((ruleSet) => ruleSet.projectId === copyDraft.targetProjectId) : []),
+    [copyDraft, ruleSets],
+  );
+
+  useEffect(() => {
+    if (!copyDraft || copyDraft.mode !== "rule" || !copyDraft.targetProjectId) {
+      return;
+    }
+    const targetRuleSetId = findFirstRuleSetId(ruleSets, copyDraft.targetProjectId);
+    if (!targetRuleSetId) {
+      if (copyDraft.targetRuleSetId) {
+        setCopyDraft((current) =>
+          current && current.mode === "rule" ? { ...current, targetRuleSetId: "" } : current,
+        );
+      }
+      return;
+    }
+    if (copyDraft.targetRuleSetId !== targetRuleSetId && !ruleSets.some((ruleSet) => ruleSet.id === copyDraft.targetRuleSetId && ruleSet.projectId === copyDraft.targetProjectId)) {
+      setCopyDraft((current) =>
+        current && current.mode === "rule" ? { ...current, targetRuleSetId } : current,
+      );
+    }
+  }, [copyDraft, ruleSets]);
 
   const selectedRuleIds = useMemo(
     () => new Set(selectedProjectRuleSets.flatMap((rs) => rs.ruleIds)),
@@ -409,15 +465,51 @@ function App() {
     setPanelMode("rule");
   }
 
-  function duplicateRule(rule: Rule): void {
-    if (!selectedProject || !selectedRuleSet) {
+  function duplicateRule(rule: Rule, project?: Project | null, ruleSet?: RuleSet | null): void {
+    const sourceProject = project ?? selectedProject;
+    const sourceRuleSet = ruleSet ?? selectedRuleSet;
+    if (!sourceProject || !sourceRuleSet) {
       setStatus("请先选择一个站点，再复制规则。");
       return;
     }
-    const base = createRuleDraft({ project: selectedProject, ruleSet: selectedRuleSet, kind: rule.kind, rule });
+    setSelectedProjectId(sourceProject.id);
+    setSelectedRuleSetId(sourceRuleSet.id);
+    const base = createRuleDraft({ project: sourceProject, ruleSet: sourceRuleSet, kind: rule.kind, rule });
     setRuleDraft({ ...base, id: "", name: `${rule.name} 副本` });
     setRulePanelTab("basic");
     setPanelMode("rule");
+  }
+
+  function openRuleCopyModal(rule: Rule, project?: Project | null, ruleSet?: RuleSet | null): void {
+    const sourceProject = project ?? selectedProject;
+    const sourceRuleSet = ruleSet ?? selectedRuleSet;
+    if (!sourceProject || !sourceRuleSet) {
+      setStatus("请先定位规则所属的站点和分组。");
+      return;
+    }
+    const targetProjectId = findDefaultCopyTargetProjectId(projects, sourceProject.id);
+    setCopyDraft({
+      mode: "rule",
+      sourceProjectId: sourceProject.id,
+      sourceRuleSetId: sourceRuleSet.id,
+      sourceRuleId: rule.id,
+      targetProjectId,
+      targetRuleSetId: findFirstRuleSetId(ruleSets, targetProjectId),
+    });
+  }
+
+  function openRuleSetCopyModal(ruleSet: RuleSet): void {
+    const sourceProject = projects.find((project) => project.id === ruleSet.projectId);
+    if (!sourceProject) {
+      setStatus("请先定位分组所属的站点。");
+      return;
+    }
+    setCopyDraft({
+      mode: "rule-set",
+      sourceProjectId: sourceProject.id,
+      sourceRuleSetId: ruleSet.id,
+      targetProjectId: findDefaultCopyTargetProjectId(projects, sourceProject.id),
+    });
   }
 
   function openBatchRulePanel(kind: Rule["kind"] = "api_forward"): void {
@@ -801,6 +893,72 @@ function App() {
         hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
       }
       setStatus(error instanceof Error ? error.message : "复制站点失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmCopyToTarget(): Promise<void> {
+    if (!dashboard || !copyDraft) {
+      setStatus("请先选择要复制的内容。");
+      return;
+    }
+
+    setBusy(true);
+    let nextState: UpsertMutationResponse | null = null;
+    try {
+      const now = new Date().toISOString();
+      if (copyDraft.mode === "rule") {
+        const sourceRule = rules.find((rule) => rule.id === copyDraft.sourceRuleId);
+        const targetProject = projects.find((project) => project.id === copyDraft.targetProjectId);
+        const targetRuleSet = ruleSets.find((ruleSet) => ruleSet.id === copyDraft.targetRuleSetId);
+        if (!sourceRule || !targetProject || !targetRuleSet) {
+          throw new Error("请选择有效的目标站点和分组。");
+        }
+        const copiedRule = createRuleCopy(sourceRule, now, createId);
+        nextState = await runtimeRequest<UpsertMutationResponse>({
+          type: "upsert-rule",
+          payload: { rule: copiedRule, ruleSetId: targetRuleSet.id },
+        });
+        hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
+        setSelectedProjectId(targetProject.id);
+        setSelectedRuleSetId(targetRuleSet.id);
+        setStatus(`规则「${sourceRule.name}」已复制到「${targetProject.name} / ${targetRuleSet.name}」。`);
+      } else {
+        const targetProject = projects.find((project) => project.id === copyDraft.targetProjectId);
+        if (!targetProject) {
+          throw new Error("请选择有效的目标站点。");
+        }
+        const bundle = createRuleSetCopyBundle(
+          dashboard.workspace,
+          copyDraft.sourceRuleSetId,
+          targetProject.id,
+          now,
+          createId,
+        );
+        nextState = await runtimeRequest<UpsertMutationResponse>({
+          type: "upsert-rule-set",
+          payload: { ruleSet: bundle.ruleSet },
+        });
+        for (const rule of bundle.rules) {
+          nextState = await runtimeRequest<UpsertMutationResponse>({
+            type: "upsert-rule",
+            payload: { rule, ruleSetId: bundle.ruleSet.id },
+          });
+        }
+        if (nextState) {
+          hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
+        }
+        setSelectedProjectId(targetProject.id);
+        setSelectedRuleSetId(bundle.ruleSet.id);
+        setStatus(`分组「${bundle.ruleSet.name}」已复制到站点「${targetProject.name}」。`);
+      }
+      setCopyDraft(null);
+    } catch (error) {
+      if (nextState) {
+        hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
+      }
+      setStatus(error instanceof Error ? error.message : "复制失败。");
     } finally {
       setBusy(false);
     }
@@ -1255,6 +1413,8 @@ function App() {
                 openRulePanel,
                 openBatchRulePanel,
                 duplicateRule,
+                openRuleCopyModal,
+                openRuleSetCopyModal,
                 deleteRule,
                 toggleRule,
                 toggleProject,
@@ -1406,6 +1566,21 @@ function App() {
           onClose={() => setShowRuleSetModal(false)}
           onSave={saveRuleSet}
           busy={busy}
+        />
+      )}
+
+      {copyDraft && (
+        <CopyToModal
+          draft={copyDraft}
+          projects={projects}
+          targetRuleSets={copyTargetRuleSets}
+          sourceProject={copySourceProject}
+          sourceRuleSet={copySourceRuleSet}
+          sourceRule={copySourceRule}
+          busy={busy}
+          setDraft={(updater) => setCopyDraft((current) => (current ? updater(current) : current))}
+          onClose={() => setCopyDraft(null)}
+          onConfirm={confirmCopyToTarget}
         />
       )}
 

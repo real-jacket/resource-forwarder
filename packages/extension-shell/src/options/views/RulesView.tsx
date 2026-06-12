@@ -59,7 +59,9 @@ export interface RulesViewProps {
     openRuleSetModal: (ruleSet?: RuleSet) => void;
     openRulePanel: (kind: Rule["kind"], rule?: Rule) => void;
     openBatchRulePanel: (kind?: Rule["kind"]) => void;
-    duplicateRule: (rule: Rule) => void;
+    duplicateRule: (rule: Rule, project?: Project | null, ruleSet?: RuleSet | null) => void;
+    openRuleCopyModal: (rule: Rule, project?: Project | null, ruleSet?: RuleSet | null) => void;
+    openRuleSetCopyModal: (ruleSet: RuleSet) => void;
     deleteRule: (rule: Rule) => void | Promise<void>;
     toggleRule: (rule: Rule) => void | Promise<void>;
     toggleProject: (project: Project) => void | Promise<void>;
@@ -457,7 +459,7 @@ function GroupedRuleTable({
             <th style={{ width: "22%" }}>匹配规则</th>
             <th>代理资源</th>
             <th className="col-time" style={{ width: 110 }}>更新时间</th>
-            <th className="col-actions" style={{ width: 120 }}>操作</th>
+            <th className="col-actions" style={{ width: 160 }}>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -469,10 +471,12 @@ function GroupedRuleTable({
                 busy={busy}
                 actions={actions}
               />
-              {group.rows.map(({ rule }, index) => (
+              {group.rows.map(({ rule, project, ruleSet }, index) => (
                 <RuleTableRow
                   key={rule.id}
                   rule={rule}
+                  project={project}
+                  ruleSet={ruleSet}
                   index={index}
                   busy={busy}
                   actions={actions}
@@ -556,6 +560,19 @@ function GroupHeaderRow({
               </svg>
             </button>
             <button
+              className="btn-icon"
+              title="复制到站点"
+              onClick={() => actions.openRuleSetCopyModal(ruleSet)}
+              disabled={busy}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <path d="M14 4h6v6" />
+                <path d="M10 14 20 4" />
+                <path d="M20 14v6h-6" />
+                <path d="M4 10 14 20" />
+              </svg>
+            </button>
+            <button
               className="btn-icon btn-icon-danger"
               title="删除分组"
               onClick={() => void actions.deleteRuleSet(ruleSet)}
@@ -575,11 +592,15 @@ function GroupHeaderRow({
 
 function RuleTableRow({
   rule,
+  project,
+  ruleSet,
   index,
   busy,
   actions,
 }: {
   rule: Rule;
+  project: Project | null;
+  ruleSet: RuleSet | null;
   index: number;
   busy: boolean;
   actions: RulesViewProps["actions"];
@@ -633,10 +654,18 @@ function RuleTableRow({
               <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
             </svg>
           </button>
-          <button className="btn-icon" title="复制" onClick={() => actions.duplicateRule(rule)}>
+          <button className="btn-icon" title="复制为草稿" onClick={() => actions.duplicateRule(rule, project, ruleSet)}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <rect x="9" y="9" width="13" height="13" rx="2" />
               <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+            </svg>
+          </button>
+          <button className="btn-icon" title="复制到..." onClick={() => actions.openRuleCopyModal(rule, project, ruleSet)}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <path d="M14 4h6v6" />
+              <path d="M10 14 20 4" />
+              <path d="M20 14v6h-6" />
+              <path d="M4 10 14 20" />
             </svg>
           </button>
           <button

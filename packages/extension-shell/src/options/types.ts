@@ -77,6 +77,24 @@ export interface BatchRuleDraft extends RuleDraft {
   localId: string;
 }
 
+export interface RuleCopyDraft {
+  mode: "rule";
+  sourceProjectId: string;
+  sourceRuleSetId: string;
+  sourceRuleId: string;
+  targetProjectId: string;
+  targetRuleSetId: string;
+}
+
+export interface RuleSetCopyDraft {
+  mode: "rule-set";
+  sourceProjectId: string;
+  sourceRuleSetId: string;
+  targetProjectId: string;
+}
+
+export type CopyDraft = RuleCopyDraft | RuleSetCopyDraft;
+
 /** A click-to-fill template surfaced in the rule editor. */
 export interface RuleTemplatePreset {
   id: string;

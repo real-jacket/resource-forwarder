@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceSnapshot } from "@resource-forwarder/shared-types";
-import { createProjectCopyBundle } from "./project-copy.js";
+import {
+  createProjectCopyBundle,
+  createRuleCopy,
+  createRuleSetCopyBundle,
+} from "./project-copy.js";
 
 const now = "2026-04-28T03:50:00.000Z";
 
@@ -119,5 +123,74 @@ describe("createProjectCopyBundle", () => {
         },
       },
     });
+  });
+});
+
+describe("createRuleCopy", () => {
+  it("copies a single rule with a fresh id and duplicated nested structures", () => {
+    const sourceRule = workspace.rules[0];
+    const copied = createRuleCopy(sourceRule, now, () => "rule-copy");
+
+    expect(copied).toMatchObject({
+      id: "rule-copy",
+      name: "API 转发 副本",
+      createdAt: now,
+      updatedAt: now,
+      target: {
+        forwardProfile: {
+          targetBaseUrl: "http://127.0.0.1:3000",
+          headers: { "x-env": "local" },
+        },
+      },
+    });
+    expect(copied.match).not.toBe(sourceRule.match);
+    expect(copied.target).not.toBe(sourceRule.target);
+  });
+});
+
+describe("createRuleSetCopyBundle", () => {
+  it("copies a ruleset into another project with fresh rule ids and a collision-safe name", () => {
+    const targetWorkspace: WorkspaceSnapshot = {
+      ...workspace,
+      projects: [
+        ...workspace.projects,
+        {
+          id: "project-3",
+          name: "预发环境",
+          enabled: true,
+          siteHosts: ["pre.shimo.im"],
+          tags: [],
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      ruleSets: [
+        ...workspace.ruleSets,
+        {
+          id: "ruleset-2",
+          projectId: "project-3",
+          name: "默认分组",
+          enabled: true,
+          ruleIds: [],
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+    const ids = ["ruleset-copy", "rule-api-copy", "rule-asset-copy"];
+    const bundle = createRuleSetCopyBundle(targetWorkspace, "ruleset-1", "project-3", now, () => ids.shift()!);
+
+    expect(bundle.ruleSet).toMatchObject({
+      id: "ruleset-copy",
+      projectId: "project-3",
+      name: "默认分组 副本",
+      ruleIds: ["rule-api-copy", "rule-asset-copy"],
+      createdAt: now,
+      updatedAt: now,
+    });
+    expect(bundle.rules.map((rule) => rule.id)).toEqual(["rule-api-copy", "rule-asset-copy"]);
+    expect(bundle.rules[0].name).toBe("API 转发");
+    expect(bundle.rules[0].createdAt).toBe(now);
+    expect(bundle.rules[1].target).not.toBe(workspace.rules[1].target);
   });
 });

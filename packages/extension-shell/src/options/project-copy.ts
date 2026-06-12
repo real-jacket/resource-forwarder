@@ -6,6 +6,11 @@ export interface ProjectCopyBundle {
   rules: Rule[];
 }
 
+export interface RuleSetCopyBundle {
+  ruleSet: RuleSet;
+  rules: Rule[];
+}
+
 export function createProjectCopyBundle(
   workspace: WorkspaceSnapshot,
   projectId: string,
@@ -55,27 +60,73 @@ export function createProjectCopyBundle(
   const sourceRuleIds = new Set(ruleIdMap.keys());
   const rules = workspace.rules
     .filter((rule) => sourceRuleIds.has(rule.id))
-    .map((rule) => ({
-      ...rule,
-      id: ruleIdMap.get(rule.id)!,
-      match: {
-        ...rule.match,
-        host: [...rule.match.host],
-        resourceType: rule.match.resourceType ? [...rule.match.resourceType] : undefined,
-        method: rule.match.method ? [...rule.match.method] : undefined,
-        tabScope: rule.match.tabScope
-          ? rule.match.tabScope.mode === "tabIds"
-            ? { mode: "tabIds" as const, tabIds: [...rule.match.tabScope.tabIds] }
-            : { mode: "all" as const }
-          : undefined,
-      },
-      target: cloneTarget(rule),
-      tags: [...rule.tags],
-      createdAt: now,
-      updatedAt: now,
-    }));
+    .map((rule) =>
+      cloneRule(rule, {
+        id: ruleIdMap.get(rule.id)!,
+        now,
+      }),
+    );
 
   return { project, ruleSets, rules };
+}
+
+export function createRuleCopy(sourceRule: Rule, now: string, createId: (prefix: string) => string): Rule {
+  return cloneRule(sourceRule, {
+    id: createId("rule"),
+    name: `${sourceRule.name} 副本`,
+    now,
+  });
+}
+
+export function createRuleSetCopyBundle(
+  workspace: WorkspaceSnapshot,
+  ruleSetId: string,
+  targetProjectId: string,
+  now: string,
+  createId: (prefix: string) => string,
+): RuleSetCopyBundle {
+  const sourceRuleSet = workspace.ruleSets.find((ruleSet) => ruleSet.id === ruleSetId);
+  if (!sourceRuleSet) {
+    throw new Error("要复制的分组不存在。");
+  }
+  const targetProject = workspace.projects.find((project) => project.id === targetProjectId);
+  if (!targetProject) {
+    throw new Error("目标站点不存在。");
+  }
+
+  const nextRuleSetId = createId("ruleset");
+  const ruleIdMap = new Map<string, string>();
+  for (const ruleId of sourceRuleSet.ruleIds) {
+    ruleIdMap.set(ruleId, createId("rule"));
+  }
+
+  const existingNames = workspace.ruleSets
+    .filter((ruleSet) => ruleSet.projectId === targetProjectId)
+    .map((ruleSet) => ruleSet.name);
+  const ruleSet: RuleSet = {
+    ...sourceRuleSet,
+    id: nextRuleSetId,
+    projectId: targetProject.id,
+    name: createCopyName(sourceRuleSet.name, existingNames),
+    ruleIds: sourceRuleSet.ruleIds
+      .map((ruleId) => ruleIdMap.get(ruleId))
+      .filter((id): id is string => Boolean(id)),
+    siteMatchPatterns: sourceRuleSet.siteMatchPatterns ? [...sourceRuleSet.siteMatchPatterns] : undefined,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const sourceRuleIds = new Set(sourceRuleSet.ruleIds);
+  const rules = workspace.rules
+    .filter((rule) => sourceRuleIds.has(rule.id))
+    .map((rule) =>
+      cloneRule(rule, {
+        id: ruleIdMap.get(rule.id)!,
+        now,
+      }),
+    );
+
+  return { ruleSet, rules };
 }
 
 function createCopyName(sourceName: string, existingNames: string[]): string {
@@ -111,5 +162,35 @@ function cloneTarget(rule: Rule): Rule["target"] {
             : undefined,
         }
       : undefined,
+  };
+}
+
+function cloneRule(
+  rule: Rule,
+  options: {
+    id: string;
+    now: string;
+    name?: string;
+  },
+): Rule {
+  return {
+    ...rule,
+    id: options.id,
+    name: options.name ?? rule.name,
+    match: {
+      ...rule.match,
+      host: [...rule.match.host],
+      resourceType: rule.match.resourceType ? [...rule.match.resourceType] : undefined,
+      method: rule.match.method ? [...rule.match.method] : undefined,
+      tabScope: rule.match.tabScope
+        ? rule.match.tabScope.mode === "tabIds"
+          ? { mode: "tabIds" as const, tabIds: [...rule.match.tabScope.tabIds] }
+          : { mode: "all" as const }
+        : undefined,
+    },
+    target: cloneTarget(rule),
+    tags: [...rule.tags],
+    createdAt: options.now,
+    updatedAt: options.now,
   };
 }
