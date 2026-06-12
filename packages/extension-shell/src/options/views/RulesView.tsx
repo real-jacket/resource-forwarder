@@ -4,6 +4,7 @@ import type { DashboardState } from "../../shared/messages.js";
 import type { AppView, RuleStatusTab } from "../types.js";
 import { CustomSelect } from "../components/CustomSelect.js";
 import { formatProjectScopeSummary, formatRuleSetScopeSummary, formatRuleTarget, formatTimestamp } from "../formatters.js";
+import { buildRuleGroups, toggleCollapsedRuleSetIds } from "../rule-groups.js";
 
 export interface RuleRow {
   rule: Rule;
@@ -414,38 +415,8 @@ function GroupedRuleTable({
   selectedProjectId,
   projectRuleSets,
 }: GroupedRuleTableProps) {
-  // Preserve sort order from the parent — we just bucket rows by ruleSet id.
-  // The parent already filters by project, so when a project is selected, the
-  // only groups that show up belong to that project.
-  const grouped = new Map<string, { ruleSet: RuleSet | null; rows: RuleRow[] }>();
-  for (const row of rows) {
-    const key = row.ruleSet?.id ?? "__orphan__";
-    const bucket = grouped.get(key);
-    if (bucket) {
-      bucket.rows.push(row);
-    } else {
-      grouped.set(key, { ruleSet: row.ruleSet, rows: [row] });
-    }
-  }
-
-  // When a project is selected, also include any of its empty groups so the
-  // user can see "tables (0 条规则)" instead of an invisible group they just
-  // created. Empty groups only appear when the project filter is active to
-  // avoid cluttering the "all sites" view.
-  if (selectedProjectId) {
-    for (const ruleSet of projectRuleSets) {
-      if (!grouped.has(ruleSet.id)) {
-        grouped.set(ruleSet.id, { ruleSet, rows: [] });
-      }
-    }
-  }
-
-  const groups = Array.from(grouped.values()).sort((a, b) => {
-    if (!a.ruleSet && b.ruleSet) return 1;
-    if (a.ruleSet && !b.ruleSet) return -1;
-    if (!a.ruleSet || !b.ruleSet) return 0;
-    return a.ruleSet.name.localeCompare(b.ruleSet.name);
-  });
+  const [collapsedRuleSetIds, setCollapsedRuleSetIds] = React.useState<Set<string>>(new Set());
+  const groups = buildRuleGroups(rows, selectedProjectId, projectRuleSets);
 
   return (
     <div className="rule-table-card">
@@ -468,20 +439,31 @@ function GroupedRuleTable({
               <GroupHeaderRow
                 ruleSet={group.ruleSet}
                 ruleCount={group.rows.length}
+                collapsed={group.ruleSet ? collapsedRuleSetIds.has(group.ruleSet.id) : false}
                 busy={busy}
                 actions={actions}
+                onToggleCollapse={
+                  group.ruleSet
+                    ? () =>
+                        setCollapsedRuleSetIds((current) =>
+                          toggleCollapsedRuleSetIds(current, group.ruleSet!.id),
+                        )
+                    : undefined
+                }
               />
-              {group.rows.map(({ rule, project, ruleSet }, index) => (
-                <RuleTableRow
-                  key={rule.id}
-                  rule={rule}
-                  project={project}
-                  ruleSet={ruleSet}
-                  index={index}
-                  busy={busy}
-                  actions={actions}
-                />
-              ))}
+              {!group.ruleSet || !collapsedRuleSetIds.has(group.ruleSet.id)
+                ? group.rows.map(({ rule, project, ruleSet }, index) => (
+                    <RuleTableRow
+                      key={rule.id}
+                      rule={rule}
+                      project={project}
+                      ruleSet={ruleSet}
+                      index={index}
+                      busy={busy}
+                      actions={actions}
+                    />
+                  ))
+                : null}
             </React.Fragment>
           ))}
         </tbody>
@@ -502,13 +484,17 @@ function GroupedRuleTable({
 function GroupHeaderRow({
   ruleSet,
   ruleCount,
+  collapsed,
   busy,
   actions,
+  onToggleCollapse,
 }: {
   ruleSet: RuleSet | null;
   ruleCount: number;
+  collapsed: boolean;
   busy: boolean;
   actions: RulesViewProps["actions"];
+  onToggleCollapse?: () => void;
 }) {
   if (!ruleSet) {
     return (
@@ -527,6 +513,16 @@ function GroupHeaderRow({
     <tr className={`rule-group-row${ruleSet.enabled ? "" : " is-disabled"}`}>
       <td colSpan={8}>
         <div className="rule-group-header">
+          <button
+            className="btn-icon"
+            title={collapsed ? "展开分组" : "折叠分组"}
+            onClick={onToggleCollapse}
+            aria-label={collapsed ? "展开分组" : "折叠分组"}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              {collapsed ? <polyline points="9 18 15 12 9 6" /> : <polyline points="6 9 12 15 18 9" />}
+            </svg>
+          </button>
           <label className="toggle-switch toggle-switch-sm" title={ruleSet.enabled ? "停用此分组" : "启用此分组"}>
             <input
               type="checkbox"
