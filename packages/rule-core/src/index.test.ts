@@ -529,6 +529,59 @@ describe("rule-core", () => {
     expect(rules[0]?.condition.initiatorDomains).toEqual(["shimo.im"]);
   });
 
+  it("includes the request host in initiatorDomains for wasm redirects", () => {
+    const wasmWorkspace: WorkspaceSnapshot = {
+      version: 1,
+      updatedAt: "2024-01-01T00:00:00.000Z",
+      projects: [
+        {
+          id: "p1",
+          name: "shimodev.com",
+          enabled: true,
+          siteHosts: ["shimodev.com", "shimodev.com:8080"],
+          siteMatchPatterns: ["https://shimodev.com/table/*"],
+          tags: [],
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        },
+      ],
+      ruleSets: [
+        {
+          id: "rs1",
+          projectId: "p1",
+          name: "tables",
+          enabled: true,
+          ruleIds: ["r1"],
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        },
+      ],
+      rules: [
+        {
+          id: "r1",
+          name: "Wasm redirect",
+          enabled: true,
+          kind: "asset_redirect",
+          priority: 100,
+          match: {
+            host: ["as.smgv.cn"],
+            pathGlob: "/table/table_calc_engine_bg.3f3bf4aec3.wasm",
+            resourceType: ["script"],
+            tabScope: { mode: "all" },
+          },
+          target: { redirectUrl: "http://localhost:8000/table_calc_engine_bg.3f3bf4aec3.wasm" },
+          tags: [],
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+
+    const rules = toDynamicNetRequestRules(wasmWorkspace);
+    expect(rules).toHaveLength(1);
+    expect(rules[0]?.condition.initiatorDomains).toEqual(["shimodev.com", "as.smgv.cn"]);
+  });
+
   it("omits initiatorDomains when project siteHosts contains wildcard", () => {
     const globalWorkspace: WorkspaceSnapshot = {
       ...workspace,
@@ -757,6 +810,68 @@ describe("rule-core", () => {
 
     expect(new RegExp(dnr.condition.regexFilter!).test("https://foo.cdn.example.com/assets/app.js?v=1")).toBe(true);
     expect(new RegExp(dnr.condition.regexFilter!).test("https://other.example.com/assets/app.js?v=1")).toBe(false);
+  });
+
+  it("preserves xmlhttprequest and other resource types for asset redirects", () => {
+    const dnr = toDynamicRule({
+      ...assetRule,
+      match: {
+        ...assetRule.match,
+        pathGlob: "/assets/**",
+        resourceType: ["script", "stylesheet", "image", "font", "xmlhttprequest", "other"],
+      },
+      target: {
+        redirectUrl: "http://localhost:8000/assets/app.wasm",
+      },
+    });
+
+    expect(dnr.condition.resourceTypes).toEqual([
+      "script",
+      "stylesheet",
+      "image",
+      "font",
+      "xmlhttprequest",
+      "other",
+    ]);
+  });
+
+  it("upgrades legacy default asset resource types to include wasm-compatible DNR buckets", () => {
+    const dnr = toDynamicRule({
+      ...assetRule,
+      match: {
+        ...assetRule.match,
+        pathGlob: "/table/table_calc_engine_bg.*.wasm",
+        resourceType: ["script", "stylesheet", "image", "font"],
+      },
+      target: {
+        redirectUrl: "http://localhost:8000/table_calc_engine_bg.wasm",
+      },
+    });
+
+    expect(dnr.condition.resourceTypes).toEqual([
+      "script",
+      "stylesheet",
+      "image",
+      "font",
+      "xmlhttprequest",
+      "other",
+    ]);
+  });
+
+  it("adds wasm-compatible DNR buckets even when the stored rule only lists script", () => {
+    const dnr = toDynamicRule({
+      ...assetRule,
+      match: {
+        ...assetRule.match,
+        pathGlob: "/table/table_calc_engine_bg.3f3bf4aec3.wasm",
+        resourceType: ["script"],
+      },
+      target: {
+        redirectUrl: "http://localhost:8000/table_calc_engine_bg.3f3bf4aec3.wasm",
+      },
+    });
+
+    expect(dnr.condition.resourceTypes).toEqual(["script", "xmlhttprequest", "other"]);
   });
 
   it("constrains wildcard redirectUrl regex filters to wildcard hosts", () => {

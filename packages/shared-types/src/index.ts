@@ -350,6 +350,6 @@ export interface DynamicRedirectRule {
     requestDomains?: string[];
     initiatorDomains?: string[];
     tabIds?: number[];
-    resourceTypes?: Array<"script" | "stylesheet" | "image" | "font">;
+    resourceTypes?: Array<"script" | "stylesheet" | "image" | "font" | "xmlhttprequest" | "other">;
   };
 }

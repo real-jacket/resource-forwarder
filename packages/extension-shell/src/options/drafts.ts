@@ -16,6 +16,34 @@ import {
   type RuleTemplatePreset,
 } from "./types.js";
 
+const legacyDefaultAssetTypes: MatchResourceType[] = ["script", "stylesheet", "image", "font"];
+
+function isWasmPathGlob(pathGlob: string | undefined): boolean {
+  return (pathGlob ?? "").toLowerCase().includes(".wasm");
+}
+
+function normalizeAssetResourceTypes(
+  resourceTypes: MatchResourceType[] | undefined,
+  pathGlob?: string,
+): MatchResourceType[] | undefined {
+  if (!resourceTypes || resourceTypes.length === 0) {
+    return resourceTypes;
+  }
+
+  const sameLength = resourceTypes.length === legacyDefaultAssetTypes.length;
+  const hasLegacyDefaults = sameLength && legacyDefaultAssetTypes.every((type) => resourceTypes.includes(type));
+  const normalized = hasLegacyDefaults ? defaultAssetTypes : resourceTypes;
+
+  if (!isWasmPathGlob(pathGlob)) {
+    return normalized;
+  }
+
+  const merged = [...normalized];
+  if (!merged.includes("xmlhttprequest")) merged.push("xmlhttprequest");
+  if (!merged.includes("other")) merged.push("other");
+  return merged;
+}
+
 /**
  * Domain-pure helpers for converting between persisted Project / Rule shapes
  * and the form-friendly Draft representations the editor uses internally.
@@ -70,7 +98,9 @@ export function createRuleDraft(options?: {
     host: joinCsv(options?.rule?.match.host ?? options?.project?.siteHosts),
     pathGlob: options?.rule?.match.pathGlob ?? (kind === "api_forward" ? "/api/**" : "/assets/**"),
     resourceType: joinCsv(
-      options?.rule?.match.resourceType ?? (kind === "api_forward" ? defaultApiTypes : defaultAssetTypes),
+      kind === "asset_redirect"
+        ? normalizeAssetResourceTypes(options?.rule?.match.resourceType, options?.rule?.match.pathGlob) ?? defaultAssetTypes
+        : options?.rule?.match.resourceType ?? defaultApiTypes,
     ),
     method: joinCsv(options?.rule?.match.method ?? (kind === "api_forward" ? ["GET", "POST"] : undefined)),
     redirectUrl: options?.rule?.target.redirectUrl ?? "",
@@ -142,6 +172,10 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
   const now = new Date().toISOString();
   const host = splitCsv(draft.host).map(normalizeHostInput);
   const resourceType = splitCsv(draft.resourceType) as MatchResourceType[];
+  const normalizedAssetResourceType =
+    draft.kind === "asset_redirect"
+      ? (normalizeAssetResourceTypes(resourceType, draft.pathGlob) ?? resourceType)
+      : resourceType;
   const method = splitCsv(draft.method);
   const headers =
     draft.kind === "api_forward" && draft.headersJson.trim()
@@ -158,8 +192,8 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
       host: host.length > 0 ? host : project.siteHosts,
       pathGlob: sanitizePathGlob(draft.pathGlob || "**"),
       resourceType:
-        resourceType.length > 0
-          ? resourceType
+        normalizedAssetResourceType.length > 0
+          ? normalizedAssetResourceType
           : draft.kind === "api_forward"
             ? defaultApiTypes
             : defaultAssetTypes,

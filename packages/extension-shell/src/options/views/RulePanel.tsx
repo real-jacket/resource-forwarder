@@ -319,7 +319,7 @@ function AdvancedTab({
             className="form-input"
             value={draft.resourceType}
             onChange={(e) => setDraft((v) => ({ ...v, resourceType: e.target.value }))}
-            placeholder={draft.kind === "api_forward" ? "fetch, xmlhttprequest" : "script, stylesheet"}
+            placeholder={draft.kind === "api_forward" ? "fetch, xmlhttprequest" : "script, stylesheet, image, font"}
           />
         </div>
         <div className="form-group">

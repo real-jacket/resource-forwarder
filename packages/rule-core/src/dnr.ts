@@ -9,14 +9,48 @@ import { buildHostRegexSource, buildRegexFilter, escapeRegex, globToUrlFilter, s
 import { getEnabledRuleBindings } from "./matchers.js";
 import { resolveRuleTargetValue } from "./target-resolution.js";
 
-const ASSET_RESOURCE_TYPES: MatchResourceType[] = ["script", "stylesheet", "image", "font"];
+// Asset redirects run at Chrome's request layer, so they need to cover both
+// browser-initiated assets (script/image/font/...) and fetch-style loads such
+// as wasm binaries, which land as xmlhttprequest/other in DNR.
+const ASSET_RESOURCE_TYPES: MatchResourceType[] = ["script", "stylesheet", "image", "font", "xmlhttprequest", "other"];
 
-const DNR_RESOURCE_TYPES: Record<string, Array<"script" | "stylesheet" | "image" | "font">> = {
+const DNR_RESOURCE_TYPES: Record<string, Array<NonNullable<DynamicRedirectRule["condition"]["resourceTypes"]>[number]>> = {
   script: ["script"],
   stylesheet: ["stylesheet"],
   image: ["image"],
   font: ["font"],
+  xmlhttprequest: ["xmlhttprequest"],
+  other: ["other"],
 };
+
+const LEGACY_DEFAULT_ASSET_RESOURCE_TYPES: MatchResourceType[] = ["script", "stylesheet", "image", "font"];
+
+function isWasmPathGlob(pathGlob: string | undefined): boolean {
+  return (pathGlob ?? "").toLowerCase().includes(".wasm");
+}
+
+function normalizeAssetRedirectResourceTypes(
+  resourceTypes: MatchResourceType[] | undefined,
+  pathGlob?: string,
+): MatchResourceType[] | undefined {
+  if (!resourceTypes || resourceTypes.length === 0) {
+    return resourceTypes;
+  }
+
+  const sameLength = resourceTypes.length === LEGACY_DEFAULT_ASSET_RESOURCE_TYPES.length;
+  const hasLegacyDefaults =
+    sameLength && LEGACY_DEFAULT_ASSET_RESOURCE_TYPES.every((type) => resourceTypes.includes(type));
+  const normalized = hasLegacyDefaults ? ASSET_RESOURCE_TYPES : resourceTypes;
+
+  if (!isWasmPathGlob(pathGlob)) {
+    return normalized;
+  }
+
+  const merged = [...normalized];
+  if (!merged.includes("xmlhttprequest")) merged.push("xmlhttprequest");
+  if (!merged.includes("other")) merged.push("other");
+  return merged;
+}
 
 export function toDynamicNetRequestRules(workspace: WorkspaceSnapshot): DynamicRedirectRule[] {
   return getEnabledRuleBindings(workspace, "asset_redirect")
@@ -40,15 +74,23 @@ export function toDynamicNetRequestRules(workspace: WorkspaceSnapshot): DynamicR
 }
 
 export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicRedirectRule {
-  const hasSpecificTypes = rule.match.resourceType && rule.match.resourceType.length > 0;
+  const normalizedMatchResourceTypes =
+    rule.kind === "asset_redirect"
+      ? normalizeAssetRedirectResourceTypes(rule.match.resourceType, rule.match.pathGlob)
+      : rule.match.resourceType;
+  const hasSpecificTypes = normalizedMatchResourceTypes && normalizedMatchResourceTypes.length > 0;
   const resourceTypes = hasSpecificTypes
-    ? rule.match.resourceType!
+    ? normalizedMatchResourceTypes!
         .filter((type) => ASSET_RESOURCE_TYPES.includes(type))
         .flatMap((type) => DNR_RESOURCE_TYPES[type] ?? [])
     : undefined;
 
   const redirectUrl = rule.target.redirectUrl ?? "";
-  const initiatorDomains = resolveInitiatorDomains(projectSiteHosts);
+  const initiatorDomains = resolveInitiatorDomains(
+    projectSiteHosts,
+    rule.match.host,
+    rule.match.pathGlob,
+  );
   // Defensive: strip any scheme+host from pathGlob before it flows into the
   // urlFilter / regexFilter builders. Users sometimes paste a full URL into
   // the "匹配路径" field, and a single malformed urlFilter is enough to make
@@ -111,14 +153,31 @@ export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicR
  */
 function resolveInitiatorDomains(
   projectSiteHosts: string[] | undefined,
+  ruleHosts: string[] | undefined,
+  pathGlob?: string,
 ): string[] | undefined {
   if (!projectSiteHosts || projectSiteHosts.length === 0) return undefined;
   if (projectSiteHosts.includes("*")) return undefined;
 
-  const concrete = projectSiteHosts.filter((h) => h !== "*" && !h.startsWith("*."));
-  if (concrete.length === 0) return undefined;
+  const concrete = normalizeConcreteDomains(projectSiteHosts);
+  if (isWasmPathGlob(pathGlob)) {
+    concrete.push(...normalizeConcreteDomains(ruleHosts ?? []));
+  }
+  const deduped = Array.from(new Set(concrete));
+  if (deduped.length === 0) return undefined;
 
-  return concrete;
+  return deduped;
+}
+
+function normalizeConcreteDomains(hosts: string[]): string[] {
+  return hosts
+    .filter((h) => h !== "*" && !h.startsWith("*."))
+    .map((h) => stripPort(h))
+    .filter(Boolean);
+}
+
+function stripPort(host: string): string {
+  return host.replace(/:\d+$/, "");
 }
 
 /**

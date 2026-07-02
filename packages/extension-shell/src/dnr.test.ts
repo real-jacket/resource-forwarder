@@ -373,4 +373,5 @@ describe("dnr helpers", () => {
     expect(groups.dynamicRules[0]?.condition.initiatorDomains).toEqual(["co-dev-18.shimorelease.com"]);
     expect(groups.sessionRules).toHaveLength(0);
   });
+
 });

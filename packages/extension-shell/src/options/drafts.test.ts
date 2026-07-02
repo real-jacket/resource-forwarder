@@ -53,6 +53,11 @@ describe("createRuleDraft", () => {
     expect(draft.id).toBe("");
   });
 
+  it("seeds asset_redirect defaults with asset-only resource types", () => {
+    const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, kind: "asset_redirect" });
+    expect(draft.resourceType).toBe("script, stylesheet, image, font");
+  });
+
   it("populates from an existing rule when one is provided", () => {
     const rule: Rule = {
       id: "rule-1",
@@ -78,6 +83,52 @@ describe("createRuleDraft", () => {
     expect(draft.tags).toBe("t1");
     // headersJson is always a JSON-string, even when no headers exist
     expect(JSON.parse(draft.headersJson)).toEqual({});
+  });
+
+  it("upgrades legacy asset_redirect default resource types when editing an existing rule", () => {
+    const rule: Rule = {
+      id: "rule-legacy-asset",
+      name: "legacy asset",
+      enabled: true,
+      kind: "asset_redirect",
+      priority: 50,
+      match: {
+        host: ["as.smgv.cn"],
+        pathGlob: "/table/table_calc_engine_bg.*.wasm",
+        resourceType: ["script", "stylesheet", "image", "font"],
+        tabScope: { mode: "all" },
+      },
+      target: { redirectUrl: "http://localhost:8000/table_calc_engine_bg.wasm" },
+      tags: [],
+      createdAt: "2025-01-01T00:00:00.000Z",
+      updatedAt: "2025-01-01T00:00:00.000Z",
+    };
+
+    const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, rule });
+    expect(draft.resourceType).toBe("script, stylesheet, image, font, xmlhttprequest, other");
+  });
+
+  it("adds wasm fetch-compatible resource types even when the existing rule only listed asset buckets", () => {
+    const rule: Rule = {
+      id: "rule-wasm-asset-only",
+      name: "wasm asset only",
+      enabled: true,
+      kind: "asset_redirect",
+      priority: 50,
+      match: {
+        host: ["as.smgv.cn"],
+        pathGlob: "/table/table_calc_engine_bg.3f3bf4aec3.wasm",
+        resourceType: ["script"],
+        tabScope: { mode: "all" },
+      },
+      target: { redirectUrl: "http://localhost:8000/table_calc_engine_bg.3f3bf4aec3.wasm" },
+      tags: [],
+      createdAt: "2025-01-01T00:00:00.000Z",
+      updatedAt: "2025-01-01T00:00:00.000Z",
+    };
+
+    const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, rule });
+    expect(draft.resourceType).toBe("script, xmlhttprequest, other");
   });
 });
 
@@ -158,6 +209,54 @@ describe("toRule", () => {
     expect(rule.kind).toBe("asset_redirect");
     expect(rule.target.redirectUrl).toBe("https://cdn/app.js");
     expect(rule.target.forwardProfile).toBeUndefined();
+  });
+
+  it("upgrades legacy asset_redirect default resource types on save", () => {
+    const existing: Rule = {
+      id: "rule-existing-asset",
+      name: "old asset",
+      enabled: true,
+      kind: "asset_redirect",
+      priority: 100,
+      match: {
+        host: ["as.smgv.cn"],
+        pathGlob: "/table/table_calc_engine_bg.*.wasm",
+        resourceType: ["script", "stylesheet", "image", "font"],
+        tabScope: { mode: "all" },
+      },
+      target: { redirectUrl: "http://localhost:8000/table_calc_engine_bg.wasm" },
+      tags: [],
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-01T00:00:00.000Z",
+    };
+    const workspace: WorkspaceSnapshot = { ...emptyWorkspace, rules: [existing] };
+    const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, rule: existing });
+    const rule = toRule(draft, workspace, baseProject);
+    expect(rule.match.resourceType).toEqual(["script", "stylesheet", "image", "font", "xmlhttprequest", "other"]);
+  });
+
+  it("adds wasm fetch-compatible resource types on save even for narrow asset-only rules", () => {
+    const existing: Rule = {
+      id: "rule-existing-wasm",
+      name: "old wasm",
+      enabled: true,
+      kind: "asset_redirect",
+      priority: 100,
+      match: {
+        host: ["as.smgv.cn"],
+        pathGlob: "/table/table_calc_engine_bg.3f3bf4aec3.wasm",
+        resourceType: ["script"],
+        tabScope: { mode: "all" },
+      },
+      target: { redirectUrl: "http://localhost:8000/table_calc_engine_bg.3f3bf4aec3.wasm" },
+      tags: [],
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-01T00:00:00.000Z",
+    };
+    const workspace: WorkspaceSnapshot = { ...emptyWorkspace, rules: [existing] };
+    const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, rule: existing });
+    const rule = toRule(draft, workspace, baseProject);
+    expect(rule.match.resourceType).toEqual(["script", "xmlhttprequest", "other"]);
   });
 
   it("preserves createdAt when editing an existing rule", () => {
