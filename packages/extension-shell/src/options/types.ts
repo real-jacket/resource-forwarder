@@ -1,7 +1,7 @@
 import type { MatchResourceType, Rule } from "@resource-forwarder/shared-types";
 
 /** The four top-level tabs in the options page. */
-export type AppView = "rules" | "import-export" | "settings" | "about";
+export type AppView = "rules" | "debug" | "import-export" | "settings" | "about";
 
 /** Whether the right-hand side panel is showing the single or batch rule editor. */
 export type PanelMode = "rule" | "rule-batch" | null;
@@ -59,12 +59,31 @@ export interface RuleDraft {
   priority: number;
   host: string;
   pathGlob: string;
+  queryMatchJson: string;
+  headerMatchJson: string;
   resourceType: string;
   method: string;
   redirectUrl: string;
   targetBaseUrl: string;
   stripPrefix: string;
+  pathRewriteJson: string;
+  queryRemove: string;
+  querySetJson: string;
+  queryAppendJson: string;
   headersJson: string;
+  headerStrip: string;
+  headerPassthrough: string;
+  responseMode: "forward" | "mock_json" | "mock_file";
+  responseStatus: string;
+  responseStatusText: string;
+  responseDelayMs: number;
+  responseJsonPatch: string;
+  responseMockJson: string;
+  responseMockFilePath: string;
+  responseHeadersJson: string;
+  responseHeaderStrip: string;
+  timeoutMs: number;
+  fallbackMode: "native" | "error";
   tags: string;
   note: string;
 }

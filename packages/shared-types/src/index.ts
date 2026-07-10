@@ -58,6 +58,19 @@ export interface RuleSet {
 export interface MatchCondition {
   host: string[];
   pathGlob: string;
+  /**
+   * Query-string constraints keyed by parameter name. Values use the same
+   * lightweight glob syntax as paths (`*` and `?`). When a key appears more
+   * than once, any value may satisfy the pattern.
+   */
+  query?: Record<string, string>;
+  /**
+   * Request-header constraints keyed case-insensitively by header name.
+   * Values use lightweight glob matching. Browser-forbidden headers such as
+   * Cookie may be unavailable in the page bridge and therefore cannot be
+   * relied on for client-side selection.
+   */
+  headers?: Record<string, string>;
   resourceType?: MatchResourceType[];
   method?: string[];
   tabScope?: TabScope;
@@ -72,9 +85,44 @@ export interface ForwardProfile {
   targetBaseUrl: string;
   stripPrefix?: string;
   pathRewrite?: PathRewrite[];
+  queryPolicy?: ForwardQueryPolicy;
   headers?: Record<string, string>;
   headerPolicy?: ForwardHeaderPolicy;
+  responsePolicy?: ForwardResponsePolicy;
+  responseHeaderPolicy?: ForwardResponseHeaderPolicy;
   timeoutMs?: number;
+  /**
+   * `native` preserves the historical behaviour: requests that the extension
+   * cannot proxy safely fall back to the page's original fetch/XHR. `error`
+   * blocks that fallback so a broken local target cannot silently hit the
+   * original test or production endpoint.
+   */
+  fallbackMode?: "native" | "error";
+}
+
+export interface ForwardResponsePolicy {
+  /** Forward upstream, return inline JSON, or read a local JSON file. */
+  mode?: "forward" | "mock_json" | "mock_file";
+  /** Override the upstream/mock status. Empty/undefined keeps the upstream status. */
+  status?: number;
+  statusText?: string;
+  /** Add deterministic latency for loading/error-state development. */
+  delayMs?: number;
+  /** RFC 7396-style merge patch applied to forwarded JSON responses. */
+  jsonMergePatch?: unknown;
+  /** JSON value returned directly when mode is mock_json. */
+  mockJson?: unknown;
+  /** Absolute path, or a path relative to the service working directory. */
+  mockFilePath?: string;
+}
+
+export interface ForwardQueryPolicy {
+  /** Remove these keys after the source and target queries are merged. */
+  remove?: string[];
+  /** Replace each key with exactly one value. */
+  set?: Record<string, string>;
+  /** Append one or more values without removing existing values. */
+  append?: Record<string, string[]>;
 }
 
 export interface ForwardHeaderPolicy {
@@ -90,6 +138,13 @@ export interface ForwardHeaderPolicy {
    * the original Cookie or Authorization despite the safer default.
    */
   passthrough?: string[];
+}
+
+export interface ForwardResponseHeaderPolicy {
+  /** Response headers to remove before returning the synthetic browser response. */
+  strip?: string[];
+  /** Response headers to set or override. */
+  set?: Record<string, string>;
 }
 
 export interface Target {
@@ -131,6 +186,7 @@ export interface RequestContext {
   method: string;
   host: string;
   pathname: string;
+  query?: Record<string, string[]>;
   tabId?: number;
   resourceType: MatchResourceType;
   headers?: Record<string, string>;
@@ -286,13 +342,21 @@ export interface MatchTraceEntry {
   /** Combined rule + ruleSet + project enabled chain. */
   enabled: boolean;
   conditions: {
+    /** Rule belongs to exactly one rule set whose project still exists. */
+    hierarchy: boolean;
+    /** Current page is inside the owning project's page scope. */
+    projectScope: boolean;
+    /** Current page is inside the rule set's own or inherited page scope. */
+    ruleSetScope: boolean;
     host: boolean;
     path: boolean;
+    query: boolean;
+    headers: boolean;
     method: boolean;
     resourceType: boolean;
     tabScope: boolean;
   };
-  /** `enabled` && every condition passed. */
+  /** `enabled` && hierarchy/page scope/request conditions all passed. */
   wouldMatch: boolean;
 }
 

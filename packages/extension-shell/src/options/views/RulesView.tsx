@@ -3,7 +3,7 @@ import type { Project, Rule, RuleSet } from "@resource-forwarder/shared-types";
 import type { DashboardState } from "../../shared/messages.js";
 import type { AppView, RuleStatusTab } from "../types.js";
 import { CustomSelect } from "../components/CustomSelect.js";
-import { formatProjectScopeSummary, formatRuleSetScopeSummary, formatRuleTarget, formatTimestamp } from "../formatters.js";
+import { formatRuleTarget, formatTimestamp } from "../formatters.js";
 import { buildRuleGroups, isRuleEffectivelyDisabled, toggleCollapsedRuleSetIds } from "../rule-groups.js";
 import { buildSiteActionMenuItems, getSiteTogglePresentation, getToolbarLayoutFlags } from "../rules-toolbar.js";
 
@@ -92,7 +92,7 @@ export function RulesView(props: RulesViewProps) {
       </div>
 
       <ContextBar {...props} layoutFlags={layoutFlags} />
-      <ContextHint project={props.selectedProject} />
+      <ContextHint project={props.selectedProject} ruleSet={props.selectedRuleSet} />
       <FilterBar {...props} layoutFlags={layoutFlags} />
 
       <div className="rule-table-container">
@@ -325,9 +325,12 @@ function FilterBar(props: RulesViewProps & { layoutFlags: ReturnType<typeof getT
   );
 }
 
-function ContextHint({ project }: { project: Project | undefined }) {
+function ContextHint({ project, ruleSet }: { project: Project | undefined; ruleSet: RuleSet | undefined }) {
   if (!project) return null;
-  const summary = formatProjectScopeSummary(project);
+  const projectScope = (project.siteMatchPatterns?.length ? project.siteMatchPatterns : project.siteHosts).join(", ") || "全部页面";
+  const ruleSetScope = ruleSet?.siteMatchPatterns?.length
+    ? ruleSet.siteMatchPatterns.join(", ")
+    : "继承站点页面范围";
   return (
     <div className={`rules-context-hint${project.enabled ? "" : " is-disabled"}`}>
       <div className="rules-context-hint-label">
@@ -335,12 +338,23 @@ function ContextHint({ project }: { project: Project | undefined }) {
           <circle cx="12" cy="12" r="10" />
           <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10A15.3 15.3 0 0 1 12 2z" />
         </svg>
-        站点匹配
+        生效范围
       </div>
-      <div className="rules-context-hint-content">
-        <span className={project.siteMatchPatterns?.length ? "rules-context-hint-pattern" : "rules-context-hint-empty"}>
-          {summary}
-        </span>
+      <div className="rules-scope-chain">
+        <div className="rules-scope-layer">
+          <span>站点页面</span>
+          <strong>{projectScope}</strong>
+        </div>
+        {ruleSet && (
+          <div className="rules-scope-layer">
+            <span>分组页面</span>
+            <strong>{ruleSetScope}</strong>
+          </div>
+        )}
+        <div className="rules-scope-layer is-rule">
+          <span>规则请求</span>
+          <strong>再按 Host、路径和附加条件筛选</strong>
+        </div>
       </div>
       {!project.enabled && <span className="rules-context-hint-status">已停用</span>}
     </div>
@@ -615,12 +629,21 @@ function GroupHeaderRow({
           </label>
           <span className="rule-group-name">{ruleSet.name}</span>
           <span className="rule-group-meta">{ruleCount} 条规则</span>
-          {formatRuleSetScopeSummary(ruleSet) && (
-            <span
-              className="rule-group-patterns"
-              title={formatRuleSetScopeSummary(ruleSet)}
-            >
-              {formatRuleSetScopeSummary(ruleSet)}
+          <span
+            className="rule-group-patterns"
+            title={
+              ruleSet.siteMatchPatterns?.length
+                ? `页面范围 ${ruleSet.siteMatchPatterns.join(", ")}`
+                : "页面范围继承所属站点"
+            }
+          >
+            {ruleSet.siteMatchPatterns?.length
+              ? `页面 ${ruleSet.siteMatchPatterns.join(", ")}`
+              : "页面范围继承站点"}
+          </span>
+          {ruleSet.baseUrl && (
+            <span className="rule-group-patterns" title={`目标基址 ${ruleSet.baseUrl}`}>
+              目标基址 {ruleSet.baseUrl}
             </span>
           )}
           {!ruleSet.enabled && <span className="rule-group-badge">已停用</span>}

@@ -70,6 +70,27 @@ describe("prepareMatcher", () => {
     expect(matcher.bindings("api_forward").map((b) => b.rule.id)).toEqual(["ok"]);
   });
 
+  it("drops orphan and ambiguously grouped rules from the executable matcher", () => {
+    const orphanWorkspace = workspace([rule({ id: "orphan" })]);
+    orphanWorkspace.ruleSets[0].ruleIds = [];
+    expect(prepareMatcher(orphanWorkspace).bindings("api_forward")).toHaveLength(0);
+
+    const duplicateWorkspace = workspace([rule({ id: "duplicate" })]);
+    duplicateWorkspace.ruleSets.push({
+      ...duplicateWorkspace.ruleSets[0],
+      id: "rs-2",
+      name: "Duplicate owner",
+      ruleIds: ["duplicate"],
+    });
+    expect(prepareMatcher(duplicateWorkspace).bindings("api_forward")).toHaveLength(0);
+  });
+
+  it("drops rules whose rule set points to a missing project", () => {
+    const invalid = workspace([rule({ id: "missing-project" })]);
+    invalid.ruleSets[0].projectId = "missing";
+    expect(prepareMatcher(invalid).bindings("api_forward")).toHaveLength(0);
+  });
+
   it("respects host wildcard patterns and suffix wildcards", () => {
     const matcher = prepareMatcher(
       workspace([
@@ -108,6 +129,40 @@ describe("prepareMatcher", () => {
       resourceType: "fetch",
     }, "api_forward");
     expect(post).toBeUndefined();
+  });
+
+  it("matches query parameters and request headers with glob values", () => {
+    const matcher = prepareMatcher(
+      workspace([
+        rule({
+          match: {
+            host: ["app.example.com"],
+            pathGlob: "/api/**",
+            query: { tenant: "dev-*", debug: "1" },
+            headers: { "content-type": "application/json*", "x-client": "web-?" },
+            resourceType: ["fetch"],
+            tabScope: { mode: "all" },
+          },
+        }),
+      ]),
+    );
+    const base = {
+      url: "https://app.example.com/api/users?tenant=dev-a&debug=1",
+      method: "GET",
+      host: "app.example.com",
+      pathname: "/api/users",
+      query: { tenant: ["dev-a"], debug: ["1"] },
+      resourceType: "fetch" as const,
+      headers: { "Content-Type": "application/json; charset=utf-8", "X-Client": "web-a" },
+    };
+
+    expect(matcher.pick(base, "api_forward")?.rule.id).toBe("r");
+    expect(
+      matcher.pick({ ...base, query: { tenant: ["prod"], debug: ["1"] } }, "api_forward"),
+    ).toBeUndefined();
+    expect(
+      matcher.pick({ ...base, headers: { "content-type": "text/plain", "x-client": "web-a" } }, "api_forward"),
+    ).toBeUndefined();
   });
 
   it("respects tabScope.tabIds gating", () => {

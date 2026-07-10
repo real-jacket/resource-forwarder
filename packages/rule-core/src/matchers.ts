@@ -52,6 +52,32 @@ export function matchesPath(pathGlob: string, pathname: string): boolean {
   return new RegExp(`^${globToPathRegexSource(pathGlob || "**")}$`).test(pathname);
 }
 
+export function matchesQuery(
+  match: MatchCondition,
+  query: Record<string, string[]> | undefined,
+): boolean {
+  const constraints = match.query;
+  if (!constraints || Object.keys(constraints).length === 0) return true;
+  const actual = query ?? {};
+  return Object.entries(constraints).every(([name, pattern]) => {
+    const values = actual[name];
+    return Boolean(values?.some((value) => matchesValuePattern(pattern, value)));
+  });
+}
+
+export function matchesHeaders(
+  match: MatchCondition,
+  headers: Record<string, string> | undefined,
+): boolean {
+  const constraints = match.headers;
+  if (!constraints || Object.keys(constraints).length === 0) return true;
+  const normalized = normalizeHeaderRecord(headers);
+  return Object.entries(constraints).every(([name, pattern]) => {
+    const value = normalized[name.toLowerCase()];
+    return value !== undefined && matchesValuePattern(pattern, value);
+  });
+}
+
 export function matchesMethod(match: MatchCondition, method: string): boolean {
   if (!match.method || match.method.length === 0) return true;
   const normalized = normalizeMethod(method);
@@ -73,10 +99,26 @@ export function matchesRule(rule: Rule, context: RequestContext): boolean {
   return (
     matchesHost(rule.match.host, context.host) &&
     matchesPath(rule.match.pathGlob, context.pathname) &&
+    matchesQuery(rule.match, context.query) &&
+    matchesHeaders(rule.match, context.headers) &&
     matchesResourceType(rule.match, context.resourceType) &&
     matchesMethod(rule.match, context.method) &&
     matchesTabScope(rule.match, context.tabId)
   );
+}
+
+function matchesValuePattern(pattern: string, value: string): boolean {
+  if (pattern === "*") return true;
+  const source = pattern
+    .replace(/[|\\{}()[\]^$+.]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  return new RegExp(`^${source}$`).test(value);
+}
+
+function normalizeHeaderRecord(headers: Record<string, string> | undefined): Record<string, string> {
+  if (!headers) return {};
+  return Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]));
 }
 
 export function resolveRuleBinding(
@@ -86,8 +128,11 @@ export function resolveRuleBinding(
   const rule = workspace.rules.find((item) => item.id === ruleId);
   if (!rule) return undefined;
 
-  const ruleSet = workspace.ruleSets.find((item) => item.ruleIds.includes(ruleId));
-  const project = ruleSet ? workspace.projects.find((item) => item.id === ruleSet.projectId) : undefined;
+  const memberships = workspace.ruleSets.filter((item) => item.ruleIds.includes(ruleId));
+  if (memberships.length !== 1) return undefined;
+  const ruleSet = memberships[0];
+  const project = workspace.projects.find((item) => item.id === ruleSet.projectId);
+  if (!project) return undefined;
   return { rule, ruleSet, project };
 }
 

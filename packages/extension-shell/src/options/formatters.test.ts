@@ -67,6 +67,19 @@ describe("formatRuleTarget", () => {
     const empty: Rule = { ...baseRule, target: { forwardProfile: { targetBaseUrl: "", headers: {} } } };
     expect(formatRuleTarget(empty)).toMatch(/未填写/);
   });
+
+  it("summarizes inline and local-file mock responses", () => {
+    const inline: Rule = {
+      ...baseRule,
+      target: { forwardProfile: { targetBaseUrl: "", responsePolicy: { mode: "mock_json", mockJson: { ok: true } } } },
+    };
+    const file: Rule = {
+      ...baseRule,
+      target: { forwardProfile: { targetBaseUrl: "", responsePolicy: { mode: "mock_file", mockFilePath: "/tmp/mocks/users.json" } } },
+    };
+    expect(formatRuleTarget(inline)).toBe("Mock：内联 JSON");
+    expect(formatRuleTarget(file)).toBe("Mock 文件：users.json");
+  });
 });
 
 describe("buildRuleSearchText", () => {
@@ -84,7 +97,7 @@ describe("buildRuleSearchText", () => {
 
 describe("formatTimestamp", () => {
   it("returns em-dash for missing values", () => {
-    expect(formatTimestamp(undefined)).toBe("—");
+    expect(formatTimestamp(undefined)).toBe("-");
   });
 
   it("formats a full local timestamp by default", () => {
@@ -136,6 +149,13 @@ describe("localizeWarning", () => {
     const out = localizeWarning('Project "demo" mixes a wildcard site pattern with concrete patterns');
     expect(out).toContain("demo");
     expect(out).toContain("通配符");
+  });
+
+  it("translates hierarchy integrity warnings", () => {
+    expect(localizeWarning("Rule demo is not assigned to a rule set and will not match.")).toContain("未归入分组");
+    expect(localizeWarning("Rule demo is assigned to multiple rule sets and will not match.")).toContain("多个分组");
+    expect(localizeWarning("Rule set demo references a missing project and its rules will not match.")).toContain("所属站点");
+    expect(localizeWarning("Rule set demo references missing rule r-1.")).toContain("无效引用");
   });
 
   it("falls through unknown warnings unchanged", () => {

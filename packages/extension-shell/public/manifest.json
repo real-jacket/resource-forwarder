@@ -5,6 +5,7 @@
   "description": "更易管理的浏览器资源转发与本地规则工具。",
   "permissions": [
     "storage",
+    "cookies",
     "tabs",
     "activeTab",
     "scripting",

@@ -55,6 +55,7 @@ import { ProjectModal } from "./views/ProjectModal.js";
 import { RuleSetModal } from "./views/RuleSetModal.js";
 import { ImportPreviewModal } from "./views/ImportPreviewModal.js";
 import { RulesView } from "./views/RulesView.js";
+import { DebugView } from "./views/DebugView.js";
 import { RulePanel } from "./views/RulePanel.js";
 import { BatchRulePanel } from "./views/BatchRulePanel.js";
 import { CopyToModal } from "./views/CopyToModal.js";
@@ -67,6 +68,7 @@ import {
   toRule,
 } from "./drafts.js";
 import { buildRuleSearchText, localizeWarning } from "./formatters.js";
+import { isRuleEffectivelyDisabled } from "./rule-groups.js";
 
 const emptyProjectDraft = (): ProjectDraft => ({
   id: "",
@@ -278,12 +280,17 @@ function App() {
   }, [rules, ruleSetByRuleId, projectById]);
 
   const filteredRuleRows = useMemo(() => {
-    return allRuleRows.filter(({ rule, project }) => {
+    return allRuleRows.filter(({ rule, project, ruleSet }) => {
       // Project filter
       if (selectedProjectId && project?.id !== selectedProjectId) return false;
+      const effectivelyDisabled = isRuleEffectivelyDisabled(
+        rule.enabled,
+        ruleSet?.enabled ?? false,
+        project?.enabled ?? false,
+      );
       // Status tab
-      if (ruleStatusTab === "enabled" && !rule.enabled) return false;
-      if (ruleStatusTab === "disabled" && rule.enabled) return false;
+      if (ruleStatusTab === "enabled" && effectivelyDisabled) return false;
+      if (ruleStatusTab === "disabled" && !effectivelyDisabled) return false;
       // Kind filter
       if (ruleKindFilter !== "all" && rule.kind !== ruleKindFilter) return false;
       // Search
@@ -305,9 +312,9 @@ function App() {
   const { enabledCount, disabledCount } = useMemo(() => {
     let enabled = 0;
     let disabled = 0;
-    for (const { rule, project } of allRuleRows) {
+    for (const { rule, project, ruleSet } of allRuleRows) {
       if (selectedProjectId && project?.id !== selectedProjectId) continue;
-      if (rule.enabled) enabled += 1;
+      if (!isRuleEffectivelyDisabled(rule.enabled, ruleSet?.enabled ?? false, project?.enabled ?? false)) enabled += 1;
       else disabled += 1;
     }
     return { enabledCount: enabled, disabledCount: disabled };
@@ -354,8 +361,11 @@ function App() {
   );
 
   const totalCount = projectRuleRows.length;
-  const tabEnabledCount = projectRuleRows.filter(({ rule }) => rule.enabled).length;
-  const tabDisabledCount = projectRuleRows.filter(({ rule }) => !rule.enabled).length;
+  const tabEnabledCount = projectRuleRows.filter(
+    ({ rule, ruleSet, project }) =>
+      !isRuleEffectivelyDisabled(rule.enabled, ruleSet?.enabled ?? false, project?.enabled ?? false),
+  ).length;
+  const tabDisabledCount = totalCount - tabEnabledCount;
 
   const draftRule = useMemo(() => {
     if (!dashboard || !selectedProject) return null;
@@ -1309,64 +1319,81 @@ function App() {
         </div>
 
         <div className="sidebar-nav">
-          <button
-            className={`sidebar-nav-item ${view === "rules" ? "active" : ""}`}
-            onClick={() => setView("rules")}
-            title="规则列表"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="3" width="7" height="7" />
-              <rect x="14" y="3" width="7" height="7" />
-              <rect x="3" y="14" width="7" height="7" />
-              <rect x="14" y="14" width="7" height="7" />
-            </svg>
-            <span className="sidebar-nav-label">规则列表</span>
-          </button>
-          <button
-            className={`sidebar-nav-item ${view === "import-export" ? "active" : ""}`}
-            onClick={() => setView("import-export")}
-            title="导入导出"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
-              <polyline points="17 8 12 3 7 8" />
-              <line x1="12" y1="3" x2="12" y2="15" />
-            </svg>
-            <span className="sidebar-nav-label">导入导出</span>
-          </button>
-          <button
-            className={`sidebar-nav-item ${view === "settings" ? "active" : ""}`}
-            onClick={() => setView("settings")}
-            title="设置"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.07 4.93l-1.41 1.41M4.93 4.93l1.41 1.41M19.07 19.07l-1.41-1.41M4.93 19.07l1.41-1.41M12 2v2M12 20v2M2 12h2M20 12h2" />
-            </svg>
-            <span className="sidebar-nav-label">设置</span>
-          </button>
-          <button
-            className={`sidebar-nav-item ${view === "about" ? "active" : ""}`}
-            onClick={() => setView("about")}
-            title="关于"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="8" x2="12" y2="12" />
-              <line x1="12" y1="16" x2="12.01" y2="16" />
-            </svg>
-            <span className="sidebar-nav-label">关于</span>
-          </button>
+          <div className="sidebar-nav-section">
+            <div className="sidebar-nav-section-label">工作区</div>
+            <button
+              className={`sidebar-nav-item ${view === "rules" ? "active" : ""}`}
+              onClick={() => setView("rules")}
+              title="规则列表"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="7" height="7" />
+                <rect x="14" y="3" width="7" height="7" />
+                <rect x="3" y="14" width="7" height="7" />
+                <rect x="14" y="14" width="7" height="7" />
+              </svg>
+              <span className="sidebar-nav-label">规则列表</span>
+            </button>
+            <button
+              className={`sidebar-nav-item ${view === "debug" ? "active" : ""}`}
+              onClick={() => setView("debug")}
+              title="请求调试"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+              <span className="sidebar-nav-label">请求调试</span>
+            </button>
+          </div>
+
+          <div className="sidebar-nav-section">
+            <div className="sidebar-nav-section-label">管理</div>
+            <button
+              className={`sidebar-nav-item ${view === "import-export" ? "active" : ""}`}
+              onClick={() => setView("import-export")}
+              title="导入导出"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              <span className="sidebar-nav-label">导入导出</span>
+            </button>
+            <button
+              className={`sidebar-nav-item ${view === "settings" ? "active" : ""}`}
+              onClick={() => setView("settings")}
+              title="设置"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.07 4.93l-1.41 1.41M4.93 4.93l1.41 1.41M19.07 19.07l-1.41-1.41M4.93 19.07l1.41-1.41M12 2v2M12 20v2M2 12h2M20 12h2" />
+              </svg>
+              <span className="sidebar-nav-label">设置</span>
+            </button>
+            <button
+              className={`sidebar-nav-item ${view === "about" ? "active" : ""}`}
+              onClick={() => setView("about")}
+              title="关于"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              <span className="sidebar-nav-label">关于</span>
+            </button>
+          </div>
         </div>
 
         <div className="sidebar-footer">
           <div className={`sidebar-status ${dashboard?.health ? "online" : "offline"}`}>
             <span className="sidebar-status-dot" />
-            <span className="sidebar-nav-label">
-              {dashboard?.health
-                ? `服务已连接 :${servicePort}`
-                : "离线模式（本地存储）"}
-            </span>
+            <div className="sidebar-status-copy sidebar-nav-label">
+              <strong>{dashboard?.health ? "本地服务已连接" : "本地服务离线"}</strong>
+              <span>{dashboard?.health ? `端口 ${servicePort}，${rules.length} 条规则` : `本地缓存 ${rules.length} 条规则`}</span>
+            </div>
           </div>
           {!dashboard?.health && rules.length > 0 && (
             <div className="sidebar-status-hint sidebar-nav-label">
@@ -1456,6 +1483,9 @@ function App() {
                 setStatus,
               }}
             />
+          )}
+          {view === "debug" && (
+            <DebugView logs={logs} rules={rules} currentUrl={currentUrl} />
           )}
           {view === "settings" && (
             <SettingsView

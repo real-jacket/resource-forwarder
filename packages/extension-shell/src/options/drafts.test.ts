@@ -279,6 +279,131 @@ describe("toRule", () => {
     expect(rule.updatedAt).not.toBe("2024-01-01T00:00:00.000Z");
   });
 
+  it("round-trips all API forwarding fields without silently dropping advanced config", () => {
+    const existing: Rule = {
+      id: "rule-advanced",
+      name: "advanced",
+      enabled: true,
+      kind: "api_forward",
+      priority: 100,
+      match: {
+        host: ["example.com"],
+        pathGlob: "/api/**",
+        query: { tenant: "dev-*" },
+        headers: { "x-client": "web-*" },
+        resourceType: ["fetch"],
+        method: ["GET"],
+        tabScope: { mode: "all" },
+      },
+      target: {
+        forwardProfile: {
+          targetBaseUrl: "http://localhost:3000/base?from=target",
+          stripPrefix: "/api",
+          pathRewrite: [{ from: "/users", to: "/v1/users" }],
+          queryPolicy: {
+            remove: ["token"],
+            set: { env: "local" },
+            append: { tag: ["debug", "frontend"] },
+          },
+          headers: { "x-debug": "1" },
+          headerPolicy: { strip: ["x-old"], passthrough: ["authorization"] },
+          responseHeaderPolicy: { strip: ["content-security-policy"], set: { "cache-control": "no-store" } },
+          timeoutMs: 45000,
+          fallbackMode: "error",
+        },
+      },
+      tags: ["local"],
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-01T00:00:00.000Z",
+    };
+    const workspace: WorkspaceSnapshot = { ...emptyWorkspace, rules: [existing] };
+    const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, rule: existing });
+    const saved = toRule(draft, workspace, baseProject);
+
+    expect(saved.match.query).toEqual(existing.match.query);
+    expect(saved.match.headers).toEqual(existing.match.headers);
+    expect(saved.target.forwardProfile).toEqual(existing.target.forwardProfile);
+  });
+
+  it("round-trips forwarded JSON response patches and response overrides", () => {
+    const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, kind: "api_forward" });
+    draft.targetBaseUrl = "http://localhost:3000";
+    draft.responseMode = "forward";
+    draft.responseStatus = "202";
+    draft.responseStatusText = "Accepted for UI";
+    draft.responseDelayMs = 350;
+    draft.responseJsonPatch = JSON.stringify({ data: { name: "Local", role: null }, debug: true });
+
+    const rule = toRule(draft, emptyWorkspace, baseProject);
+    const restored = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, rule });
+
+    expect(rule.target.forwardProfile?.responsePolicy).toEqual({
+      mode: "forward",
+      status: 202,
+      statusText: "Accepted for UI",
+      delayMs: 350,
+      jsonMergePatch: { data: { name: "Local", role: null }, debug: true },
+      mockJson: undefined,
+      mockFilePath: undefined,
+    });
+    expect(restored.responseMode).toBe("forward");
+    expect(JSON.parse(restored.responseJsonPatch)).toEqual({ data: { name: "Local", role: null }, debug: true });
+  });
+
+  it("allows an inline JSON mock without a target URL", () => {
+    const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, kind: "api_forward" });
+    draft.targetBaseUrl = "";
+    draft.responseMode = "mock_json";
+    draft.responseStatus = "404";
+    draft.responseMockJson = JSON.stringify({ code: "USER_NOT_FOUND", data: null });
+
+    const rule = toRule(draft, emptyWorkspace, baseProject);
+    expect(rule.target.forwardProfile?.targetBaseUrl).toBe("");
+    expect(rule.target.forwardProfile?.responsePolicy).toMatchObject({
+      mode: "mock_json",
+      status: 404,
+      mockJson: { code: "USER_NOT_FOUND", data: null },
+    });
+  });
+
+  it("round-trips a local JSON file mock", () => {
+    const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, kind: "api_forward" });
+    draft.targetBaseUrl = "";
+    draft.responseMode = "mock_file";
+    draft.responseMockFilePath = "./mocks/user-detail.json";
+
+    const rule = toRule(draft, emptyWorkspace, baseProject);
+    const restored = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, rule });
+    expect(rule.target.forwardProfile?.responsePolicy).toMatchObject({
+      mode: "mock_file",
+      mockFilePath: "./mocks/user-detail.json",
+    });
+    expect(restored.responseMockFilePath).toBe("./mocks/user-detail.json");
+  });
+
+  it("validates target, file path, status, delay and JSON response inputs", () => {
+    const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, kind: "api_forward" });
+
+    draft.responseMode = "forward";
+    draft.targetBaseUrl = "";
+    expect(() => toRule(draft, emptyWorkspace, baseProject)).toThrow(/目标地址/);
+
+    draft.responseMode = "mock_file";
+    expect(() => toRule(draft, emptyWorkspace, baseProject)).toThrow(/文件路径/);
+
+    draft.responseMode = "mock_json";
+    draft.responseMockJson = "{broken";
+    expect(() => toRule(draft, emptyWorkspace, baseProject)).toThrow(/Mock JSON/);
+
+    draft.responseMockJson = "{}";
+    draft.responseStatus = "99";
+    expect(() => toRule(draft, emptyWorkspace, baseProject)).toThrow(/100 到 599/);
+
+    draft.responseStatus = "200";
+    draft.responseDelayMs = 30001;
+    expect(() => toRule(draft, emptyWorkspace, baseProject)).toThrow(/30000/);
+  });
+
   it("auto-strips scheme + host when user pastes a full URL into pathGlob", () => {
     const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, kind: "asset_redirect" });
     draft.pathGlob = "https://uccp-dev.shimorelease.com/minio/weboffice-assets/docx/sdk-*.js";

@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 export interface SelectOption {
   value: string;
   label: string;
+  description?: string;
   disabled?: boolean;
   className?: string;
 }
@@ -22,6 +24,10 @@ interface CustomSelectProps {
   searchPlaceholder?: string;
   /** Optional accessible name when the surrounding markup doesn't provide one. */
   ariaLabel?: string;
+  ariaDescribedBy?: string;
+  id?: string;
+  placeholder?: string;
+  disabled?: boolean;
 }
 
 /**
@@ -42,6 +48,10 @@ export function CustomSelect({
   searchable = false,
   searchPlaceholder = "搜索...",
   ariaLabel,
+  ariaDescribedBy,
+  id,
+  placeholder = "请选择",
+  disabled = false,
 }: CustomSelectProps) {
   const [open, setOpen] = useState(false);
   const [focusIdx, setFocusIdx] = useState(-1);
@@ -49,16 +59,24 @@ export function CustomSelect({
   const wrapRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   // Type-ahead buffer: collects letters typed in quick succession so the user
   // can jump to "Brazil" by typing "br" without entering search mode. Reset
   // after 500ms of inactivity to mimic native <select> semantics.
   const typeAheadRef = useRef<{ buffer: string; timer: number | null }>({ buffer: "", timer: null });
-  const idRef = useRef<string>("cs-" + ++CUSTOM_SELECT_ID_COUNTER);
-  const listboxId = `${idRef.current}-listbox`;
-  const optionId = (i: number) => `${idRef.current}-opt-${i}`;
+  const [autoId] = useState(() => "cs-" + ++CUSTOM_SELECT_ID_COUNTER);
+  const listboxId = `${autoId}-listbox`;
+  const optionId = (i: number) => `${autoId}-opt-${i}`;
 
   const selected = options.find((o) => o.value === value);
+  const [menuPosition, setMenuPosition] = useState<{
+    left: number;
+    width: number;
+    top?: number;
+    bottom?: number;
+    maxHeight: number;
+  }>({ left: 0, width: 220, top: 0, maxHeight: 300 });
 
   const visibleOptions = useMemo(() => {
     if (!searchable || !query.trim()) return options;
@@ -69,11 +87,52 @@ export function CustomSelect({
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      if (
+        wrapRef.current &&
+        !wrapRef.current.contains(target) &&
+        !menuRef.current?.contains(target)
+      ) {
+        setOpen(false);
+      }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
+
+  const updateMenuPosition = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const viewportPadding = 8;
+    const desiredHeight = searchable ? 300 : 260;
+    const below = window.innerHeight - rect.bottom - viewportPadding;
+    const above = rect.top - viewportPadding;
+    const openAbove = below < Math.min(220, desiredHeight) && above > below;
+    const maxHeight = Math.max(120, Math.min(desiredHeight, openAbove ? above - 6 : below - 6));
+    const width = Math.min(Math.max(rect.width, 220), window.innerWidth - viewportPadding * 2);
+    const left = Math.max(
+      viewportPadding,
+      Math.min(rect.left, window.innerWidth - width - viewportPadding),
+    );
+    setMenuPosition(
+      openAbove
+        ? { left, width, bottom: window.innerHeight - rect.top + 4, maxHeight }
+        : { left, width, top: rect.bottom + 4, maxHeight },
+    );
+  }, [searchable]);
+
+  useEffect(() => {
+    if (!open) return;
+    updateMenuPosition();
+    const handleLayoutChange = () => updateMenuPosition();
+    window.addEventListener("resize", handleLayoutChange);
+    window.addEventListener("scroll", handleLayoutChange, true);
+    return () => {
+      window.removeEventListener("resize", handleLayoutChange);
+      window.removeEventListener("scroll", handleLayoutChange, true);
+    };
+  }, [open, updateMenuPosition]);
 
   useEffect(() => {
     if (open) {
@@ -92,7 +151,7 @@ export function CustomSelect({
         triggerRef.current?.focus();
       }
     }
-  }, [open]);
+  }, [open, searchable, value]);
 
   useEffect(() => {
     setFocusIdx(findFirstEnabledIndex(visibleOptions, 0, 1));
@@ -192,23 +251,42 @@ export function CustomSelect({
   return (
     <div className={`cs-wrap ${className}`} ref={wrapRef} onKeyDown={handleKey}>
       <button
+        id={id}
         ref={triggerRef}
         type="button"
         className={`cs-trigger ${open ? "is-open" : ""}`}
-        onClick={() => setOpen(!open)}
+        onClick={() => !disabled && setOpen(!open)}
+        disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listboxId : undefined}
         aria-activedescendant={open && focusIdx >= 0 ? optionId(focusIdx) : undefined}
         aria-label={ariaLabel}
+        aria-describedby={ariaDescribedBy}
       >
-        <span className="cs-trigger-text">{selected?.label ?? ""}</span>
+        <span className={`cs-trigger-text ${selected ? "" : "is-placeholder"}`}>
+          {selected?.label ?? placeholder}
+        </span>
         <svg className="cs-chevron" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
         </svg>
       </button>
-      {open && (
-        <div className="cs-menu" id={listboxId} role="listbox" aria-label={ariaLabel}>
+      {open && createPortal(
+        <div
+          ref={menuRef}
+          className="cs-menu"
+          id={listboxId}
+          role="listbox"
+          aria-label={ariaLabel}
+          onKeyDown={handleKey}
+          style={{
+            left: menuPosition.left,
+            width: menuPosition.width,
+            maxHeight: menuPosition.maxHeight,
+            top: menuPosition.top,
+            bottom: menuPosition.bottom,
+          }}
+        >
           {searchable && (
             <div className="cs-search">
               <svg className="cs-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
@@ -246,7 +324,10 @@ export function CustomSelect({
                     setOpen(false);
                   }}
                 >
-                  {opt.label}
+                  <span className="cs-option-copy">
+                    <span className="cs-option-label">{opt.label}</span>
+                    {opt.description && <span className="cs-option-description">{opt.description}</span>}
+                  </span>
                   {opt.value === value && (
                     <svg className="cs-check" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                       <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
@@ -256,7 +337,8 @@ export function CustomSelect({
               ))
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
