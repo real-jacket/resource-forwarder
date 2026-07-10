@@ -29,6 +29,7 @@ import {
   planDeleteProject,
   planDeleteRule,
   planDeleteRuleSet,
+  resolveRuleBinding,
   serializeWorkspace,
   trimWorkspaceForUrl,
   type PendingDeletions,
@@ -37,6 +38,7 @@ import type { DashboardState, RuntimeRequest } from "./shared/messages.js";
 import { DEFAULT_SERVICE_URL, SERVICE_OFFLINE_SENTINEL, SESSION_STORAGE_KEYS, STORAGE_KEYS } from "./shared/constants.js";
 import { buildDynamicRuleUpdatePlan, buildScopedDnrRuleGroups } from "./dnr.js";
 import { normalizeProxyRequestError } from "./shared/service-errors.js";
+import { buildCookieHeader, shouldAttachBrowserCookies } from "./cookie-forwarding.js";
 
 // ── Runtime state ────────────────────────────────────────────────────────
 
@@ -195,6 +197,12 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
       return serviceJson<LogsResponse>(
         `/logs?limit=${message.limit ?? 50}${message.projectId ? `&projectId=${encodeURIComponent(message.projectId)}` : ""}`,
       ).catch(() => ({ logs: [] }));
+    case "diagnose-match":
+      return serviceJson("/match", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(message.payload),
+      });
     case "import-workspace":
       return handleImportWorkspace(message.payload);
     case "export-workspace":
@@ -746,10 +754,11 @@ async function proxyRequest(requestId: string, payload: ForwardRequestPayload) {
   await persistInflightId(requestId);
 
   try {
+    const enrichedPayload = await attachBrowserCookies(payload);
     const response = await serviceFetch(`/forward`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(enrichedPayload),
       signal: controller.signal,
     });
 
@@ -764,6 +773,27 @@ async function proxyRequest(requestId: string, payload: ForwardRequestPayload) {
   } finally {
     inflightForwards.delete(requestId);
     await unpersistInflightId(requestId);
+  }
+}
+
+async function attachBrowserCookies(payload: ForwardRequestPayload): Promise<ForwardRequestPayload> {
+  const binding = payload.matchedRuleId
+    ? resolveRuleBinding(runtimeState.workspace, payload.matchedRuleId)
+    : undefined;
+  if (!shouldAttachBrowserCookies(binding, payload)) return payload;
+
+  try {
+    const cookies = await chrome.cookies.getAll({ url: payload.url });
+    const cookieHeader = buildCookieHeader(cookies);
+    if (!cookieHeader) return payload;
+    return {
+      ...payload,
+      headers: { ...payload.headers, Cookie: cookieHeader },
+    };
+  } catch {
+    // Cookie access is best-effort. A missing permission or restricted scheme
+    // must not break the rest of the forwarding path.
+    return payload;
   }
 }
 

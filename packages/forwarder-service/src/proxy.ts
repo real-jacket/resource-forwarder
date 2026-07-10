@@ -1,4 +1,8 @@
 import { Buffer } from "node:buffer";
+import { readFile, stat } from "node:fs/promises";
+import { STATUS_CODES } from "node:http";
+import { basename, extname, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type {
   ForwardProfile,
   ForwardRequestPayload,
@@ -42,9 +46,10 @@ export function createRequestContext(payload: {
     method: payload.method,
     host: url.host,
     pathname: url.pathname,
+    query: collectQueryValues(url.searchParams),
     tabId: payload.tabId,
     resourceType: payload.resourceType ?? "fetch",
-    headers: payload.headers,
+    headers: normalizeHeaderRecord(payload.headers),
   };
 }
 
@@ -58,17 +63,24 @@ export async function forwardThroughRule(
   }
 
   const sourceUrl = new URL(payload.url);
+  const responsePolicy = profile.responsePolicy;
+  const responseMode = responsePolicy?.mode ?? "forward";
+  if (responseMode === "mock_json" || responseMode === "mock_file") {
+    const mocked = await buildMockResponse(profile, payload, binding.rule.id);
+    await applyResponseDelay(responsePolicy?.delayMs);
+    return mocked;
+  }
+
   const targetUrl = buildForwardTargetUrl(profile, sourceUrl).toString();
   const headers = buildForwardHeaders(payload.headers, profile, sourceUrl);
-  const body = decodeRequestBody(payload);
+  const requestBody = decodeRequestBody(payload);
   const response = await fetch(targetUrl, {
     method: payload.method,
     headers,
-    body,
+    body: requestBody,
     signal: AbortSignal.timeout(profile.timeoutMs ?? DEFAULT_FORWARD_TIMEOUT_MS),
   });
 
-  const responseHeaders = Object.fromEntries(response.headers.entries());
   const contentType = response.headers.get("content-type") ?? undefined;
 
   // Refuse to buffer responses that are inherently streaming. Doing so would
@@ -87,30 +99,55 @@ export async function forwardThroughRule(
     throw new Error(STREAMING_UNSUPPORTED);
   }
 
-  if (isTextualContentType(contentType)) {
-    return {
-      targetUrl,
-      response: {
-        status: response.status,
-        statusText: response.statusText,
-        headers: responseHeaders,
-        body: await response.text(),
-        bodyEncoding: "utf8",
-        responseUrl: response.url,
-        matchedRuleId: binding.rule.id,
-      },
-    };
+  const status = resolveResponseStatus(responsePolicy?.status, response.status);
+  const statusText = responsePolicy?.statusText?.trim() || (status === response.status ? response.statusText : "");
+  let body: string | undefined;
+  let bodyEncoding: "utf8" | "base64" = "utf8";
+  // Every upstream body is buffered and reconstructed inside the page. Node's
+  // fetch may also transparently decompress it, so transport-specific headers
+  // from the original response are no longer trustworthy even without a JSON
+  // patch.
+  let bodyChanged = true;
+  const responseHeaderSource = new Headers(response.headers);
+
+  if (isTextualContentType(contentType) || responsePolicy?.jsonMergePatch !== undefined) {
+    const text = await response.text();
+    if (responsePolicy?.jsonMergePatch !== undefined) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        throw new Error("Configured JSON response patch requires an upstream JSON response.");
+      }
+      body = JSON.stringify(applyJsonMergePatch(parsed, responsePolicy.jsonMergePatch));
+      responseHeaderSource.set("content-type", "application/json; charset=utf-8");
+    } else {
+      body = text;
+    }
+  } else {
+    if (responsePolicy?.jsonMergePatch !== undefined) {
+      throw new Error("Configured JSON response patch cannot be applied to a binary upstream response.");
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    body = buffer.toString("base64");
+    bodyEncoding = "base64";
   }
 
-  const buffer = Buffer.from(await response.arrayBuffer());
+  if (!statusAllowsBody(status)) {
+    body = undefined;
+    bodyEncoding = "utf8";
+  }
+
+  const responseHeaders = buildForwardResponseHeaders(responseHeaderSource, profile, bodyChanged);
+  await applyResponseDelay(responsePolicy?.delayMs);
   return {
     targetUrl,
     response: {
-      status: response.status,
-      statusText: response.statusText,
+      status,
+      statusText,
       headers: responseHeaders,
-      body: buffer.toString("base64"),
-      bodyEncoding: "base64",
+      body,
+      bodyEncoding,
       responseUrl: response.url,
       matchedRuleId: binding.rule.id,
     },
@@ -147,8 +184,137 @@ export function buildForwardTargetUrl(profile: ForwardProfile, sourceUrl: URL): 
     }
     mergedParams.append(key, value);
   });
+  for (const key of profile.queryPolicy?.remove ?? []) {
+    mergedParams.delete(key);
+  }
+  for (const [key, value] of Object.entries(profile.queryPolicy?.set ?? {})) {
+    mergedParams.set(key, value);
+  }
+  for (const [key, values] of Object.entries(profile.queryPolicy?.append ?? {})) {
+    for (const value of values) mergedParams.append(key, value);
+  }
   target.search = mergedParams.toString();
   return target;
+}
+
+export function buildForwardResponseHeaders(
+  incomingHeaders: Headers,
+  profile: ForwardProfile,
+  bodyChanged = false,
+): Record<string, string> {
+  const headers = new Headers(incomingHeaders);
+  if (bodyChanged) {
+    headers.delete("content-length");
+    headers.delete("content-encoding");
+    headers.delete("transfer-encoding");
+  }
+  for (const name of profile.responseHeaderPolicy?.strip ?? []) {
+    headers.delete(name);
+  }
+  for (const [name, value] of Object.entries(profile.responseHeaderPolicy?.set ?? {})) {
+    headers.set(name, value);
+  }
+  return Object.fromEntries(headers.entries());
+}
+
+async function buildMockResponse(
+  profile: ForwardProfile,
+  payload: ForwardRequestPayload,
+  ruleId: string,
+): Promise<{ response: ForwardResponsePayload; targetUrl: string }> {
+  const policy = profile.responsePolicy;
+  const mode = policy?.mode ?? "mock_json";
+  let value: unknown;
+  let targetUrl = "mock:inline-json";
+
+  if (mode === "mock_file") {
+    const configuredPath = policy?.mockFilePath?.trim();
+    if (!configuredPath) {
+      throw new Error("Mock JSON file path is required.");
+    }
+    const filePath = resolve(configuredPath);
+    if (extname(filePath).toLowerCase() !== ".json") {
+      throw new Error("Mock response files must use the .json extension.");
+    }
+    const displayName = basename(filePath);
+    let file: Buffer;
+    try {
+      const fileStat = await stat(filePath);
+      if (!fileStat.isFile()) {
+        throw new Error("not-a-file");
+      }
+      if (fileStat.size > MAX_FORWARDABLE_BODY_BYTES) {
+        throw new Error("file-too-large");
+      }
+      file = await readFile(filePath);
+    } catch (error) {
+      if (error instanceof Error && error.message === "file-too-large") {
+        throw new Error(`Mock JSON file ${displayName} exceeds ${MAX_FORWARDABLE_BODY_BYTES} bytes.`);
+      }
+      throw new Error(`Unable to read mock JSON file ${displayName}.`);
+    }
+    if (file.byteLength > MAX_FORWARDABLE_BODY_BYTES) {
+      throw new Error(`Mock JSON file exceeds ${MAX_FORWARDABLE_BODY_BYTES} bytes.`);
+    }
+    try {
+      value = JSON.parse(file.toString("utf8"));
+    } catch {
+      throw new Error("Mock response file is not valid JSON.");
+    }
+    targetUrl = `mock-file:${displayName}`;
+  } else {
+    value = policy?.mockJson ?? {};
+  }
+
+  const status = resolveResponseStatus(policy?.status, 200);
+  const headers = new Headers({ "content-type": "application/json; charset=utf-8" });
+  const responseHeaders = buildForwardResponseHeaders(headers, profile, true);
+  return {
+    targetUrl,
+    response: {
+      status,
+      statusText: policy?.statusText?.trim() || STATUS_CODES[status] || "",
+      headers: responseHeaders,
+      body: statusAllowsBody(status) ? JSON.stringify(value) : undefined,
+      bodyEncoding: "utf8",
+      responseUrl: payload.url,
+      matchedRuleId: ruleId,
+    },
+  };
+}
+
+function resolveResponseStatus(configured: number | undefined, fallback: number): number {
+  if (configured === undefined) return fallback;
+  if (!Number.isInteger(configured) || configured < 100 || configured > 599) {
+    throw new Error("Response status must be an integer between 100 and 599.");
+  }
+  return configured;
+}
+
+function statusAllowsBody(status: number): boolean {
+  return status !== 204 && status !== 205 && status !== 304;
+}
+
+async function applyResponseDelay(delayMs: number | undefined): Promise<void> {
+  if (!delayMs || delayMs <= 0) return;
+  await delay(Math.min(Math.round(delayMs), 30000));
+}
+
+function applyJsonMergePatch(target: unknown, patch: unknown): unknown {
+  if (!isPlainObject(patch)) return patch;
+  const result: Record<string, unknown> = isPlainObject(target) ? { ...target } : {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) {
+      delete result[key];
+    } else {
+      result[key] = applyJsonMergePatch(result[key], value);
+    }
+  }
+  return result;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function buildForwardHeaders(
@@ -221,4 +387,16 @@ function trimTrailingSlash(value: string): string {
 
 function ensureLeadingSlash(value: string): string {
   return value.startsWith("/") ? value : `/${value}`;
+}
+
+function collectQueryValues(searchParams: URLSearchParams): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  searchParams.forEach((value, key) => {
+    (result[key] ??= []).push(value);
+  });
+  return result;
+}
+
+function normalizeHeaderRecord(headers: Record<string, string> | undefined): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers ?? {}).map(([name, value]) => [name.toLowerCase(), value]));
 }

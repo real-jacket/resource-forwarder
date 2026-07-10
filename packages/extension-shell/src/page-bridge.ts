@@ -215,18 +215,21 @@ function installFetchPatch(): void {
     }
 
     const request = new Request(input, init);
-    const match = matcher.pick(buildContext(request.url, request.method, "fetch"), "api_forward");
+    const requestHeaders = Object.fromEntries(request.headers.entries());
+    const match = matcher.pick(buildContext(request.url, request.method, "fetch", requestHeaders), "api_forward");
     if (!match) {
       return nativeFetch(input, init);
     }
+    const allowNativeFallback = match.rule.target.forwardProfile?.fallbackMode !== "error";
 
     // Pre-flight body size check. Cheap path: if init.body has a synchronously
     // knowable size (string / Blob / typed array / URLSearchParams) and exceeds
     // the limit, skip forwarding entirely so we never read it into memory.
     const initSize = approximateBodySize(init?.body);
     if (initSize > FORWARD_BODY_LIMIT_BYTES) {
-      warnPayloadTooLarge(request.url, initSize);
-      return nativeFetch(input, init);
+      warnPayloadTooLarge(request.url, initSize, allowNativeFallback);
+      if (allowNativeFallback) return nativeFetch(input, init);
+      throw new TypeError(`Resource Forwarder blocked native fallback for oversized request: ${request.url}`);
     }
 
     try {
@@ -235,7 +238,10 @@ function installFetchPatch(): void {
       const forwarded = await dispatchProxyRequest(requestId, payload, signal);
       return createBrowserResponse(forwarded);
     } catch (error) {
-      if (isServiceOfflineError(error) || isPayloadTooLargeError(error) || isStreamingUnsupportedError(error)) {
+      if (
+        allowNativeFallback &&
+        (isServiceOfflineError(error) || isPayloadTooLargeError(error) || isStreamingUnsupportedError(error))
+      ) {
         return nativeFetch(input, init);
       }
       throw error;
@@ -310,17 +316,22 @@ function installXhrPatch(): void {
         return;
       }
 
-      const match = matcher.pick(buildContext(current.url, current.method, "xmlhttprequest"), "api_forward");
+      const match = matcher.pick(
+        buildContext(current.url, current.method, "xmlhttprequest", current.requestHeaders),
+        "api_forward",
+      );
       if (!match) {
         sendNative();
         return;
       }
+      const allowNativeFallback = match.rule.target.forwardProfile?.fallbackMode !== "error";
 
       // Pre-flight body size check (same rationale as fetch path).
       const bodySize = approximateBodySize(body ?? undefined);
       if (bodySize > FORWARD_BODY_LIMIT_BYTES) {
-        warnPayloadTooLarge(current.url, bodySize);
-        sendNative();
+        warnPayloadTooLarge(current.url, bodySize, allowNativeFallback);
+        if (allowNativeFallback) sendNative();
+        else applyXhrError(xhr, current);
         return;
       }
 
@@ -336,15 +347,20 @@ function installXhrPatch(): void {
           return;
         }
         applyXhrResponse(xhr, current, forwarded);
-      } catch {
+      } catch (error) {
         if (current.aborted) {
           return;
         }
-        // Forwarding failed — fall back to native and let the original XHR
-        // surface its own success/error events. Reset `intercepted` so the
-        // native readyState/status getters take over again.
-        current.intercepted = false;
-        sendNative();
+        if (allowNativeFallback && isNativeFallbackError(error)) {
+          // Forwarding failed — fall back to native and let the original XHR
+          // surface its own success/error events. Reset `intercepted` so the
+          // native readyState/status getters take over again.
+          current.intercepted = false;
+          sendNative();
+        } else {
+          console.error(`[resource-forwarder] native fallback blocked for ${current.url}`, error);
+          applyXhrError(xhr, current);
+        }
       }
     })();
   };
@@ -468,7 +484,12 @@ function getOrCreateXhrState(xhr: XMLHttpRequest): XhrState {
   return created;
 }
 
-function buildContext(urlString: string, method: string, resourceType: "fetch" | "xmlhttprequest") {
+function buildContext(
+  urlString: string,
+  method: string,
+  resourceType: "fetch" | "xmlhttprequest",
+  headers: Record<string, string>,
+) {
   const url = new URL(urlString, location.href);
   return {
     url: url.toString(),
@@ -476,8 +497,10 @@ function buildContext(urlString: string, method: string, resourceType: "fetch" |
     method,
     host: url.host,
     pathname: url.pathname,
+    query: collectQueryValues(url.searchParams),
     tabId: state.tabId,
     resourceType,
+    headers,
   };
 }
 
@@ -610,6 +633,20 @@ function applyXhrResponse(xhr: XMLHttpRequest, current: XhrState, forwarded: For
   dispatchProgressEvent(xhr, "loadend", body.byteLength);
 }
 
+function applyXhrError(xhr: XMLHttpRequest, current: XhrState): void {
+  current.intercepted = true;
+  current.status = 0;
+  current.statusText = "";
+  current.responseHeaders = {};
+  current.responseURL = "";
+  current.responseText = "";
+  current.response = null;
+  current.readyState = 4;
+  dispatchXhrEvent(xhr, "readystatechange");
+  dispatchProgressEvent(xhr, "error", 0);
+  dispatchProgressEvent(xhr, "loadend", 0);
+}
+
 function dispatchXhrEvent(xhr: XMLHttpRequest, type: string): void {
   const event = new Event(type);
   xhr.dispatchEvent(event);
@@ -709,6 +746,10 @@ function isStreamingUnsupportedError(error: unknown): boolean {
   return error instanceof Error && error.message === STREAMING_UNSUPPORTED_SENTINEL;
 }
 
+function isNativeFallbackError(error: unknown): boolean {
+  return isServiceOfflineError(error) || isPayloadTooLargeError(error) || isStreamingUnsupportedError(error);
+}
+
 /**
  * Best-effort body size for the synchronous-sized BodyInit variants.
  * Returns -1 for ReadableStream / FormData / Document — sizes that can only
@@ -725,10 +766,20 @@ function approximateBodySize(body: unknown): number {
   return -1;
 }
 
-function warnPayloadTooLarge(url: string, size: number): void {
+function warnPayloadTooLarge(url: string, size: number, allowNativeFallback = true): void {
   console.warn(
-    `[resource-forwarder] body for ${url} is ${size} bytes (limit ${FORWARD_BODY_LIMIT_BYTES}); falling back to native request.`,
+    `[resource-forwarder] body for ${url} is ${size} bytes (limit ${FORWARD_BODY_LIMIT_BYTES}); ${
+      allowNativeFallback ? "falling back to native request" : "native fallback is blocked by rule"
+    }.`,
   );
+}
+
+function collectQueryValues(searchParams: URLSearchParams): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  searchParams.forEach((value, key) => {
+    (result[key] ??= []).push(value);
+  });
+  return result;
 }
 
 function replayHeadersToNative(

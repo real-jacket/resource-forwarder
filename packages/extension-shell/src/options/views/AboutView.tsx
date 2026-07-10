@@ -82,7 +82,7 @@ function FirstRunSection() {
           <li>在「设置 → 通用设置」里的「服务 token」输入框粘贴并保存。</li>
         </ol>
         <div className="guide-tip">
-          <strong>排查：</strong>如果设置页提示「服务 token 校验失败」，表示 token 不对——重启服务后会保留同一个 token，没必要每次重新粘贴；只有 <code>~/.resource-forwarder/token</code> 文件被删后才会重新生成。
+          <strong>排查：</strong>如果设置页提示「服务 token 校验失败」，表示 token 不对。重启服务后会保留同一个 token，没必要每次重新粘贴；只有 <code>~/.resource-forwarder/token</code> 文件被删后才会重新生成。
         </div>
         <div className="guide-warn">
           <strong>安全：</strong>该 token 是本地服务的唯一鉴权凭证。任何拿到 token + 本机网络可达的进程都能调用 <code>/forward</code>，请勿粘贴到任何远程脚本或截图。
@@ -111,6 +111,17 @@ function CoreConceptsSection() {
         </table>
         <div className="guide-tip">
           <strong>如何选择？</strong> 浏览器直接加载的资源（<code>&lt;script&gt;</code>、<code>&lt;link&gt;</code>、<code>&lt;img&gt;</code>）选<strong>资源替换</strong>；JS 代码发起的 <code>fetch</code> / <code>XHR</code> 请求选<strong>API 转发</strong>。
+        </div>
+        <h3>匹配链路</h3>
+        <p>每条规则按以下层级依次判断，所有层级都通过才会执行：</p>
+        <ol style={{ paddingLeft: 20, lineHeight: 1.8 }}>
+          <li><strong>站点页面范围</strong>：当前页面必须属于规则所属站点。</li>
+          <li><strong>分组页面范围</strong>：分组可进一步缩小页面范围，未配置时继承站点。</li>
+          <li><strong>规则请求条件</strong>：再检查 Host、路径、Query、Header、方法和资源类型。</li>
+          <li><strong>优先级</strong>：多条规则都通过时，优先级更高的规则先命中。</li>
+        </ol>
+        <div className="guide-warn">
+          <strong>归属要求：</strong>规则必须唯一归属于一个分组，分组必须归属于有效站点。未归组、重复归组或找不到站点的配置会保留供修复，但不会参与代理。
         </div>
         <h3>路径匹配语法 (pathGlob)</h3>
         <table className="guide-table">
@@ -178,7 +189,7 @@ function AssetRedirectExamplesSection() {
 
         <h3>2. 通配符替换一批文件（常用）</h3>
         <ExampleBlock
-          badge={<><span className="example-badge badge-asset">资源替换</span>通配符 — 批量 chunk</>}
+          badge={<><span className="example-badge badge-asset">资源替换</span>通配符 - 批量 chunk</>}
           rows={[
             ["Host", "co-dev-18.shimorelease.com"],
             ["路径匹配", "/minio/shimo-assets/table/*.chunk.js"],
@@ -238,7 +249,7 @@ function ApiForwardExamplesSection() {
       <summary>
         <ChevronIcon />
         <span className="acc-title">API 转发示例</span>
-        <span className="acc-badge">4 个场景</span>
+        <span className="acc-badge">7 个场景</span>
       </summary>
       <div className="about-accordion-body">
         <h3>1. 将接口转发到本地服务</h3>
@@ -284,6 +295,38 @@ function ApiForwardExamplesSection() {
             ["自定义头", `{"X-Debug": "true", "X-User-Id": "test-123"}`],
           ]}
           note="转发时自动附加额外 Header，方便调试权限、灰度等逻辑。"
+        />
+
+        <h3>5. 修改真实接口的 JSON 响应</h3>
+        <ExampleBlock
+          badge={<><span className="example-badge badge-api">API 转发</span>响应合并覆盖</>}
+          rows={[
+            ["响应来源", "请求上游并返回"],
+            ["JSON 合并覆盖", `{"data":{"name":"本地调试用户","role":null},"debug":true}`],
+          ]}
+          note={<>对象字段会递归合并到上游 JSON；值为 <code>null</code> 的字段会从最终响应中删除。</>}
+        />
+
+        <h3>6. 直接返回内联 JSON</h3>
+        <ExampleBlock
+          badge={<><span className="example-badge badge-api">API 转发</span>内联 Mock</>}
+          rows={[
+            ["响应来源", "直接返回内联 JSON"],
+            ["状态码", "404"],
+            ["返回 JSON", `{"code":"USER_NOT_FOUND","data":null}`],
+          ]}
+          note="命中后不会请求目标地址，适合快速联调空态、异常态和权限态。"
+        />
+
+        <h3>7. 用本地 JSON 文件替代响应</h3>
+        <ExampleBlock
+          badge={<><span className="example-badge badge-api">API 转发</span>文件 Mock</>}
+          rows={[
+            ["响应来源", "返回本地 JSON 文件"],
+            ["文件路径", "./mocks/user-detail.json"],
+            ["延迟", "800 ms"],
+          ]}
+          note="相对路径以本地转发服务的启动目录为基准；只接受不超过 4 MiB 的 .json 文件。"
         />
       </div>
     </details>
@@ -351,14 +394,27 @@ function FaqSection() {
         <h3>SSE / 大文件下载为什么没被代理？</h3>
         <p>
           本地服务在转发前会检查响应：<code>Content-Type: text/event-stream</code>（SSE）或 <code>Content-Length</code> 超过 4 MiB 时
-          自动放行到原生 fetch / XHR，规则视为「未命中」（命中日志中显示 <code>passed</code>）。
-          这是有意为之——若把它们整块缓冲到 base64 再回传，会破坏 <code>EventSource</code> / <code>ReadableStream</code> 的流式语义，并可能撑爆扩展消息通道。
+          默认放行到原生 fetch / XHR（命中日志中显示 <code>passed</code>）。如果规则选择了<strong>代理失败时直接报错</strong>，则不会回源。
+          这是有意为之。若把它们整块缓冲到 base64 再回传，会破坏 <code>EventSource</code> / <code>ReadableStream</code> 的流式语义，并可能撑爆扩展消息通道。
+        </p>
+
+        <h3>为什么建议写接口关闭“无法代理时回源”？</h3>
+        <p>
+          默认回源能保证扩展本地服务离线、SSE 或大请求/响应无法通过消息通道时页面继续工作，但也可能把写请求重新发到共享测试或线上地址。
+          对会修改数据的接口，建议在规则高级设置中选择<strong>直接报错，不回源</strong>。
+        </p>
+
+        <h3>如何修改接口响应，或完全不请求上游？</h3>
+        <p>
+          在规则高级设置的<strong>响应行为</strong>中选择：<strong>请求上游并返回</strong>可用 JSON 合并覆盖修改真实响应；
+          <strong>直接返回内联 JSON</strong>适合快速构造状态；<strong>返回本地 JSON 文件</strong>适合维护较大的 Mock 数据。
+          三种模式都能覆盖状态码、状态描述、响应 Header，并添加最多 30 秒延迟。
         </p>
 
         <h3>转发请求里的 Cookie 何时会保留？</h3>
         <p>
-          目标地址 <strong>同 host</strong>（例如 <code>app.example.com</code> → <code>https://app.example.com</code>）时，<code>Cookie</code>、<code>Origin</code>、<code>Referer</code> 默认透传，方便保持会话。
-          <strong>跨域</strong>转发时（例如转到 <code>localhost</code>）默认剥离这三类头，避免上游因校验失败而拒绝请求。需要强制跨域带 cookie，请在规则的 Header Policy 里把 <code>cookie</code> 写入 <code>passthrough</code> 列表。
+          目标地址 <strong>同 host</strong>（例如 <code>app.example.com</code> → <code>https://app.example.com</code>）时，扩展会自动读取当前请求域的 Cookie 并补到转发请求中，方便保持会话。
+          <strong>跨域</strong>转发时（例如转到 <code>localhost</code>）默认不带 Cookie。需要强制跨域带 Cookie，请在高级设置的“强制透传 Header”中加入 <code>cookie</code>；扩展会通过 Chrome cookies 权限读取当前请求域的 Cookie（包括 HttpOnly）再转发。
         </p>
 
         <h3>Authorization 等敏感头会以明文存盘吗？</h3>
@@ -368,14 +424,14 @@ function FaqSection() {
 
         <h3>升级到 0.x 后，部分规则路径不再命中？</h3>
         <p>
-          这一版统一了 <code>pathGlob</code> 的语义——<strong>单个 <code>*</code> 不再跨 <code>/</code></strong>。如果你之前依赖 <code>/api/*</code> 同时匹配 <code>/api/users/42</code>，请改成 <code>/api/**</code>。
+          这一版统一了 <code>pathGlob</code> 的语义：<strong>单个 <code>*</code> 不再跨 <code>/</code></strong>。如果你之前依赖 <code>/api/*</code> 同时匹配 <code>/api/users/42</code>，请改成 <code>/api/**</code>。
         </p>
 
         <h3>sidepanel 显示「未匹配」时，为什么资源还被替换？</h3>
         <p>
           asset_redirect 规则注册到 Chrome DNR 时会绑定到项目的 <code>siteHosts</code>（<code>initiatorDomains</code>）：
           原则上只有项目站点页面发起的请求才能被替换。如果 sidepanel hero 区显示
-          <strong>橙色</strong>的「N 条 DNR 已注册」徽章，说明 Chrome 中仍注册着 N 条规则——
+          <strong>橙色</strong>的「N 条 DNR 已注册」徽章，说明 Chrome 中仍注册着 N 条规则。
           通常是 workspace 视角下当前页面已不匹配，或 DNR 还未随 workspace 变更同步清理。
           在 background DevTools 跑 <code>await chrome.declarativeNetRequest.getDynamicRules()</code>
           可查看真实下发的规则集；扩展会在下次 commitWorkspace 或 <code>chrome.alarms</code> 周期（约 1 分钟）

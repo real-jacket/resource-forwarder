@@ -24,10 +24,12 @@ import {
   collectRuleConflicts,
   collectUnsupportedRuleWarnings,
   collectWorkspaceWarnings,
+  matchesHeaders,
   matchesHost,
   matchesMethod,
   matchesPath,
   matchesProjectSite,
+  matchesQuery,
   matchesResourceType,
   matchesRule,
   matchesRuleSetSite,
@@ -493,21 +495,39 @@ function registerRoutes(
       // primitives selection uses, so the trace can't drift from reality.
       const trace: MatchTraceEntry[] = workspace.rules.map((rule) => {
         const resolved = resolveRuleBinding(workspace, rule.id);
+        const hierarchy = Boolean(resolved?.ruleSet && resolved.project);
+        const projectScope = hierarchy && context.pageUrl
+          ? matchesProjectSite(resolved!.project!, context.pageUrl)
+          : hierarchy;
+        const ruleSetScope = hierarchy && context.pageUrl
+          ? matchesRuleSetSite(resolved!.ruleSet!, resolved!.project!, context.pageUrl)
+          : hierarchy;
         const enabled =
+          hierarchy &&
           rule.enabled &&
-          (resolved?.ruleSet ? resolved.ruleSet.enabled : true) &&
-          (resolved?.project ? resolved.project.enabled : true);
+          resolved!.ruleSet!.enabled &&
+          resolved!.project!.enabled;
         const conditions = {
+          hierarchy,
+          projectScope,
+          ruleSetScope,
           host: matchesHost(rule.match.host, context.host),
           path: matchesPath(rule.match.pathGlob, context.pathname),
+          query: matchesQuery(rule.match, context.query),
+          headers: matchesHeaders(rule.match, context.headers),
           method: matchesMethod(rule.match, context.method),
           resourceType: matchesResourceType(rule.match, context.resourceType),
           tabScope: matchesTabScope(rule.match, context.tabId),
         };
         const wouldMatch =
           enabled &&
+          conditions.hierarchy &&
+          conditions.projectScope &&
+          conditions.ruleSetScope &&
           conditions.host &&
           conditions.path &&
+          conditions.query &&
+          conditions.headers &&
           conditions.method &&
           conditions.resourceType &&
           conditions.tabScope;
@@ -525,9 +545,15 @@ function registerRoutes(
       try {
         if (binding.rule.kind === "api_forward" && binding.rule.target.forwardProfile) {
           const profile = resolveForwardProfile(binding);
-          rewrittenUrl = profile
-            ? buildForwardTargetUrl(profile, new URL(request.body.url)).toString()
-            : undefined;
+          if (profile?.responsePolicy?.mode === "mock_json") {
+            rewrittenUrl = "mock:inline-json";
+          } else if (profile?.responsePolicy?.mode === "mock_file") {
+            rewrittenUrl = "mock:local-json-file";
+          } else {
+            rewrittenUrl = profile
+              ? buildForwardTargetUrl(profile, new URL(request.body.url)).toString()
+              : undefined;
+          }
         } else if (binding.rule.kind === "asset_redirect") {
           rewrittenUrl = resolveRuleTargetValue(binding.rule.target.redirectUrl, binding);
         }

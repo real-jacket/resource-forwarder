@@ -39,6 +39,13 @@ export function resolveForwardProfile(
     return undefined;
   }
 
+  if (profile.responsePolicy?.mode === "mock_json" || profile.responsePolicy?.mode === "mock_file") {
+    return {
+      ...profile,
+      targetBaseUrl: profile.targetBaseUrl?.trim() ?? "",
+    };
+  }
+
   const resolvedTargetBaseUrl = resolveRuleTargetValue(profile.targetBaseUrl, binding);
   if (!resolvedTargetBaseUrl) {
     return undefined;

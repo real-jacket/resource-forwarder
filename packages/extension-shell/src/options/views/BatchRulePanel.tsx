@@ -2,6 +2,7 @@ import React from "react";
 import type { Project, RuleSet } from "@resource-forwarder/shared-types";
 import type { BatchRuleDraft } from "../types.js";
 import { mergeRuleDraftByKind } from "../drafts.js";
+import { CustomSelect } from "../components/CustomSelect.js";
 
 export interface BatchRulePanelProps {
   drafts: BatchRuleDraft[];
@@ -81,19 +82,19 @@ export function BatchRulePanel({
         {projectRuleSets.length > 0 && (
           <div className="form-group">
             <label className="form-label">目标分组</label>
-            <select
-              className="form-input"
+            <CustomSelect
+              className="cs-form"
               value={activeRuleSetId}
-              onChange={(e) => changeTargetRuleSet(e.target.value)}
+              options={projectRuleSets.map((ruleSet) => ({
+                value: ruleSet.id,
+                label: ruleSet.name,
+                description: ruleSet.enabled ? undefined : "分组已停用",
+                disabled: !ruleSet.enabled,
+              }))}
+              onChange={changeTargetRuleSet}
               disabled={busy}
-            >
-              {projectRuleSets.map((rs) => (
-                <option key={rs.id} value={rs.id}>
-                  {rs.name}
-                  {rs.enabled ? "" : "（已停用）"}
-                </option>
-              ))}
-            </select>
+              ariaLabel="目标分组"
+            />
             <span className="form-hint">本次新增的所有规则都将归到此分组下。</span>
           </div>
         )}

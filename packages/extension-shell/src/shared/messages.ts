@@ -3,6 +3,8 @@ import type {
   ForwardRequestPayload,
   ImportWorkspacePayload,
   LogsResponse,
+  MatchRequestPayload,
+  MatchResponse,
   RuleSet,
   RuntimeState,
   ServiceHealthResponse,
@@ -41,6 +43,7 @@ export type RuntimeRequest =
   | { type: "upsert-rule-set"; payload: { ruleSet: RuleSet } }
   | { type: "delete-rule-set"; ruleSetId: string }
   | { type: "get-logs"; limit?: number; projectId?: string }
+  | { type: "diagnose-match"; payload: MatchRequestPayload }
   | { type: "import-workspace"; payload: ImportWorkspacePayload }
   | { type: "export-workspace"; projectIds: string[]; format: "json" | "yaml" }
   | { type: "get-site-context"; url: string; tabId?: number }
@@ -61,6 +64,7 @@ export async function runtimeRequest<T>(request: RuntimeRequest): Promise<T> {
 }
 
 export type GetLogsResponse = LogsResponse;
+export type DiagnoseMatchResponse = MatchResponse;
 export type GetSiteContextResponse = SiteContextPayload;
 export type GetDashboardStateResponse = DashboardState;
 export type SetServiceUrlResponse = RuntimeState & { warnings: string[] };

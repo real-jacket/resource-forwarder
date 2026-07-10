@@ -793,6 +793,9 @@ describe("forwarder-service", () => {
       // host matches app.example.com, but /other/thing is outside /api/** — the
       // trace pinpoints the path condition as the reason rule-api did not fire.
       const apiTrace = body.trace.find((entry: { ruleId: string }) => entry.ruleId === "rule-api");
+      expect(apiTrace.conditions.hierarchy).toBe(true);
+      expect(apiTrace.conditions.projectScope).toBe(true);
+      expect(apiTrace.conditions.ruleSetScope).toBe(true);
       expect(apiTrace.conditions.host).toBe(true);
       expect(apiTrace.conditions.path).toBe(false);
       expect(apiTrace.wouldMatch).toBe(false);
@@ -800,6 +803,67 @@ describe("forwarder-service", () => {
       const disabledTrace = body.trace.find((entry: { ruleId: string }) => entry.ruleId === "rule-disabled");
       expect(disabledTrace.enabled).toBe(false);
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /match explains misses caused by project and rule-set page scopes", async () => {
+      const workspace = await storage.readWorkspace();
+      workspace.projects[0].siteMatchPatterns = ["https://app.example.com/**"];
+      workspace.ruleSets[0].siteMatchPatterns = ["https://app.example.com/tables/**"];
+      await storage.importWorkspace({ format: "json", merge: false, content: JSON.stringify(workspace) });
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/match",
+        payload: {
+          url: "https://app.example.com/api/profile",
+          pageUrl: "https://app.example.com/sheets/abc",
+          method: "GET",
+          resourceType: "fetch",
+        },
+      });
+
+      expect(response.json().matched).toBe(false);
+      const trace = response.json().trace.find((entry: { ruleId: string }) => entry.ruleId === "rule-api");
+      expect(trace.conditions.hierarchy).toBe(true);
+      expect(trace.conditions.projectScope).toBe(true);
+      expect(trace.conditions.ruleSetScope).toBe(false);
+      expect(trace.conditions.host).toBe(true);
+      expect(trace.conditions.path).toBe(true);
+      expect(trace.wouldMatch).toBe(false);
+    });
+
+    it("POST /match diagnoses query and header constraints independently", async () => {
+      const workspace = await storage.readWorkspace();
+      const apiRule = workspace.rules.find((rule) => rule.id === "rule-api")!;
+      apiRule.match.query = { tenant: "dev-*" };
+      apiRule.match.headers = { "x-client": "web-*" };
+      await storage.importWorkspace({ format: "json", merge: false, content: JSON.stringify(workspace) });
+
+      const miss = await app.inject({
+        method: "POST",
+        url: "/match",
+        payload: {
+          url: "https://app.example.com/api/profile?tenant=prod",
+          method: "GET",
+          resourceType: "fetch",
+          headers: { "x-client": "web-shell" },
+        },
+      });
+      const missTrace = miss.json().trace.find((entry: { ruleId: string }) => entry.ruleId === "rule-api");
+      expect(missTrace.conditions.query).toBe(false);
+      expect(missTrace.conditions.headers).toBe(true);
+
+      const hit = await app.inject({
+        method: "POST",
+        url: "/match",
+        payload: {
+          url: "https://app.example.com/api/profile?tenant=dev-a",
+          method: "GET",
+          resourceType: "fetch",
+          headers: { "X-Client": "web-shell" },
+        },
+      });
+      expect(hit.json().matched).toBe(true);
     });
 
     it("POST /match returns 400 for a malformed url instead of crashing", async () => {

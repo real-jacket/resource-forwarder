@@ -72,7 +72,24 @@ export function mergeRuleDraftByKind<T extends RuleDraft | BatchRuleDraft>(
     redirectUrl: kind === "asset_redirect" ? (patch.redirectUrl ?? draft.redirectUrl) : "",
     targetBaseUrl: kind === "api_forward" ? (patch.targetBaseUrl ?? draft.targetBaseUrl) : "",
     stripPrefix: kind === "api_forward" ? (patch.stripPrefix ?? draft.stripPrefix) : "",
+    pathRewriteJson: kind === "api_forward" ? (patch.pathRewriteJson ?? draft.pathRewriteJson ?? "[]") : "",
+    queryRemove: kind === "api_forward" ? (patch.queryRemove ?? draft.queryRemove ?? "") : "",
+    querySetJson: kind === "api_forward" ? (patch.querySetJson ?? draft.querySetJson ?? "{}") : "",
+    queryAppendJson: kind === "api_forward" ? (patch.queryAppendJson ?? draft.queryAppendJson ?? "{}") : "",
     headersJson: kind === "api_forward" ? (patch.headersJson ?? draft.headersJson ?? "{}") : "",
+    headerStrip: kind === "api_forward" ? (patch.headerStrip ?? draft.headerStrip ?? "") : "",
+    headerPassthrough: kind === "api_forward" ? (patch.headerPassthrough ?? draft.headerPassthrough ?? "") : "",
+    responseMode: kind === "api_forward" ? (patch.responseMode ?? draft.responseMode ?? "forward") : "forward",
+    responseStatus: kind === "api_forward" ? (patch.responseStatus ?? draft.responseStatus ?? "") : "",
+    responseStatusText: kind === "api_forward" ? (patch.responseStatusText ?? draft.responseStatusText ?? "") : "",
+    responseDelayMs: kind === "api_forward" ? (patch.responseDelayMs ?? draft.responseDelayMs ?? 0) : 0,
+    responseJsonPatch: kind === "api_forward" ? (patch.responseJsonPatch ?? draft.responseJsonPatch ?? "") : "",
+    responseMockJson: kind === "api_forward" ? (patch.responseMockJson ?? draft.responseMockJson ?? "{}") : "{}",
+    responseMockFilePath: kind === "api_forward" ? (patch.responseMockFilePath ?? draft.responseMockFilePath ?? "") : "",
+    responseHeadersJson: kind === "api_forward" ? (patch.responseHeadersJson ?? draft.responseHeadersJson ?? "{}") : "",
+    responseHeaderStrip: kind === "api_forward" ? (patch.responseHeaderStrip ?? draft.responseHeaderStrip ?? "") : "",
+    timeoutMs: kind === "api_forward" ? (patch.timeoutMs ?? draft.timeoutMs ?? 15000) : 15000,
+    fallbackMode: kind === "api_forward" ? (patch.fallbackMode ?? draft.fallbackMode ?? "native") : "native",
   };
   return { ...base, ...patch } as T;
 }
@@ -88,6 +105,8 @@ export function createRuleDraft(options?: {
   rule?: Rule;
 }): RuleDraft {
   const kind = options?.rule?.kind ?? options?.kind ?? "api_forward";
+  const forwardProfile = options?.rule?.target.forwardProfile;
+  const responsePolicy = forwardProfile?.responsePolicy;
   return {
     id: options?.rule?.id ?? "",
     ruleSetId: options?.ruleSet?.id ?? "",
@@ -97,6 +116,8 @@ export function createRuleDraft(options?: {
     priority: options?.rule?.priority ?? 100,
     host: joinCsv(options?.rule?.match.host ?? options?.project?.siteHosts),
     pathGlob: options?.rule?.match.pathGlob ?? (kind === "api_forward" ? "/api/**" : "/assets/**"),
+    queryMatchJson: JSON.stringify(options?.rule?.match.query ?? {}, null, 2),
+    headerMatchJson: JSON.stringify(options?.rule?.match.headers ?? {}, null, 2),
     resourceType: joinCsv(
       kind === "asset_redirect"
         ? normalizeAssetResourceTypes(options?.rule?.match.resourceType, options?.rule?.match.pathGlob) ?? defaultAssetTypes
@@ -104,9 +125,29 @@ export function createRuleDraft(options?: {
     ),
     method: joinCsv(options?.rule?.match.method ?? (kind === "api_forward" ? ["GET", "POST"] : undefined)),
     redirectUrl: options?.rule?.target.redirectUrl ?? "",
-    targetBaseUrl: options?.rule?.target.forwardProfile?.targetBaseUrl ?? "",
-    stripPrefix: options?.rule?.target.forwardProfile?.stripPrefix ?? "",
-    headersJson: JSON.stringify(options?.rule?.target.forwardProfile?.headers ?? {}, null, 2),
+    targetBaseUrl: forwardProfile?.targetBaseUrl ?? "",
+    stripPrefix: forwardProfile?.stripPrefix ?? "",
+    pathRewriteJson: JSON.stringify(forwardProfile?.pathRewrite ?? [], null, 2),
+    queryRemove: joinCsv(forwardProfile?.queryPolicy?.remove),
+    querySetJson: JSON.stringify(forwardProfile?.queryPolicy?.set ?? {}, null, 2),
+    queryAppendJson: JSON.stringify(forwardProfile?.queryPolicy?.append ?? {}, null, 2),
+    headersJson: JSON.stringify(forwardProfile?.headers ?? {}, null, 2),
+    headerStrip: joinCsv(forwardProfile?.headerPolicy?.strip),
+    headerPassthrough: joinCsv(forwardProfile?.headerPolicy?.passthrough),
+    responseMode: responsePolicy?.mode ?? "forward",
+    responseStatus: responsePolicy?.status?.toString() ?? "",
+    responseStatusText: responsePolicy?.statusText ?? "",
+    responseDelayMs: responsePolicy?.delayMs ?? 0,
+    responseJsonPatch:
+      responsePolicy?.jsonMergePatch === undefined
+        ? ""
+        : JSON.stringify(responsePolicy.jsonMergePatch, null, 2),
+    responseMockJson: JSON.stringify(responsePolicy?.mockJson ?? {}, null, 2),
+    responseMockFilePath: responsePolicy?.mockFilePath ?? "",
+    responseHeadersJson: JSON.stringify(forwardProfile?.responseHeaderPolicy?.set ?? {}, null, 2),
+    responseHeaderStrip: joinCsv(forwardProfile?.responseHeaderPolicy?.strip),
+    timeoutMs: forwardProfile?.timeoutMs ?? 15000,
+    fallbackMode: forwardProfile?.fallbackMode ?? "native",
     tags: joinCsv(options?.rule?.tags),
     note: options?.rule?.note ?? "",
   };
@@ -141,7 +182,24 @@ export function createBatchRuleDraft(options?: {
     redirectUrl: source?.kind === "asset_redirect" ? source.redirectUrl : base.redirectUrl,
     targetBaseUrl: source?.kind === "api_forward" ? source.targetBaseUrl : base.targetBaseUrl,
     stripPrefix: source?.kind === "api_forward" ? source.stripPrefix : base.stripPrefix,
+    pathRewriteJson: source?.kind === "api_forward" ? source.pathRewriteJson : base.pathRewriteJson,
+    queryRemove: source?.kind === "api_forward" ? source.queryRemove : base.queryRemove,
+    querySetJson: source?.kind === "api_forward" ? source.querySetJson : base.querySetJson,
+    queryAppendJson: source?.kind === "api_forward" ? source.queryAppendJson : base.queryAppendJson,
     headersJson: source?.kind === "api_forward" ? source.headersJson : base.headersJson,
+    headerStrip: source?.kind === "api_forward" ? source.headerStrip : base.headerStrip,
+    headerPassthrough: source?.kind === "api_forward" ? source.headerPassthrough : base.headerPassthrough,
+    responseMode: source?.kind === "api_forward" ? source.responseMode : base.responseMode,
+    responseStatus: source?.kind === "api_forward" ? source.responseStatus : base.responseStatus,
+    responseStatusText: source?.kind === "api_forward" ? source.responseStatusText : base.responseStatusText,
+    responseDelayMs: source?.kind === "api_forward" ? source.responseDelayMs : base.responseDelayMs,
+    responseJsonPatch: source?.kind === "api_forward" ? source.responseJsonPatch : base.responseJsonPatch,
+    responseMockJson: source?.kind === "api_forward" ? source.responseMockJson : base.responseMockJson,
+    responseMockFilePath: source?.kind === "api_forward" ? source.responseMockFilePath : base.responseMockFilePath,
+    responseHeadersJson: source?.kind === "api_forward" ? source.responseHeadersJson : base.responseHeadersJson,
+    responseHeaderStrip: source?.kind === "api_forward" ? source.responseHeaderStrip : base.responseHeaderStrip,
+    timeoutMs: source?.kind === "api_forward" ? source.timeoutMs : base.timeoutMs,
+    fallbackMode: source?.kind === "api_forward" ? source.fallbackMode : base.fallbackMode,
     tags: source?.tags ?? base.tags,
   };
 }
@@ -177,10 +235,38 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
       ? (normalizeAssetResourceTypes(resourceType, draft.pathGlob) ?? resourceType)
       : resourceType;
   const method = splitCsv(draft.method);
+  const queryMatch = draft.kind === "api_forward" ? parseStringRecord(draft.queryMatchJson, "查询参数匹配") : {};
+  const headerMatch = draft.kind === "api_forward" ? parseStringRecord(draft.headerMatchJson, "请求 Header 匹配") : {};
   const headers =
     draft.kind === "api_forward" && draft.headersJson.trim()
-      ? (JSON.parse(draft.headersJson) as Record<string, string>)
+      ? parseStringRecord(draft.headersJson, "注入 Header")
       : {};
+  const pathRewrite = draft.kind === "api_forward" ? parsePathRewrite(draft.pathRewriteJson) : [];
+  const querySet = draft.kind === "api_forward" ? parseStringRecord(draft.querySetJson, "Query 覆盖") : {};
+  const queryAppend = draft.kind === "api_forward" ? parseStringArrayRecord(draft.queryAppendJson, "Query 追加") : {};
+  const responseStatus = draft.kind === "api_forward" ? parseOptionalStatus(draft.responseStatus) : undefined;
+  const responseDelayMs = draft.kind === "api_forward" ? parseResponseDelay(draft.responseDelayMs) : 0;
+  const responseJsonPatch =
+    draft.kind === "api_forward" ? parseOptionalJsonValue(draft.responseJsonPatch, "响应 JSON 合并覆盖") : undefined;
+  const responseMockJson =
+    draft.kind === "api_forward" && draft.responseMode === "mock_json"
+      ? parseJsonValue(draft.responseMockJson, "Mock JSON")
+      : undefined;
+  const responseHeaders = draft.kind === "api_forward" ? parseStringRecord(draft.responseHeadersJson, "响应 Header") : {};
+  const hasResponsePolicy =
+    draft.kind === "api_forward" &&
+    (draft.responseMode !== "forward" ||
+      responseStatus !== undefined ||
+      Boolean(draft.responseStatusText.trim()) ||
+      responseDelayMs > 0 ||
+      responseJsonPatch !== undefined);
+
+  if (draft.kind === "api_forward" && draft.responseMode === "forward" && !draft.targetBaseUrl.trim()) {
+    throw new Error("转发真实响应时必须填写目标地址。");
+  }
+  if (draft.kind === "api_forward" && draft.responseMode === "mock_file" && !draft.responseMockFilePath.trim()) {
+    throw new Error("使用本地 JSON 文件时必须填写文件路径。");
+  }
 
   return {
     id: draft.id || createId("rule"),
@@ -191,6 +277,8 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
     match: {
       host: host.length > 0 ? host : project.siteHosts,
       pathGlob: sanitizePathGlob(draft.pathGlob || "**"),
+      query: Object.keys(queryMatch).length > 0 ? queryMatch : undefined,
+      headers: Object.keys(headerMatch).length > 0 ? headerMatch : undefined,
       resourceType:
         normalizedAssetResourceType.length > 0
           ? normalizedAssetResourceType
@@ -207,7 +295,37 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
             forwardProfile: {
               targetBaseUrl: draft.targetBaseUrl.trim(),
               stripPrefix: draft.stripPrefix.trim() || undefined,
+              pathRewrite: pathRewrite.length > 0 ? pathRewrite : undefined,
+              queryPolicy: {
+                remove: splitCsv(draft.queryRemove),
+                set: querySet,
+                append: queryAppend,
+              },
               headers,
+              headerPolicy: {
+                strip: splitCsv(draft.headerStrip),
+                passthrough: splitCsv(draft.headerPassthrough),
+              },
+              responsePolicy: hasResponsePolicy
+                ? {
+                    mode: draft.responseMode,
+                    status: responseStatus,
+                    statusText: draft.responseStatusText.trim() || undefined,
+                    delayMs: responseDelayMs || undefined,
+                    jsonMergePatch: responseJsonPatch,
+                    mockJson: responseMockJson,
+                    mockFilePath:
+                      draft.responseMode === "mock_file"
+                        ? draft.responseMockFilePath.trim()
+                        : undefined,
+                  }
+                : undefined,
+              responseHeaderPolicy: {
+                strip: splitCsv(draft.responseHeaderStrip),
+                set: responseHeaders,
+              },
+              timeoutMs: Number.isFinite(draft.timeoutMs) && draft.timeoutMs > 0 ? draft.timeoutMs : 15000,
+              fallbackMode: draft.fallbackMode,
             },
           },
     note: draft.note.trim() || undefined,
@@ -215,6 +333,82 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
+}
+
+function parseStringRecord(value: string, label: string): Record<string, string> {
+  const parsed = parseJson(value, label);
+  if (!isPlainRecord(parsed) || Object.values(parsed).some((item) => typeof item !== "string")) {
+    throw new Error(`${label}必须是字符串键值 JSON 对象。`);
+  }
+  return parsed as Record<string, string>;
+}
+
+function parseStringArrayRecord(value: string, label: string): Record<string, string[]> {
+  const parsed = parseJson(value, label);
+  if (
+    !isPlainRecord(parsed) ||
+    Object.values(parsed).some(
+      (item) => !Array.isArray(item) || item.some((entry) => typeof entry !== "string"),
+    )
+  ) {
+    throw new Error(`${label}必须是字符串数组键值 JSON 对象。`);
+  }
+  return parsed as Record<string, string[]>;
+}
+
+function parsePathRewrite(value: string): Array<{ from: string; to: string }> {
+  const parsed = parseJson(value, "路径改写");
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some(
+      (item) => !isPlainRecord(item) || typeof item.from !== "string" || typeof item.to !== "string",
+    )
+  ) {
+    throw new Error('路径改写必须是 [{"from":"/api","to":"/v1"}] 格式。');
+  }
+  return parsed as Array<{ from: string; to: string }>;
+}
+
+function parseOptionalStatus(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const status = Number(trimmed);
+  if (!Number.isInteger(status) || status < 100 || status > 599) {
+    throw new Error("响应状态码必须是 100 到 599 之间的整数。");
+  }
+  return status;
+}
+
+function parseResponseDelay(value: number): number {
+  if (!Number.isFinite(value) || value < 0 || value > 30000) {
+    throw new Error("响应延迟必须在 0 到 30000 毫秒之间。");
+  }
+  return Math.round(value);
+}
+
+function parseOptionalJsonValue(value: string, label: string): unknown | undefined {
+  if (!value.trim()) return undefined;
+  return parseJsonValue(value, label);
+}
+
+function parseJsonValue(value: string, label: string): unknown {
+  try {
+    return JSON.parse(value.trim());
+  } catch {
+    throw new Error(`${label}不是合法 JSON。`);
+  }
+}
+
+function parseJson(value: string, label: string): unknown {
+  try {
+    return JSON.parse(value.trim() || (label === "路径改写" ? "[]" : "{}"));
+  } catch {
+    throw new Error(`${label}不是合法 JSON。`);
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function defaultResourceTypeText(kind: Rule["kind"]): string {

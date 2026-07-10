@@ -44,24 +44,27 @@ export function prepareMatcher(workspace: WorkspaceSnapshot): MatcherCache {
   const projectById = new Map<string, RuleBinding["project"]>();
   for (const project of workspace.projects) projectById.set(project.id, project);
 
-  const ruleSetByRuleId = new Map<string, RuleBinding["ruleSet"]>();
+  const ruleSetsByRuleId = new Map<string, NonNullable<RuleBinding["ruleSet"]>[]>();
   for (const ruleSet of workspace.ruleSets) {
-    if (!ruleSet.enabled) continue;
-    for (const id of ruleSet.ruleIds) ruleSetByRuleId.set(id, ruleSet);
+    for (const id of ruleSet.ruleIds) {
+      const memberships = ruleSetsByRuleId.get(id) ?? [];
+      memberships.push(ruleSet);
+      ruleSetsByRuleId.set(id, memberships);
+    }
   }
 
   const compiled: CompiledBinding[] = [];
   for (const rule of sortRulesInPlace(workspace.rules.slice())) {
     if (!rule.enabled) continue;
-    const ruleSet = ruleSetByRuleId.get(rule.id);
-    // A rule that doesn't belong to any enabled ruleSet (could be an orphan,
-    // or a member of a disabled ruleSet) is dropped early so the inner loop
-    // doesn't even consider it. Note: rules without a ruleSet are still
-    // matchable to keep parity with resolveRuleBinding's lenient behavior.
-    const linkedRuleSet = ruleSet ?? findRuleSetForRule(workspace, rule.id);
-    if (linkedRuleSet && !linkedRuleSet.enabled) continue;
-    const project = linkedRuleSet ? projectById.get(linkedRuleSet.projectId) : undefined;
-    if (project && !project.enabled) continue;
+    const memberships = ruleSetsByRuleId.get(rule.id) ?? [];
+    // A rule must have one unambiguous ownership chain. Orphans and rules
+    // listed by multiple rule sets are kept visible in the editor but cannot
+    // fire, which prevents them from escaping page-scope boundaries.
+    if (memberships.length !== 1) continue;
+    const linkedRuleSet = memberships[0];
+    if (!linkedRuleSet.enabled) continue;
+    const project = projectById.get(linkedRuleSet.projectId);
+    if (!project?.enabled) continue;
 
     compiled.push({
       binding: { rule, ruleSet: linkedRuleSet, project },
@@ -91,6 +94,8 @@ export function prepareMatcher(workspace: WorkspaceSnapshot): MatcherCache {
         if (!matchesSiteScope(entry.binding, getPageUrl(context))) continue;
         if (!entry.matchHost(context.host)) continue;
         if (!entry.matchPath(context.pathname)) continue;
+        if (!matchesQuery(entry.match, context.query)) continue;
+        if (!matchesHeaders(entry.match, context.headers)) continue;
         if (!matchesResourceType(entry.match, context.resourceType)) continue;
         if (!matchesMethod(entry.match, context.method)) continue;
         if (!matchesTabScope(entry.match, context.tabId)) continue;
@@ -132,13 +137,6 @@ function sortRulesInPlace(rules: Rule[]): Rule[] {
     return left.id.localeCompare(right.id);
   });
   return rules;
-}
-
-function findRuleSetForRule(workspace: WorkspaceSnapshot, ruleId: string): RuleBinding["ruleSet"] | undefined {
-  for (const ruleSet of workspace.ruleSets) {
-    if (ruleSet.ruleIds.includes(ruleId)) return ruleSet;
-  }
-  return undefined;
 }
 
 /**
@@ -190,6 +188,33 @@ function buildPathMatcher(pathGlob: string | undefined): (pathname: string) => b
 function matchesResourceType(match: MatchCondition, resourceType: MatchResourceType): boolean {
   if (!match.resourceType || match.resourceType.length === 0) return true;
   return match.resourceType.includes(resourceType);
+}
+
+function matchesQuery(match: MatchCondition, query: Record<string, string[]> | undefined): boolean {
+  if (!match.query || Object.keys(match.query).length === 0) return true;
+  const actual = query ?? {};
+  for (const [name, pattern] of Object.entries(match.query)) {
+    const values = actual[name];
+    if (!values?.some((value) => matchesValuePattern(pattern, value))) return false;
+  }
+  return true;
+}
+
+function matchesHeaders(match: MatchCondition, headers: Record<string, string> | undefined): boolean {
+  if (!match.headers || Object.keys(match.headers).length === 0) return true;
+  const normalized = new Map<string, string>();
+  for (const [name, value] of Object.entries(headers ?? {})) normalized.set(name.toLowerCase(), value);
+  for (const [name, pattern] of Object.entries(match.headers)) {
+    const value = normalized.get(name.toLowerCase());
+    if (value === undefined || !matchesValuePattern(pattern, value)) return false;
+  }
+  return true;
+}
+
+function matchesValuePattern(pattern: string, value: string): boolean {
+  if (pattern === "*") return true;
+  const source = escapeRegex(pattern).replace(/\\\*/g, ".*").replace(/\\\?/g, ".");
+  return new RegExp(`^${source}$`).test(value);
 }
 
 function matchesMethod(match: MatchCondition, method: string): boolean {

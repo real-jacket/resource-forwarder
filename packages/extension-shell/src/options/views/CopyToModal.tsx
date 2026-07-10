@@ -1,6 +1,7 @@
 import React from "react";
 import type { Project, Rule, RuleSet } from "@resource-forwarder/shared-types";
 import type { CopyDraft } from "../types.js";
+import { CustomSelect } from "../components/CustomSelect.js";
 
 export interface CopyToModalProps {
   draft: CopyDraft;
@@ -67,32 +68,32 @@ export function CopyToModal({
             <label className="form-label">
               目标站点 <span className="form-label-required">*</span>
             </label>
-            <select
-              className="form-input"
+            <CustomSelect
+              className="cs-form"
               value={draft.targetProjectId}
-              onChange={(event) =>
+              placeholder="请选择站点"
+              options={projects.map((project) => ({
+                value: project.id,
+                label: project.name,
+                description: project.enabled ? undefined : "站点已停用",
+                disabled: !project.enabled,
+              }))}
+              onChange={(value) =>
                 setDraft((prev) =>
                   prev.mode === "rule"
                     ? {
                         ...prev,
-                        targetProjectId: event.target.value,
+                        targetProjectId: value,
                         targetRuleSetId: "",
                       }
                     : {
                         ...prev,
-                        targetProjectId: event.target.value,
+                        targetProjectId: value,
                       },
                 )
               }
-            >
-              <option value="">请选择站点</option>
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                  {project.enabled ? "" : "（已停用）"}
-                </option>
-              ))}
-            </select>
+              ariaLabel="目标站点"
+            />
           </div>
 
           {isRuleMode && (
@@ -100,35 +101,35 @@ export function CopyToModal({
               <label className="form-label">
                 目标分组 <span className="form-label-required">*</span>
               </label>
-              <select
-                className="form-input"
+              <CustomSelect
+                className="cs-form"
                 value={draft.targetRuleSetId}
-                onChange={(event) =>
+                placeholder={
+                  draft.targetProjectId
+                    ? targetRuleSets.length > 0
+                      ? "请选择分组"
+                      : "目标站点下暂无分组"
+                    : "请先选择站点"
+                }
+                options={targetRuleSets.map((ruleSet) => ({
+                  value: ruleSet.id,
+                  label: ruleSet.name,
+                  description: ruleSet.enabled ? undefined : "分组已停用",
+                  disabled: !ruleSet.enabled,
+                }))}
+                onChange={(value) =>
                   setDraft((prev) =>
                     prev.mode === "rule"
                       ? {
                           ...prev,
-                          targetRuleSetId: event.target.value,
+                          targetRuleSetId: value,
                         }
                       : prev,
                   )
                 }
                 disabled={!draft.targetProjectId || targetRuleSets.length === 0}
-              >
-                <option value="">
-                  {draft.targetProjectId
-                    ? targetRuleSets.length > 0
-                      ? "请选择分组"
-                      : "目标站点下暂无分组"
-                    : "请先选择站点"}
-                </option>
-                {targetRuleSets.map((ruleSet) => (
-                  <option key={ruleSet.id} value={ruleSet.id}>
-                    {ruleSet.name}
-                    {ruleSet.enabled ? "" : "（已停用）"}
-                  </option>
-                ))}
-              </select>
+                ariaLabel="目标分组"
+              />
               <span className="form-hint">复制后会直接落到所选分组下，并保留原规则内容。</span>
             </div>
           )}
