@@ -1,5 +1,5 @@
 {
-  "name": "@resource-forwarder/forwarder-service",
+  "name": "@resource-forwarder/forward-core",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
@@ -11,18 +11,11 @@
     }
   },
   "dependencies": {
-    "@fastify/cors": "^10.0.2",
-    "@fastify/rate-limit": "^10.3.0",
-    "@resource-forwarder/forward-core": "workspace:*",
     "@resource-forwarder/rule-core": "workspace:*",
-    "@resource-forwarder/shared-types": "workspace:*",
-    "fastify": "^5.2.1",
-    "pino": "^10.3.1"
+    "@resource-forwarder/shared-types": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsx src/cli.ts",
-    "start": "node dist/cli.js",
     "test": "vitest run"
   }
 }

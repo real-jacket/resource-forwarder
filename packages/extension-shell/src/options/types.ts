@@ -82,6 +82,7 @@ export interface RuleDraft {
   responseMockFilePath: string;
   responseHeadersJson: string;
   responseHeaderStrip: string;
+  executionMode: "auto" | "browser" | "local";
   timeoutMs: number;
   fallbackMode: "native" | "error";
   tags: string;

@@ -38,6 +38,7 @@ function isStreamUnsupported(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return (
     error.message === STREAMING_UNSUPPORTED_SENTINEL ||
+    error.message === "STREAMING_UNSUPPORTED" ||
     error.message.includes("stream-unsupported") ||
     error.message.startsWith("Upstream response is streaming")
   );

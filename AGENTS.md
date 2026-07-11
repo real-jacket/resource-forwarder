@@ -26,7 +26,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Workspace architecture
 
-This is a pnpm monorepo with 4 packages:
+This is a pnpm monorepo with 5 packages:
 
 - `packages/shared-types`: canonical cross-package TypeScript contracts (workspace/project/rule schema, runtime payloads, logs, API request/response models).
 - `packages/rule-core`: pure rule engine utilities:
@@ -34,6 +34,10 @@ This is a pnpm monorepo with 4 packages:
   - rule matching and conflict checks
   - declarativeNetRequest conversion for asset redirects
   - workspace trimming by current URL/tab scope
+- `packages/forward-core`: browser/Node-compatible forwarding execution:
+  - target URL, query, request and response header rewriting
+  - upstream fetch, timeout, response buffering and binary encoding
+  - JSON Merge Patch and inline JSON mocks
 - `packages/forwarder-service`: Fastify local service that persists workspace state and proxies API traffic based on matched `api_forward` rules.
 - `packages/extension-shell`: Manifest V3 extension (background worker + content script + injected page bridge + React options page + React sidepanel).
 
@@ -41,7 +45,8 @@ Dependency direction is intentionally one-way:
 
 - `shared-types` -> consumed by all other packages
 - `rule-core` -> depends on `shared-types`
-- `forwarder-service` and `extension-shell` -> depend on both `shared-types` and `rule-core`
+- `forward-core` -> depends on `shared-types` and `rule-core`
+- `forwarder-service` and `extension-shell` -> depend on `forward-core`, `shared-types`, and `rule-core`
 
 ## End-to-end request flow
 
@@ -63,9 +68,10 @@ which intentionally have no initiator restriction.
 1. Content script injects `page-bridge.js` into page context.
 2. Page bridge patches `fetch` + `XMLHttpRequest`, checks matching rules, and emits proxy requests to content script via `window.postMessage`.
 3. Content script forwards proxy request to extension background.
-4. Background calls local service `/forward`.
-5. Service matches rule with `rule-core`, forwards upstream using rule profile (target base URL, prefix stripping, path rewrite, header injection), then returns response.
-6. Background/content script/page bridge return the response back to page code.
+4. Background re-validates the hinted rule against the full workspace and chooses an executor.
+5. Ordinary forwarding, response patches, and inline JSON mocks execute in the extension service worker through `forward-core`.
+6. Arbitrary local file paths, restricted headers, or rules explicitly set to `local` use the optional local service `/forward` adapter.
+7. Background/content script/page bridge return the response back to page code.
 
 ## Persistence and state boundaries
 

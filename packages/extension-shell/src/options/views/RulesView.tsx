@@ -32,6 +32,8 @@ export interface RulesViewProps {
   setSelectedRuleSetId: (id: string) => void;
   /** All rule sets belonging to the currently selected project. */
   projectRuleSets: RuleSet[];
+  /** Rule currently open in the editor; keeps list context visible. */
+  editingRuleId?: string;
 
   /** Pre-sorted rule rows (all of them; the parent computes filteredRuleRows separately). */
   allRuleRows: RuleRow[];
@@ -126,6 +128,7 @@ export function RulesView(props: RulesViewProps) {
             dashboard={props.dashboard}
             selectedProjectId={props.selectedProjectId}
             projectRuleSets={props.projectRuleSets}
+            editingRuleId={props.editingRuleId}
           />
         )}
       </div>
@@ -504,6 +507,7 @@ interface GroupedRuleTableProps {
   dashboard: DashboardState | null;
   selectedProjectId: string;
   projectRuleSets: RuleSet[];
+  editingRuleId?: string;
 }
 
 /**
@@ -519,6 +523,7 @@ function GroupedRuleTable({
   dashboard,
   selectedProjectId,
   projectRuleSets,
+  editingRuleId,
 }: GroupedRuleTableProps) {
   const [collapsedRuleSetIds, setCollapsedRuleSetIds] = React.useState<Set<string>>(new Set());
   const groups = buildRuleGroups(rows, selectedProjectId, projectRuleSets);
@@ -530,10 +535,10 @@ function GroupedRuleTable({
           <tr>
             <th style={{ width: 48 }}></th>
             <th className="col-seq" style={{ width: 40 }}>总序</th>
-            <th style={{ width: "15%" }}>规则名称</th>
+            <th className="col-name" style={{ width: "15%" }}>规则名称</th>
             <th style={{ width: 80 }}>匹配类型</th>
-            <th style={{ width: "22%" }}>匹配规则</th>
-            <th>代理资源</th>
+            <th className="col-match" style={{ width: "22%" }}>匹配规则</th>
+            <th className="col-target">代理资源</th>
             <th className="col-time" style={{ width: 110 }}>更新时间</th>
             <th className="col-actions" style={{ width: 160 }}>操作</th>
           </tr>
@@ -566,6 +571,7 @@ function GroupedRuleTable({
                       index={index}
                       busy={busy}
                       actions={actions}
+                      editing={rule.id === editingRuleId}
                     />
                   ))
                 : null}
@@ -707,6 +713,7 @@ function RuleTableRow({
   index,
   busy,
   actions,
+  editing,
 }: {
   rule: Rule;
   project: Project | null;
@@ -714,10 +721,11 @@ function RuleTableRow({
   index: number;
   busy: boolean;
   actions: RulesViewProps["actions"];
+  editing: boolean;
 }) {
   const visuallyOff = isRuleEffectivelyDisabled(rule.enabled, ruleSet?.enabled ?? true, project?.enabled ?? true);
   return (
-    <tr className={visuallyOff ? "is-disabled" : ""}>
+    <tr className={`${visuallyOff ? "is-disabled " : ""}${editing ? "is-editing" : ""}`.trim()}>
       <td>
         <label className="toggle-switch">
           <input
@@ -732,7 +740,7 @@ function RuleTableRow({
       <td className="col-seq">
         <span className="rule-seq-text">{index + 1}</span>
       </td>
-      <td className="rule-name-cell">
+      <td className="rule-name-cell col-name">
         <span className="rule-name-text" title={rule.name}>
           {rule.name}
         </span>
@@ -742,12 +750,12 @@ function RuleTableRow({
           {rule.kind === "api_forward" ? "API 转发" : "资源替换"}
         </span>
       </td>
-      <td>
+      <td className="col-match">
         <span className="rule-path-text" title={rule.match.pathGlob}>
           {rule.match.pathGlob}
         </span>
       </td>
-      <td>
+      <td className="col-target">
         <span className="rule-target-text" title={formatRuleTarget(rule)}>
           {formatRuleTarget(rule)}
         </span>

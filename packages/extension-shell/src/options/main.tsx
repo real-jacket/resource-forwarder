@@ -1287,8 +1287,13 @@ function App() {
 
   // ── RENDER ──────────────────────────────────────────────────────────────
 
+  const editorOpen = panelMode !== null;
+  const sidebarVisuallyCollapsed = sidebarCollapsed || editorOpen;
+
   return (
-    <div className={`options-layout ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+    <div
+      className={`options-layout ${sidebarVisuallyCollapsed ? "sidebar-collapsed" : ""} ${editorOpen ? "panel-open" : ""}`}
+    >
       {/* Sidebar */}
       <nav className="sidebar">
         <div className="sidebar-logo">
@@ -1309,9 +1314,10 @@ function App() {
           <button
             className="sidebar-collapse-btn"
             onClick={() => setSidebarCollapsed((v) => !v)}
-            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-            aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-            aria-expanded={!sidebarCollapsed}
+            title={editorOpen ? "编辑规则时导航自动收起" : sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            aria-label={editorOpen ? "编辑规则时导航自动收起" : sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            aria-expanded={!sidebarVisuallyCollapsed}
+            disabled={editorOpen}
           >
             <svg className="sidebar-collapse-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <polyline points="11 17 6 12 11 7" />
@@ -1423,6 +1429,7 @@ function App() {
               selectedRuleSetId={selectedRuleSetId}
               setSelectedRuleSetId={setSelectedRuleSetId}
               projectRuleSets={selectedProjectRuleSets}
+              editingRuleId={panelMode === "rule" ? ruleDraft.id : undefined}
               allRuleRows={allRuleRows}
               filteredRuleRows={filteredRuleRows}
               ruleStatusTab={ruleStatusTab}

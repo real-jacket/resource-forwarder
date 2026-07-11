@@ -86,11 +86,11 @@ function FirstRunSection() {
     <details className="about-accordion">
       <summary>
         <ChevronIcon />
-        <span className="acc-title">首次连接服务</span>
-        <span className="acc-badge">新手必看</span>
+        <span className="acc-title">可选 Companion 配置</span>
+        <span className="acc-badge">本地能力</span>
       </summary>
       <div className="about-accordion-body">
-        <p>本地服务启用了 token 鉴权，第一次跑 <code>pnpm dev</code> 后，扩展需要拿到 token 才能同步规则。</p>
+        <p>普通 API 转发、响应修改和内联 JSON Mock 直接由浏览器执行。只有本地文件、受限 Header 或强制本地执行规则需要 Companion 与 token。</p>
         <ol className="about-setup-steps">
           <li>启动服务（<code>pnpm dev</code> 或 <code>pnpm dev:service</code>）。控制台会打印类似：<br />
             <code>[forwarder-service] auth token file: /Users/&lt;you&gt;/.../.resource-forwarder/token</code>
@@ -123,7 +123,7 @@ function CoreConceptsSection() {
           <thead><tr><th>类型</th><th>适用场景</th><th>工作原理</th></tr></thead>
           <tbody>
             <tr><td><code>资源替换</code></td><td>JS、CSS、图片、字体等静态资源</td><td>Chrome DNR 网络层直接重定向，支持通配符</td></tr>
-            <tr><td><code>API 转发</code></td><td>fetch / XHR 接口请求</td><td>拦截请求 → 本地服务转发 → 返回响应</td></tr>
+            <tr><td><code>API 转发</code></td><td>fetch / XHR 接口请求</td><td>拦截请求 → Background 安全重匹配 → 浏览器或 Companion 执行</td></tr>
           </tbody>
         </table>
         <div className="guide-tip">
@@ -271,7 +271,7 @@ function ApiForwardExamplesSection() {
         <span className="acc-badge">7 个场景</span>
       </summary>
       <div className="about-accordion-body">
-        <h3>1. 将接口转发到本地服务</h3>
+        <h3>1. 将接口转发到本机后端</h3>
         <ExampleBlock
           badge={<><span className="example-badge badge-api">API 转发</span>基础转发</>}
           rows={[
@@ -398,7 +398,7 @@ function FaqSection() {
           <li>检查规则类型：<code>.chunk.js</code> 等脚本文件必须用<strong>资源替换</strong></li>
           <li>检查 Host：规则的 Host 必须与资源实际域名一致（CDN 域名可能与页面域名不同）</li>
           <li>检查路径匹配：在 DevTools Network 面板复制资源完整 URL 路径对照</li>
-          <li>检查本地服务是否启动：确认 <code>localhost:端口</code> 可正常访问</li>
+          <li>检查资源目标对应的本地开发服务器是否启动：确认 <code>localhost:端口</code> 可正常访问</li>
         </ul>
 
         <h3>如何调试 webpack 的动态 chunk？</h3>
@@ -412,14 +412,14 @@ function FaqSection() {
 
         <h3>SSE / 大文件下载为什么没被代理？</h3>
         <p>
-          本地服务在转发前会检查响应：<code>Content-Type: text/event-stream</code>（SSE）或 <code>Content-Length</code> 超过 4 MiB 时
+          浏览器执行器与 Companion 共用的转发核心会检查响应：<code>Content-Type: text/event-stream</code>（SSE）或 <code>Content-Length</code> 超过 4 MiB 时
           默认放行到原生 fetch / XHR（命中日志中显示 <code>passed</code>）。如果规则选择了<strong>代理失败时直接报错</strong>，则不会回源。
           这是有意为之。若把它们整块缓冲到 base64 再回传，会破坏 <code>EventSource</code> / <code>ReadableStream</code> 的流式语义，并可能撑爆扩展消息通道。
         </p>
 
         <h3>为什么建议写接口关闭“无法代理时回源”？</h3>
         <p>
-          默认回源能保证扩展本地服务离线、SSE 或大请求/响应无法通过消息通道时页面继续工作，但也可能把写请求重新发到共享测试或线上地址。
+          默认回源能保证所选执行器不可用、SSE 或大请求/响应无法通过消息通道时页面继续工作，但也可能把写请求重新发到共享测试或线上地址。
           对会修改数据的接口，建议在规则高级设置中选择<strong>直接报错，不回源</strong>。
         </p>
 
@@ -470,12 +470,12 @@ function SystemArchitectureDiagram() {
       <div className="system-diagram-heading">
         <div>
           <h3 id="system-architecture-title">项目结构全景</h3>
-          <p>四个 workspace package 共享一套类型和匹配规则，扩展负责浏览器侧交互，本地服务负责代理与持久化。</p>
+          <p>五个 workspace package 共享类型、匹配与转发核心；扩展默认直接执行，Companion 只补充本地能力。</p>
         </div>
         <div className="system-diagram-legend" aria-label="图例">
           <span><i className="legend-swatch is-browser" />浏览器</span>
           <span><i className="legend-swatch is-core" />核心逻辑</span>
-          <span><i className="legend-swatch is-service" />本地服务</span>
+          <span><i className="legend-swatch is-service" />可选 Companion</span>
         </div>
       </div>
 
@@ -495,9 +495,10 @@ function SystemArchitectureDiagram() {
           tone="browser"
           eyebrow="extension-shell"
           title="扩展运行层"
-          description="Background 是扩展运行时状态的中心"
+          description="Background 负责安全重匹配与执行能力路由"
           nodes={[
-            { title: "Background Worker", detail: "workspace / health / DNR" },
+            { title: "Background Worker", detail: "workspace / capability router / logs" },
+            { title: "Browser Executor", detail: "API 转发 / 响应改写 / 内联 Mock" },
             { title: "Content + Page Bridge", detail: "注入并拦截 fetch / XHR" },
             { title: "Chrome DNR", detail: "网络层资源重定向" },
           ]}
@@ -507,20 +508,21 @@ function SystemArchitectureDiagram() {
           tone="core"
           eyebrow="共享能力"
           title="核心逻辑层"
-          description="不依赖 UI 与网络的纯 TypeScript 能力"
+          description="跨浏览器与 Node 复用的 TypeScript 深模块"
           nodes={[
             { title: "shared-types", detail: "工作区 / 规则 / 运行时协议" },
             { title: "rule-core", detail: "匹配、排序、校验、DNR 转换" },
+            { title: "forward-core", detail: "请求改写、上游 fetch、响应策略" },
           ]}
         />
-        <ArchitectureConnector label="HTTP /forward" detail="工作区同步 / API 代理" />
+        <ArchitectureConnector label="按能力选择" detail="仅本地专属规则走 HTTP /forward" />
         <ArchitectureLayer
           tone="service"
           eyebrow="forwarder-service"
-          title="本地服务层"
-          description="Fastify 服务连接浏览器与本机开发环境"
+          title="可选 Companion 层"
+          description="为浏览器无法安全完成的本地能力提供适配器"
           nodes={[
-            { title: "Forward Proxy", detail: "改写请求与响应" },
+            { title: "Local Adapter", detail: "任意文件路径 / 受限 Header" },
             { title: "workspace.json", detail: "工作区快照" },
             { title: "logs/*.jsonl", detail: "每日命中日志" },
           ]}
@@ -540,7 +542,7 @@ function SystemArchitectureDiagram() {
 
       <div className="architecture-dependency">
         <strong>代码依赖方向</strong>
-        <code>shared-types</code><span>→</span><code>rule-core</code><span>→</span><code>extension-shell / forwarder-service</code>
+        <code>shared-types</code><span>→</span><code>rule-core</code><span>→</span><code>forward-core</code><span>→</span><code>extension-shell / forwarder-service</code>
       </div>
     </section>
   );
@@ -633,7 +635,7 @@ function RequestExecutionDiagram() {
             <strong>API 转发与响应替换</strong>
           </div>
           <div className="execution-api-path">
-            <span>Page Bridge</span><b>→</b><span>Content Script</span><b>→</b><span>Background</span><b>→</b><span>Local Service /forward</span>
+            <span>Page Bridge</span><b>→</b><span>Content Script</span><b>→</b><span>Background 重匹配</span><b>→</b><span>Browser / Companion</span>
           </div>
           <div className="response-mode-grid">
             <div><strong>真实转发</strong><span>请求上游，可应用 JSON Merge Patch</span></div>
@@ -646,7 +648,7 @@ function RequestExecutionDiagram() {
 
       <div className="execution-fallback">
         <strong>异常与不可缓冲响应</strong>
-        <span>服务离线、请求体或响应超限、SSE 无法缓冲时：</span>
+        <span>所选执行器不可用、请求体或响应超限、SSE 无法缓冲时：</span>
         <code>fallbackMode=native</code><span>回到原始请求</span>
         <code>fallbackMode=error</code><span>向页面返回错误</span>
       </div>
@@ -760,15 +762,15 @@ function ApiForwardFlow() {
           <FlowArrowRight label="命中规则" />
           <FlowNode kind="ext" label="Content Script" text="消息中转" sub="→ Background" />
           <FlowArrowRight label="runtime" />
-          <FlowNode kind="service" label="本地服务" text="/forward" sub="转发 / Mock / 改写" />
+          <FlowNode kind="ext" label="Background" text="安全重匹配" sub="能力路由" />
           <FlowArrowRight />
-          <FlowNode kind="target" label="响应来源" text="上游 / JSON" sub="真实接口、内联或文件" />
+          <FlowNode kind="target" label="执行器" text="浏览器 / Companion" sub="普通规则优先浏览器" />
         </div>
       </div>
       <p className="flow-description">
         进入页面时，Background 先按当前页面的 Host 筛选出相关规则，只下发匹配的规则给 Page Bridge。
         随后 Page Bridge 对每个 <code>fetch</code> / <code>XHR</code> 请求检查 Host、路径、Query、Header、方法和资源类型，并按稳定优先级选出唯一规则。
-        本地服务可继续请求上游并修改 JSON 响应，也可直接返回内联 JSON 或本地 JSON 文件。
+        Background 不信任页面传入的规则提示，会重新验证规则是否仍启用且完整匹配。普通转发、JSON Merge Patch 与内联 Mock 直接由浏览器执行；任意本地文件路径和受限 Header 在自动模式下交给 Companion。
         <strong>注意：</strong>此链路无法拦截 <code>&lt;script&gt;</code> 等浏览器直接加载的资源。
       </p>
     </div>

@@ -2,16 +2,16 @@
 
 [English](README.md) | 简体中文
 
-面向前端开发的浏览器本地代理工具。它由 Manifest V3 扩展和本地 Fastify 服务组成，可以在不修改业务项目代码的情况下替换静态资源、转发 API、修改接口响应，或直接使用 JSON Mock 返回结果。
+面向前端开发的浏览器优先代理工具。普通 API 转发和响应修改直接由 Manifest V3 扩展完成；可选的本地 Companion 负责文件系统与浏览器受限能力。
 
 ## 核心能力
 
 | 能力 | 适用场景 | 执行位置 |
 | --- | --- | --- |
 | 资源替换 | 将线上 JS、CSS、图片或字体替换为本地构建产物 | Chrome DNR 网络层 |
-| API 转发 | 将 `fetch` / `XMLHttpRequest` 请求转发到本地或其他环境 | Page Bridge + 本地服务 |
-| 响应修改 | 保留真实上游请求，同时修改 JSON、状态码和响应 Header | 本地服务 |
-| JSON Mock | 不访问上游，直接返回内联 JSON 或本地 `.json` 文件 | 本地服务 |
+| API 转发 | 将 `fetch` / `XMLHttpRequest` 请求转发到本地或其他环境 | 默认由 Extension Service Worker 执行 |
+| 响应修改 | 保留真实上游请求，同时修改 JSON、状态码和响应 Header | 浏览器或 Companion 共用 `forward-core` |
+| JSON Mock | 不访问上游，返回内联 JSON 或本地 `.json` 文件 | 内联 JSON 走浏览器，任意路径走 Companion |
 | 规则分层 | 按站点、分组、请求条件和优先级控制规则生效范围 | `rule-core` |
 | 调试与管理 | 查看匹配结果、命中日志、DNR 状态，并导入导出工作区 | Options Page / Side Panel |
 
@@ -27,9 +27,8 @@
 
 ### 环境要求
 
-- Node.js 20 或更高版本
-- pnpm 9
 - Chrome 或 Edge
+- 构建扩展或使用可选 Companion 时需要 Node.js 20+ 与 pnpm 9
 
 ### 安装并启动
 
@@ -38,7 +37,7 @@ pnpm install
 pnpm dev
 ```
 
-`pnpm dev` 会同时启动：
+`pnpm dev` 会启动扩展构建和可选 Companion，适合完整开发：
 
 - 本地转发服务：`http://127.0.0.1:5178`
 - 扩展 watch 构建：输出到 `packages/extension-shell/dist`
@@ -50,9 +49,9 @@ pnpm dev
 3. 点击“加载已解压的扩展程序”。
 4. 选择 `packages/extension-shell/dist`。
 
-### 首次配置服务 token
+### 可选：配置 Companion token
 
-除 `/health` 外，本地服务接口都要求 Bearer Token。首次启动时，终端会打印 token 文件路径：
+普通转发、响应修改和内联 JSON Mock 不要求启动 Companion。任意本地文件、浏览器受限 Header 或显式 `executionMode: local` 的规则才需要它。除 `/health` 外，Companion 接口都要求 Bearer Token，首次启动时终端会打印 token 文件路径：
 
 ```text
 [forwarder-service] auth token file: <storage_root>/token
@@ -88,7 +87,8 @@ flowchart LR
   subgraph Extension["浏览器扩展 extension-shell"]
     Options["Options Page<br/>完整配置与调试"]
     SidePanel["Side Panel<br/>当前页面状态与快捷开关"]
-    Background["Background Worker<br/>扩展运行时状态中心"]
+    Background["Background Worker<br/>能力路由"]
+    BrowserExecutor["浏览器执行器<br/>转发、响应修改、内联 Mock"]
     Bridge["Content Script + Page Bridge<br/>拦截 fetch / XHR"]
     DNR["Chrome DNR<br/>静态资源重定向"]
   end
@@ -96,10 +96,11 @@ flowchart LR
   subgraph Core["共享核心"]
     Types["shared-types<br/>跨包数据契约"]
     RuleCore["rule-core<br/>匹配、排序、校验、DNR 转换"]
+    ForwardCore["forward-core<br/>跨运行时转发与响应策略"]
   end
 
-  subgraph Service["本地服务 forwarder-service"]
-    Forward["Fastify /forward<br/>请求与响应改写"]
+  subgraph Service["可选本地 Companion forwarder-service"]
+    Forward["本地适配器<br/>文件系统与受限能力"]
     Workspace["workspace.json<br/>工作区快照"]
     Logs["logs/*.jsonl<br/>每日命中日志"]
     Secrets["secrets.json<br/>加密敏感 Header"]
@@ -115,14 +116,19 @@ flowchart LR
   Page --> Bridge
   Bridge --> Background
   Background --> DNR
+  Background --> BrowserExecutor
   Background <--> Forward
   Background --> RuleCore
   Forward --> RuleCore
+  BrowserExecutor --> ForwardCore
+  Forward --> ForwardCore
   RuleCore --> Types
+  ForwardCore --> RuleCore
   Forward <--> Workspace
   Forward --> Logs
   Forward <--> Secrets
   DNR --> Assets
+  BrowserExecutor --> Upstream
   Forward --> Upstream
   Forward --> MockFile
 ```
@@ -130,7 +136,7 @@ flowchart LR
 代码依赖方向保持单向：
 
 ```text
-shared-types -> rule-core -> extension-shell / forwarder-service
+shared-types -> rule-core -> forward-core -> extension-shell / forwarder-service
 ```
 
 ## 一次请求如何执行
@@ -264,7 +270,7 @@ API 规则可以按以下条件组合匹配：
 
 ### Cookie 转发
 
-同 Host 转发时可以补充浏览器 Cookie，包括页面 JavaScript 无法读取的 HttpOnly Cookie。
+浏览器执行器会在 Chrome 允许时携带目标 Host 自身的浏览器凭据。将源站 Cookie（包括 HttpOnly Cookie）搬到其他目标属于浏览器受限能力，`auto` 模式会自动切换到本地 Companion。
 
 跨 Host 转发默认不会携带 Cookie。如确有需要，可在 Header 透传列表中明确加入 `cookie`。
 
@@ -291,14 +297,18 @@ Merge Patch 中的 `null` 表示删除对应字段。
 
 文件路径可以是绝对路径，也可以相对于启动 forwarder service 时的工作目录。只接受合法 `.json` 文件，最大 4 MiB。
 
+### 执行位置
+
+每条 API 规则支持 `auto`、`browser`、`local`。默认 `auto`：普通转发、响应修改和内联 Mock 由扩展 Service Worker 执行；任意文件路径和受限 Header 自动使用 Companion。`browser` 遇到本地专属能力会明确报错，`local` 则始终使用 Companion。
+
 ### 失败策略
 
 每条 API 规则可以选择：
 
-- `native`：服务离线、流式响应或请求体/响应体超限时，回到原始浏览器请求。
+- `native`：所选执行器不可用、流式响应或请求体/响应体超限时，回到原始浏览器请求。
 - `error`：禁止回源，直接向页面暴露错误。
 
-本地 API 开发建议使用 `error`，避免本地服务未启动时意外请求共享测试或生产环境。
+写接口开发建议使用 `error`，避免执行器不可用时意外请求共享测试或生产环境。
 
 ## 界面说明
 
@@ -363,6 +373,7 @@ RF_EXTENSION_ID=<your-extension-id> pnpm dev:service
 | --- | --- |
 | `packages/shared-types` | 跨包 TypeScript 数据契约 |
 | `packages/rule-core` | 工作区解析、规则匹配、冲突检查和 DNR 转换 |
+| `packages/forward-core` | 跨运行时请求转发与响应策略执行 |
 | `packages/forwarder-service` | Fastify 本地服务、持久化、代理和日志 |
 | `packages/extension-shell` | Background、Page Bridge、Options Page 和 Side Panel |
 
@@ -381,6 +392,7 @@ Package 级命令：
 
 ```bash
 pnpm --filter @resource-forwarder/rule-core test
+pnpm --filter @resource-forwarder/forward-core test
 pnpm --filter @resource-forwarder/forwarder-service test
 pnpm --filter @resource-forwarder/extension-shell test
 ```

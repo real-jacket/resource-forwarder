@@ -1,6 +1,7 @@
 import type {
   ExportWorkspaceResponse,
   ForwardRequestPayload,
+  HitRecord,
   ImportWorkspacePayload,
   LogsResponse,
   ProjectsResponse,
@@ -39,6 +40,12 @@ import { DEFAULT_SERVICE_URL, SERVICE_OFFLINE_SENTINEL, SESSION_STORAGE_KEYS, ST
 import { buildDynamicRuleUpdatePlan, buildScopedDnrRuleGroups } from "./dnr.js";
 import { normalizeProxyRequestError } from "./shared/service-errors.js";
 import { buildCookieHeader, shouldAttachBrowserCookies } from "./cookie-forwarding.js";
+import {
+  chooseForwardExecution,
+  executeInBrowser,
+  resolveForwardBinding,
+  STREAMING_UNSUPPORTED,
+} from "./forward-executor.js";
 
 // ── Runtime state ────────────────────────────────────────────────────────
 
@@ -49,6 +56,7 @@ let runtimeState: RuntimeState = {
 };
 let runtimeWarnings: string[] = [];
 let lastAppliedDnrFingerprint: string | undefined;
+let browserLogChain: Promise<void> = Promise.resolve();
 
 // Serialize write handlers so two concurrent runtime messages can't read the
 // same base workspace and clobber each other's edits. Read paths (proxyRequest,
@@ -194,9 +202,7 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
     case "delete-rule-set":
       return handleDeleteRuleSet(message.ruleSetId);
     case "get-logs":
-      return serviceJson<LogsResponse>(
-        `/logs?limit=${message.limit ?? 50}${message.projectId ? `&projectId=${encodeURIComponent(message.projectId)}` : ""}`,
-      ).catch(() => ({ logs: [] }));
+      return getCombinedLogs(message.limit ?? 50, message.projectId);
     case "diagnose-match":
       return serviceJson("/match", {
         method: "POST",
@@ -380,8 +386,8 @@ async function syncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
   if (!health) {
     runtimeWarnings = [
       localWorkspace.rules.length > 0
-        ? `离线模式：使用浏览器本地存储的 ${localWorkspace.rules.length} 条规则。服务 ${serviceUrl} 不可用。`
-        : `未连接到本地服务 ${serviceUrl}，请检查服务是否启动。`,
+        ? `浏览器模式：正在使用本地存储的 ${localWorkspace.rules.length} 条规则；可选 Companion ${serviceUrl} 未连接。`
+        : `浏览器模式可直接使用；可选 Companion ${serviceUrl} 当前未连接。`,
     ];
     return commitWorkspace(localWorkspace, serviceUrl, null);
   }
@@ -684,9 +690,7 @@ async function getDashboardState(tabId?: number): Promise<DashboardState> {
   }
 
   const [{ logs }, currentTab, dnrCounts] = await Promise.all([
-    runtimeState.health
-      ? serviceJson<LogsResponse>("/logs?limit=20").catch(() => ({ logs: [] as LogsResponse["logs"] }))
-      : { logs: [] as LogsResponse["logs"] },
+    getCombinedLogs(20),
     getTabSnapshot(tabId),
     readDnrRuleCounts(),
   ]);
@@ -730,30 +734,47 @@ async function buildSiteContext(url: string, tabId?: number): Promise<SiteContex
 }
 
 async function proxyRequest(requestId: string, payload: ForwardRequestPayload) {
-  // Surface service offline as a sentinel so page-bridge can transparently
-  // fall back to the native fetch/XHR. Without this, an offline service makes
-  // every matching request appear to hang or 502 — worse than not having the
-  // extension installed at all.
-  //
-  // After a worker restart `runtimeState.health` resets to null until
-  // syncWorkspace runs, but the user's request can land before that. Probe
-  // /health once here so the very first proxied request after a wake doesn't
-  // get a false-positive offline response.
-  if (!runtimeState.health) {
-    const probed = await getHealth(runtimeState.serviceUrl || (await getServiceUrl()));
-    if (probed) {
-      runtimeState.health = probed;
-      void syncWorkspace().catch(() => undefined);
-    } else {
-      throw new Error(SERVICE_OFFLINE_SENTINEL);
-    }
-  }
-
   const controller = new AbortController();
   inflightForwards.set(requestId, controller);
   await persistInflightId(requestId);
+  const startedAt = Date.now();
+  let binding: ReturnType<typeof resolveForwardBinding> | undefined;
+  let target = payload.url;
+  let executionLocation: "browser" | "local" | undefined;
 
   try {
+    binding = resolveForwardBinding(runtimeState.workspace, payload);
+    const decision = chooseForwardExecution(binding);
+    executionLocation = decision.location;
+    if (decision.location === "browser") {
+      const result = await executeInBrowser(binding, payload, controller.signal);
+      target = result.targetUrl;
+      void appendBrowserHit({
+        requestUrl: payload.url,
+        projectId: binding.project?.id,
+        ruleSetId: binding.ruleSet?.id,
+        ruleId: binding.rule.id,
+        target,
+        durationMs: Date.now() - startedAt,
+        outcome: "matched",
+        statusCode: result.response.status,
+        method: payload.method,
+        resourceType: payload.resourceType ?? "fetch",
+      });
+      return result.response;
+    }
+
+    // Only local-only or explicitly local rules depend on the companion.
+    if (!runtimeState.health) {
+      const probed = await getHealth(runtimeState.serviceUrl || (await getServiceUrl()));
+      if (probed) {
+        runtimeState.health = probed;
+        void syncWorkspace().catch(() => undefined);
+      } else {
+        throw new Error(SERVICE_OFFLINE_SENTINEL);
+      }
+    }
+
     const enrichedPayload = await attachBrowserCookies(payload);
     const response = await serviceFetch(`/forward`, {
       method: "POST",
@@ -769,11 +790,78 @@ async function proxyRequest(requestId: string, payload: ForwardRequestPayload) {
 
     return await response.json();
   } catch (error) {
+    const outcome = chooseOutcome(error);
+    if (binding && executionLocation === "browser" && outcome !== undefined) {
+      void appendBrowserHit({
+        requestUrl: payload.url,
+        projectId: binding.project?.id,
+        ruleSetId: binding.ruleSet?.id,
+        ruleId: binding.rule.id,
+        target,
+        durationMs: Date.now() - startedAt,
+        outcome,
+        errorMessage: outcome === "error" ? errorMessage(error) : undefined,
+        method: payload.method,
+        resourceType: payload.resourceType ?? "fetch",
+      });
+    }
     throw normalizeProxyRequestError(error);
   } finally {
     inflightForwards.delete(requestId);
     await unpersistInflightId(requestId);
   }
+}
+
+async function appendBrowserHit(entry: Omit<HitRecord, "id" | "occurredAt">): Promise<void> {
+  browserLogChain = browserLogChain.then(async () => {
+    try {
+      const stored = await chrome.storage.local.get(STORAGE_KEYS.browserLogs);
+      const current = Array.isArray(stored[STORAGE_KEYS.browserLogs])
+        ? stored[STORAGE_KEYS.browserLogs] as HitRecord[]
+        : [];
+      const record: HitRecord = {
+        ...entry,
+        id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+        occurredAt: new Date().toISOString(),
+      };
+      await chrome.storage.local.set({
+        [STORAGE_KEYS.browserLogs]: [record, ...current].slice(0, 200),
+      });
+    } catch {
+      // Observability must never delay or fail the page request.
+    }
+  });
+  await browserLogChain;
+}
+
+async function getCombinedLogs(limit: number, projectId?: string): Promise<LogsResponse> {
+  await browserLogChain.catch(() => undefined);
+  const stored: Record<string, unknown> = await chrome.storage.local
+    .get(STORAGE_KEYS.browserLogs)
+    .catch(() => ({}));
+  const browserLogs = Array.isArray(stored[STORAGE_KEYS.browserLogs])
+    ? stored[STORAGE_KEYS.browserLogs] as HitRecord[]
+    : [];
+  const serviceLogs = runtimeState.health
+    ? await serviceJson<LogsResponse>(
+        `/logs?limit=${limit}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ""}`,
+      ).then((result) => result.logs).catch(() => [] as HitRecord[])
+    : [];
+  const filtered = projectId ? browserLogs.filter((entry) => entry.projectId === projectId) : browserLogs;
+  return {
+    logs: [...filtered, ...serviceLogs]
+      .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
+      .slice(0, Math.max(1, limit)),
+  };
+}
+
+function chooseOutcome(error: unknown): HitRecord["outcome"] | undefined {
+  if (error instanceof DOMException && error.name === "AbortError") return undefined;
+  return error instanceof Error && error.message === STREAMING_UNSUPPORTED ? "passed" : "error";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Forwarding failed.";
 }
 
 async function attachBrowserCookies(payload: ForwardRequestPayload): Promise<ForwardRequestPayload> {
