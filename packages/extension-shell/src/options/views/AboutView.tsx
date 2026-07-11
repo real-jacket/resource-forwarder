@@ -37,16 +37,19 @@ export function AboutView() {
 function HeroBar() {
   return (
     <div className="about-hero">
-      <div className="about-logo">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M12 2L2 7l10 5 10-5-10-5z" />
-          <path d="M2 17l10 5 10-5" />
-          <path d="M2 12l10 5 10-5" />
-        </svg>
-      </div>
-      <div className="about-hero-text">
-        <div className="about-app-name">Resource Proxy</div>
-        <div className="about-app-desc">本地资源代理插件，高效调试、预览与协作</div>
+      <div className="about-hero-main">
+        <div className="about-logo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M12 2L2 7l10 5 10-5-10-5z" />
+            <path d="M2 17l10 5 10-5" />
+            <path d="M2 12l10 5 10-5" />
+          </svg>
+        </div>
+        <div className="about-hero-text">
+          <div className="about-app-kicker">本地开发代理工具</div>
+          <div className="about-app-name">Resource Proxy</div>
+          <div className="about-app-desc">在浏览器网络层替换资源，在页面请求层转发、修改或模拟 API 响应。</div>
+        </div>
       </div>
       <div className="about-hero-links">
         {ABOUT_REPO_URL && (
@@ -60,13 +63,27 @@ function HeroBar() {
           </a>
         )}
       </div>
+      <div className="about-hero-overview" aria-label="核心能力">
+        <div className="about-overview-item is-asset">
+          <strong>资源替换</strong>
+          <span>Chrome DNR 网络层重定向</span>
+        </div>
+        <div className="about-overview-item is-forward">
+          <strong>API 转发</strong>
+          <span>fetch / XHR 请求改写</span>
+        </div>
+        <div className="about-overview-item is-mock">
+          <strong>响应模拟</strong>
+          <span>内联 JSON 或本地文件</span>
+        </div>
+      </div>
     </div>
   );
 }
 
 function FirstRunSection() {
   return (
-    <details className="about-accordion" open>
+    <details className="about-accordion">
       <summary>
         <ChevronIcon />
         <span className="acc-title">首次连接服务</span>
@@ -74,7 +91,7 @@ function FirstRunSection() {
       </summary>
       <div className="about-accordion-body">
         <p>本地服务启用了 token 鉴权，第一次跑 <code>pnpm dev</code> 后，扩展需要拿到 token 才能同步规则。</p>
-        <ol style={{ paddingLeft: 20, lineHeight: 1.8 }}>
+        <ol className="about-setup-steps">
           <li>启动服务（<code>pnpm dev</code> 或 <code>pnpm dev:service</code>）。控制台会打印类似：<br />
             <code>[forwarder-service] auth token file: /Users/&lt;you&gt;/.../.resource-forwarder/token</code>
           </li>
@@ -94,7 +111,7 @@ function FirstRunSection() {
 
 function CoreConceptsSection() {
   return (
-    <details className="about-accordion" open>
+    <details className="about-accordion">
       <summary>
         <ChevronIcon />
         <span className="acc-title">核心概念</span>
@@ -114,7 +131,7 @@ function CoreConceptsSection() {
         </div>
         <h3>匹配链路</h3>
         <p>每条规则按以下层级依次判断，所有层级都通过才会执行：</p>
-        <ol style={{ paddingLeft: 20, lineHeight: 1.8 }}>
+        <ol className="about-match-steps">
           <li><strong>站点页面范围</strong>：当前页面必须属于规则所属站点。</li>
           <li><strong>分组页面范围</strong>：分组可进一步缩小页面范围，未配置时继承站点。</li>
           <li><strong>规则请求条件</strong>：再检查 Host、路径、Query、Header、方法和资源类型。</li>
@@ -149,14 +166,16 @@ function CoreConceptsSection() {
 
 function WorkflowSection() {
   return (
-    <details className="about-accordion">
+    <details className="about-accordion" open>
       <summary>
         <ChevronIcon />
         <span className="acc-title">工作流程</span>
-        <span className="acc-badge">流程图</span>
+        <span className="acc-badge">架构全景</span>
       </summary>
       <div className="about-accordion-body">
-        <p>插件通过两条不同链路拦截和转发请求。</p>
+        <p>先从系统边界理解各模块如何协作，再沿一次请求查看规则如何决策，最后对照两条实际执行链路。</p>
+        <SystemArchitectureDiagram />
+        <RequestExecutionDiagram />
         <AssetRedirectFlow />
         <ApiForwardFlow />
         <div className="guide-tip">
@@ -445,6 +464,223 @@ function FaqSection() {
 
 // ── Flow diagrams (used by WorkflowSection) ──────────────────────────
 
+function SystemArchitectureDiagram() {
+  return (
+    <section className="system-diagram" aria-labelledby="system-architecture-title">
+      <div className="system-diagram-heading">
+        <div>
+          <h3 id="system-architecture-title">项目结构全景</h3>
+          <p>四个 workspace package 共享一套类型和匹配规则，扩展负责浏览器侧交互，本地服务负责代理与持久化。</p>
+        </div>
+        <div className="system-diagram-legend" aria-label="图例">
+          <span><i className="legend-swatch is-browser" />浏览器</span>
+          <span><i className="legend-swatch is-core" />核心逻辑</span>
+          <span><i className="legend-swatch is-service" />本地服务</span>
+        </div>
+      </div>
+
+      <div className="architecture-map">
+        <ArchitectureLayer
+          tone="interface"
+          eyebrow="配置与观察"
+          title="用户界面"
+          description="编辑工作区、查看状态与快速开关规则"
+          nodes={[
+            { title: "Options Page", detail: "完整 CRUD / 导入导出" },
+            { title: "Side Panel", detail: "状态、命中与快捷开关" },
+          ]}
+        />
+        <ArchitectureConnector label="runtime message" detail="配置提交 / 状态同步" />
+        <ArchitectureLayer
+          tone="browser"
+          eyebrow="extension-shell"
+          title="扩展运行层"
+          description="Background 是扩展运行时状态的中心"
+          nodes={[
+            { title: "Background Worker", detail: "workspace / health / DNR" },
+            { title: "Content + Page Bridge", detail: "注入并拦截 fetch / XHR" },
+            { title: "Chrome DNR", detail: "网络层资源重定向" },
+          ]}
+        />
+        <ArchitectureConnector label="shared contracts" detail="统一数据结构与匹配语义" />
+        <ArchitectureLayer
+          tone="core"
+          eyebrow="共享能力"
+          title="核心逻辑层"
+          description="不依赖 UI 与网络的纯 TypeScript 能力"
+          nodes={[
+            { title: "shared-types", detail: "工作区 / 规则 / 运行时协议" },
+            { title: "rule-core", detail: "匹配、排序、校验、DNR 转换" },
+          ]}
+        />
+        <ArchitectureConnector label="HTTP /forward" detail="工作区同步 / API 代理" />
+        <ArchitectureLayer
+          tone="service"
+          eyebrow="forwarder-service"
+          title="本地服务层"
+          description="Fastify 服务连接浏览器与本机开发环境"
+          nodes={[
+            { title: "Forward Proxy", detail: "改写请求与响应" },
+            { title: "workspace.json", detail: "工作区快照" },
+            { title: "logs/*.jsonl", detail: "每日命中日志" },
+          ]}
+        />
+      </div>
+
+      <div className="architecture-boundary">
+        <div className="architecture-boundary-title">外部运行边界</div>
+        <div className="architecture-boundary-nodes">
+          <span>当前网页</span>
+          <span>Chrome 网络栈</span>
+          <span>上游 API</span>
+          <span>本地开发服务</span>
+          <span>本地 JSON Mock</span>
+        </div>
+      </div>
+
+      <div className="architecture-dependency">
+        <strong>代码依赖方向</strong>
+        <code>shared-types</code><span>→</span><code>rule-core</code><span>→</span><code>extension-shell / forwarder-service</code>
+      </div>
+    </section>
+  );
+}
+
+function ArchitectureLayer({
+  tone,
+  eyebrow,
+  title,
+  description,
+  nodes,
+}: {
+  tone: "interface" | "browser" | "core" | "service";
+  eyebrow: string;
+  title: string;
+  description: string;
+  nodes: Array<{ title: string; detail: string }>;
+}) {
+  return (
+    <div className={`architecture-layer is-${tone}`}>
+      <div className="architecture-layer-eyebrow">{eyebrow}</div>
+      <div className="architecture-layer-title">{title}</div>
+      <div className="architecture-layer-description">{description}</div>
+      <div className="architecture-layer-nodes">
+        {nodes.map((node) => (
+          <div className="architecture-node" key={node.title}>
+            <strong>{node.title}</strong>
+            <span>{node.detail}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ArchitectureConnector({ label, detail }: { label: string; detail: string }) {
+  return (
+    <div className="architecture-connector" aria-hidden="true">
+      <span className="architecture-connector-label">{label}</span>
+      <span className="architecture-connector-line">→</span>
+      <span className="architecture-connector-detail">{detail}</span>
+    </div>
+  );
+}
+
+function RequestExecutionDiagram() {
+  return (
+    <section className="system-diagram execution-diagram" aria-labelledby="request-execution-title">
+      <div className="system-diagram-heading">
+        <div>
+          <h3 id="request-execution-title">一次请求如何被处理</h3>
+          <p>只有全部作用域与请求条件都通过，规则才有资格进入执行链路。</p>
+        </div>
+        <span className="execution-order">高优先级优先，结果唯一</span>
+      </div>
+
+      <div className="execution-filter-chain">
+        <ExecutionStep title="页面发起请求" detail="资源加载或 fetch / XHR" tone="source" />
+        <ExecutionArrow label="当前页面" />
+        <ExecutionStep title="站点范围" detail="Project pageScope" tone="scope" />
+        <ExecutionArrow label="AND" />
+        <ExecutionStep title="分组范围" detail="RuleSet pageScope" tone="scope" />
+        <ExecutionArrow label="AND" />
+        <ExecutionStep title="请求条件" detail="Host / Path / Query / Header / Method / Type" tone="match" />
+        <ExecutionArrow label="全部通过" />
+        <ExecutionStep title="选出唯一规则" detail="priority ↓ / createdAt ↑ / id ↑" tone="winner" />
+      </div>
+
+      <div className="execution-split-label"><span>按规则类型进入不同执行层</span></div>
+
+      <div className="execution-branches">
+        <div className="execution-branch is-asset">
+          <div className="execution-branch-heading">
+            <span className="flow-tag flow-tag-asset">asset_redirect</span>
+            <strong>资源替换</strong>
+          </div>
+          <div className="execution-branch-flow">
+            <ExecutionMiniStep title="rule-core" detail="转换为 DNR" />
+            <span>→</span>
+            <ExecutionMiniStep title="Chrome DNR" detail="网络层匹配" />
+            <span>→</span>
+            <ExecutionMiniStep title="本地资源" detail="直接重定向" />
+          </div>
+          <p>适用于 script、stylesheet、image、font 等浏览器直接加载的资源。</p>
+        </div>
+
+        <div className="execution-branch is-api">
+          <div className="execution-branch-heading">
+            <span className="flow-tag flow-tag-api">api_forward</span>
+            <strong>API 转发与响应替换</strong>
+          </div>
+          <div className="execution-api-path">
+            <span>Page Bridge</span><b>→</b><span>Content Script</span><b>→</b><span>Background</span><b>→</b><span>Local Service /forward</span>
+          </div>
+          <div className="response-mode-grid">
+            <div><strong>真实转发</strong><span>请求上游，可应用 JSON Merge Patch</span></div>
+            <div><strong>内联 JSON</strong><span>不请求上游，直接构造响应</span></div>
+            <div><strong>本地 JSON 文件</strong><span>读取指定 .json 作为响应</span></div>
+          </div>
+          <div className="execution-response-tail">统一应用状态码、状态描述、响应 Header 与延迟，再返回 fetch / XHR 调用方</div>
+        </div>
+      </div>
+
+      <div className="execution-fallback">
+        <strong>异常与不可缓冲响应</strong>
+        <span>服务离线、请求体或响应超限、SSE 无法缓冲时：</span>
+        <code>fallbackMode=native</code><span>回到原始请求</span>
+        <code>fallbackMode=error</code><span>向页面返回错误</span>
+      </div>
+    </section>
+  );
+}
+
+function ExecutionStep({ title, detail, tone }: { title: string; detail: string; tone: "source" | "scope" | "match" | "winner" }) {
+  return (
+    <div className={`execution-step is-${tone}`}>
+      <strong>{title}</strong>
+      <span>{detail}</span>
+    </div>
+  );
+}
+
+function ExecutionArrow({ label }: { label: string }) {
+  return (
+    <div className="execution-arrow" aria-hidden="true">
+      <span>{label}</span>
+      <b>→</b>
+    </div>
+  );
+}
+
+function ExecutionMiniStep({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="execution-mini-step">
+      <strong>{title}</strong>
+      <span>{detail}</span>
+    </div>
+  );
+}
+
 function FlowArrowRight({ label }: { label?: string }) {
   return (
     <div className="flow-arrow">
@@ -487,7 +723,7 @@ function AssetRedirectFlow() {
           <FlowNode kind="target" label="目标" text="localhost" sub="本地开发服务" />
         </div>
       </div>
-      <p className="about-guide" style={{ margin: 0, fontSize: 12 }}>
+      <p className="flow-description">
         规则的 <code>match.host</code> 和 <code>pathGlob</code> 在注册时转为 Chrome DNR 条件，
         同时把项目的 <code>siteHosts</code> 写入 <code>initiatorDomains</code>。浏览器每次请求都会经过 Chrome 网络层，依次检查
         <strong>发起页面</strong>（initiatorDomains，限定为项目站点）→
@@ -496,7 +732,7 @@ function AssetRedirectFlow() {
         <strong>资源类型</strong>（script / stylesheet / image / font），
         全部通过才执行重定向。
       </p>
-      <p className="about-guide" style={{ margin: 0, marginTop: 6, fontSize: 12, color: "var(--muted)" }}>
+      <p className="flow-description is-secondary">
         例外：当项目的 <code>siteHosts</code> 为空或包含 <code>*</code>（真 global 项目）时不绑 initiatorDomains，会对任何页面发起的命中请求生效。
       </p>
     </div>
@@ -520,18 +756,19 @@ function ApiForwardFlow() {
         <div className="flow-row">
           <FlowNode kind="browser" label="页面 JS" text="fetch / XHR" sub="发起接口请求" />
           <FlowArrowRight label="拦截" />
-          <FlowNode kind="page" label="Page Bridge" text="Host + 路径匹配" sub="matchesHost + matchesPath" />
+          <FlowNode kind="page" label="Page Bridge" text="完整请求匹配" sub="Host / Path / Method / Header..." />
           <FlowArrowRight label="命中规则" />
           <FlowNode kind="ext" label="Content Script" text="消息中转" sub="→ Background" />
           <FlowArrowRight label="runtime" />
-          <FlowNode kind="service" label="本地服务" text="/forward" sub="stripPrefix + 转发" />
+          <FlowNode kind="service" label="本地服务" text="/forward" sub="转发 / Mock / 改写" />
           <FlowArrowRight />
-          <FlowNode kind="target" label="目标" text="上游服务" sub="localhost:端口" />
+          <FlowNode kind="target" label="响应来源" text="上游 / JSON" sub="真实接口、内联或文件" />
         </div>
       </div>
-      <p className="about-guide" style={{ margin: 0, fontSize: 12 }}>
+      <p className="flow-description">
         进入页面时，Background 先按当前页面的 Host 筛选出相关规则，只下发匹配的规则给 Page Bridge。
-        随后 Page Bridge 对每个 <code>fetch</code> / <code>XHR</code> 请求再做一次 <code>matchesHost</code> + 路径匹配。
+        随后 Page Bridge 对每个 <code>fetch</code> / <code>XHR</code> 请求检查 Host、路径、Query、Header、方法和资源类型，并按稳定优先级选出唯一规则。
+        本地服务可继续请求上游并修改 JSON 响应，也可直接返回内联 JSON 或本地 JSON 文件。
         <strong>注意：</strong>此链路无法拦截 <code>&lt;script&gt;</code> 等浏览器直接加载的资源。
       </p>
     </div>
