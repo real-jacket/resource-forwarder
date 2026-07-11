@@ -67,6 +67,7 @@ export interface RulesViewProps {
     deleteRule: (rule: Rule) => void | Promise<void>;
     toggleRule: (rule: Rule) => void | Promise<void>;
     toggleProject: (project: Project) => void | Promise<void>;
+    duplicateProject: (project: Project) => void | Promise<void>;
     deleteProject: (project: Project) => void | Promise<void>;
     toggleRuleSet: (ruleSet: RuleSet) => void | Promise<void>;
     deleteRuleSet: (ruleSet: RuleSet) => void | Promise<void>;
@@ -198,6 +199,7 @@ function ContextBar(props: RulesViewProps & { layoutFlags: ReturnType<typeof get
             </button>
             <SiteOverflowMenu
               items={siteActionMenuItems}
+              onDuplicate={() => void actions.duplicateProject(selectedProject)}
               onDelete={() => void actions.deleteProject(selectedProject)}
             />
           </div>
@@ -363,9 +365,11 @@ function ContextHint({ project, ruleSet }: { project: Project | undefined; ruleS
 
 function SiteOverflowMenu({
   items,
+  onDuplicate,
   onDelete,
 }: {
   items: ReturnType<typeof buildSiteActionMenuItems>;
+  onDuplicate: () => void;
   onDelete: () => void;
 }) {
   const [open, setOpen] = React.useState(false);
@@ -404,12 +408,18 @@ function SiteOverflowMenu({
             key={item.key}
             type="button"
             className={`toolbar-overflow-item${item.danger ? " danger" : ""}`}
-            onClick={(event) => {
-              onDelete();
+            onClick={() => {
+              if (item.key === "duplicate") onDuplicate();
+              else onDelete();
               setOpen(false);
             }}
           >
-            {item.danger && (
+            {item.key === "duplicate" ? (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <rect x="9" y="9" width="13" height="13" rx="2" />
+                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+              </svg>
+            ) : (
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <polyline points="3 6 5 6 21 6" />
                 <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />

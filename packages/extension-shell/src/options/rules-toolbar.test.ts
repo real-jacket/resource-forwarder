@@ -7,8 +7,9 @@ import {
 } from "./rules-toolbar.js";
 
 describe("buildSiteActionMenuItems", () => {
-  it("keeps delete inside the overflow menu", () => {
+  it("keeps duplicate and delete inside the overflow menu", () => {
     expect(buildSiteActionMenuItems(true)).toEqual([
+      { key: "duplicate", label: "复制站点" },
       { key: "delete", label: "删除站点", danger: true },
     ]);
   });
