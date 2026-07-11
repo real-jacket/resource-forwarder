@@ -32,6 +32,7 @@ import type {
 } from "../shared/messages.js";
 import { runtimeRequest } from "../shared/messages.js";
 import { STORAGE_KEYS } from "../shared/constants.js";
+import { parseOptionsNavigation } from "../shared/options-navigation.js";
 import {
   type AppView,
   type BatchRuleDraft,
@@ -99,10 +100,11 @@ function findFirstRuleSetId(ruleSets: RuleSet[], projectId: string): string {
 }
 
 function App() {
-  const [view, setView] = useState<AppView>("rules");
+  const initialNavigation = useMemo(() => parseOptionsNavigation(window.location.search), []);
+  const [view, setView] = useState<AppView>(initialNavigation.view);
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
-  const [selectedProjectId, setSelectedProjectId] = useState("");
-  const [selectedRuleSetId, setSelectedRuleSetId] = useState("");
+  const [selectedProjectId, setSelectedProjectId] = useState(initialNavigation.projectId);
+  const [selectedRuleSetId, setSelectedRuleSetId] = useState(initialNavigation.ruleSetId);
   const [panelMode, setPanelMode] = useState<PanelMode>(null);
   const [rulePanelTab, setRulePanelTab] = useState<RulePanelTab>("basic");
   const [showProjectModal, setShowProjectModal] = useState(false);
@@ -1445,6 +1447,7 @@ function App() {
                 deleteRule,
                 toggleRule,
                 toggleProject,
+                duplicateProject,
                 deleteProject,
                 toggleRuleSet,
                 deleteRuleSet,

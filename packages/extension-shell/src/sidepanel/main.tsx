@@ -5,6 +5,10 @@ import type { Project, Rule, RuleSet } from "@resource-forwarder/shared-types";
 import { joinCsv } from "../shared/helpers.js";
 import type { GetDashboardStateResponse, UpsertMutationResponse } from "../shared/messages.js";
 import { runtimeRequest } from "../shared/messages.js";
+import {
+  buildOptionsNavigationUrl,
+  type OptionsNavigationTarget,
+} from "../shared/options-navigation.js";
 import { isRuleEffectivelyDisabled, toggleCollapsedRuleSetIds } from "../options/rule-groups.js";
 
 function App() {
@@ -166,6 +170,39 @@ function App() {
   const dnrBadgeTone =
     matchedProjects.length === 0 && dnrRegisteredCount > 0 ? "warning" : "neutral";
 
+  const defaultRulesTarget = useMemo<OptionsNavigationTarget>(() => {
+    const project = visibleProjects.find((candidate) => candidate.enabled) ?? visibleProjects[0];
+    if (!project) return { view: "rules" };
+    const projectRuleSets = matchedRuleSetsByProject.get(project.id) ?? [];
+    const ruleSet = projectRuleSets.find((candidate) => candidate.enabled) ?? projectRuleSets[0];
+    return {
+      view: "rules",
+      projectId: project.id,
+      ruleSetId: ruleSet?.id,
+    };
+  }, [visibleProjects, matchedRuleSetsByProject]);
+
+  async function openRulesPage(target: OptionsNavigationTarget = defaultRulesTarget): Promise<void> {
+    try {
+      const optionsPageUrl = chrome.runtime.getURL("options.html");
+      const targetUrl = buildOptionsNavigationUrl(optionsPageUrl, target);
+      const tabs = await chrome.tabs.query({});
+      const existingOptionsTab = tabs.find((tab) => tab.url?.startsWith(optionsPageUrl));
+
+      if (existingOptionsTab?.id !== undefined) {
+        await chrome.tabs.update(existingOptionsTab.id, { active: true, url: targetUrl });
+        if (existingOptionsTab.windowId !== undefined) {
+          await chrome.windows.update(existingOptionsTab.windowId, { focused: true });
+        }
+        return;
+      }
+
+      await chrome.tabs.create({ url: targetUrl });
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "打开规则页失败。");
+    }
+  }
+
   async function refresh(): Promise<void> {
     setBusy(true);
     try {
@@ -268,7 +305,9 @@ function App() {
           </div>
           <div className="sp-hero-actions">
             <button className="btn btn-default btn-sm" onClick={() => void refresh()} disabled={busy}>刷新</button>
-            <button className="btn btn-primary btn-sm" onClick={() => void chrome.runtime.openOptionsPage()}>规则页</button>
+            <button className="btn btn-primary btn-sm" onClick={() => void openRulesPage()}>
+              {visibleProjects.length > 0 ? "查看命中规则" : "规则页"}
+            </button>
           </div>
         </div>
         <div className="sp-hero-url">{currentUrl || "打开一个网页后显示"}</div>
@@ -331,6 +370,16 @@ function App() {
                     </div>
                   </div>
                   <div className="sp-site-actions">
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => void openRulesPage({
+                        view: "rules",
+                        projectId: project.id,
+                        ruleSetId: (ruleSets.find((candidate) => candidate.enabled) ?? ruleSets[0])?.id,
+                      })}
+                    >
+                      查看规则
+                    </button>
                     <button
                       className={`btn btn-ghost btn-sm${!project.enabled ? " is-off" : ""}`}
                       onClick={() => void toggleProject(project)}
@@ -465,7 +514,7 @@ function App() {
       {/* Status footer */}
       <div className="sp-footer">
         <span className="sp-footer-status">{status}</span>
-        <button className="btn btn-ghost btn-sm" onClick={() => void chrome.runtime.openOptionsPage()}>打开工作台</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => void openRulesPage()}>打开工作台</button>
       </div>
     </div>
   );

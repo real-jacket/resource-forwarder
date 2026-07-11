@@ -1,5 +1,5 @@
 export interface SiteActionMenuItem {
-  key: "delete";
+  key: "duplicate" | "delete";
   label: string;
   danger?: boolean;
 }
@@ -19,7 +19,10 @@ export interface SiteTogglePresentation {
 }
 
 export function buildSiteActionMenuItems(_enabled: boolean): SiteActionMenuItem[] {
-  return [{ key: "delete", label: "删除站点", danger: true }];
+  return [
+    { key: "duplicate", label: "复制站点" },
+    { key: "delete", label: "删除站点", danger: true },
+  ];
 }
 
 export function getToolbarLayoutFlags(input: {
