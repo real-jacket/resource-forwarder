@@ -83,27 +83,30 @@ pnpm dev
 ## 系统架构
 
 ```mermaid
-flowchart LR
+flowchart TB
   subgraph Extension["浏览器扩展 extension-shell"]
-    Options["Options Page<br/>完整配置与调试"]
-    SidePanel["Side Panel<br/>当前页面状态与快捷开关"]
-    Background["Background Worker<br/>能力路由"]
-    BrowserExecutor["浏览器执行器<br/>转发、响应修改、内联 Mock"]
-    Bridge["Content Script + Page Bridge<br/>拦截 fetch / XHR"]
-    DNR["Chrome DNR<br/>静态资源重定向"]
+    direction LR
+    Options["Options Page"]
+    SidePanel["Side Panel"]
+    Bridge["Page Bridge"]
+    Background["Background Worker"]
+    BrowserExecutor["浏览器执行器"]
+    DNR["Chrome DNR"]
   end
 
   subgraph Core["共享核心"]
-    Types["shared-types<br/>跨包数据契约"]
-    RuleCore["rule-core<br/>匹配、排序、校验、DNR 转换"]
-    ForwardCore["forward-core<br/>跨运行时转发与响应策略"]
+    direction LR
+    Types["shared-types"]
+    RuleCore["rule-core"]
+    ForwardCore["forward-core"]
   end
 
   subgraph Service["可选本地 Companion forwarder-service"]
-    Forward["本地适配器<br/>文件系统与受限能力"]
-    Workspace["workspace.json<br/>工作区快照"]
-    Logs["logs/*.jsonl<br/>每日命中日志"]
-    Secrets["secrets.json<br/>加密敏感 Header"]
+    direction LR
+    Forward["本地适配器"]
+    Workspace["workspace.json"]
+    Logs["logs/*.jsonl"]
+    Secrets["secrets.json"]
   end
 
   Page["当前网页"]
@@ -135,8 +138,12 @@ flowchart LR
 
 代码依赖方向保持单向：
 
-```text
-shared-types -> rule-core -> forward-core -> extension-shell / forwarder-service
+```mermaid
+flowchart LR
+  Types["shared-types"] --> RuleCore["rule-core"]
+  RuleCore --> ForwardCore["forward-core"]
+  ForwardCore --> ExtensionShell["extension-shell"]
+  ForwardCore --> ForwarderService["forwarder-service"]
 ```
 
 ## 一次请求如何执行
@@ -156,11 +163,15 @@ flowchart TD
   DNR --> AssetTarget["浏览器加载替换后的 HTTPS 资源"]
 
   Kind -->|api_forward| Bridge["Page Bridge 拦截 fetch / XHR"]
-  Bridge --> LocalService["Background -> Local Service /forward"]
-  LocalService --> Mode{"响应模式"}
+  Bridge --> Background["Background 重新验证命中规则"]
+  Background --> Executor{"执行位置"}
+  Executor -->|浏览器| Browser["浏览器执行器"]
+  Executor -->|本地能力| Local["本地 Companion /forward"]
+  Browser --> Mode{"响应模式"}
+  Local --> Mode
   Mode -->|forward| Forward["请求上游，可应用 JSON Merge Patch"]
   Mode -->|mock_json| Inline["直接返回内联 JSON"]
-  Mode -->|mock_file| File["读取本地 JSON 文件"]
+  Mode -->|mock_file，本地| File["读取本地 JSON 文件"]
   Forward --> Response["应用状态码、Header 和延迟"]
   Inline --> Response
   File --> Response
@@ -226,12 +237,12 @@ https://app.example.com/tables/*
 
 资源替换会在保存工作区时转换为 Chrome 动态 DNR 规则：
 
-```text
-Options Page
-  -> Background Worker
-  -> rule-core 转换 DNR
-  -> chrome.declarativeNetRequest
-  -> 浏览器网络层重定向
+```mermaid
+flowchart LR
+  Options["Options Page"] --> Background["Background Worker"]
+  Background --> RuleCore["rule-core 转换 DNR"]
+  RuleCore --> DNR["chrome.declarativeNetRequest"]
+  DNR --> Redirect["浏览器网络层重定向"]
 ```
 
 规则会将：

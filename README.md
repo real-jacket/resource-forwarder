@@ -83,27 +83,30 @@ Open the target website and the extension Side Panel to inspect the projects, ru
 ## System architecture
 
 ```mermaid
-flowchart LR
+flowchart TB
   subgraph Extension["Browser extension: extension-shell"]
-    Options["Options Page<br/>Full configuration and debugging"]
-    SidePanel["Side Panel<br/>Current-page status and quick toggles"]
-    Background["Background Worker<br/>Capability router"]
-    BrowserExecutor["Browser executor<br/>Forward, patch, inline mock"]
-    Bridge["Content Script + Page Bridge<br/>Intercept fetch / XHR"]
-    DNR["Chrome DNR<br/>Asset redirection"]
+    direction LR
+    Options["Options Page"]
+    SidePanel["Side Panel"]
+    Bridge["Page Bridge"]
+    Background["Background Worker"]
+    BrowserExecutor["Browser executor"]
+    DNR["Chrome DNR"]
   end
 
   subgraph Core["Shared core"]
-    Types["shared-types<br/>Cross-package contracts"]
-    RuleCore["rule-core<br/>Matching, sorting, validation, DNR conversion"]
-    ForwardCore["forward-core<br/>Cross-runtime forwarding and response policies"]
+    direction LR
+    Types["shared-types"]
+    RuleCore["rule-core"]
+    ForwardCore["forward-core"]
   end
 
   subgraph Service["Optional local Companion: forwarder-service"]
-    Forward["Local adapter<br/>Filesystem and restricted capabilities"]
-    Workspace["workspace.json<br/>Workspace snapshot"]
-    Logs["logs/*.jsonl<br/>Daily hit logs"]
-    Secrets["secrets.json<br/>Encrypted sensitive headers"]
+    direction LR
+    Forward["Local adapter"]
+    Workspace["workspace.json"]
+    Logs["logs/*.jsonl"]
+    Secrets["secrets.json"]
   end
 
   Page["Current web page"]
@@ -135,8 +138,12 @@ flowchart LR
 
 The package dependency direction remains one-way:
 
-```text
-shared-types -> rule-core -> forward-core -> extension-shell / forwarder-service
+```mermaid
+flowchart LR
+  Types["shared-types"] --> RuleCore["rule-core"]
+  RuleCore --> ForwardCore["forward-core"]
+  ForwardCore --> ExtensionShell["extension-shell"]
+  ForwardCore --> ForwarderService["forwarder-service"]
 ```
 
 ## Request execution flow
@@ -156,11 +163,15 @@ flowchart TD
   DNR --> AssetTarget["Load the replacement HTTPS asset"]
 
   Kind -->|api_forward| Bridge["Page Bridge intercepts fetch / XHR"]
-  Bridge --> LocalService["Background -> Local Service /forward"]
-  LocalService --> Mode{"Response mode"}
+  Bridge --> Background["Background validates the matched rule"]
+  Background --> Executor{"Execution location"}
+  Executor -->|browser| Browser["Browser executor"]
+  Executor -->|local capability| Local["Local Companion /forward"]
+  Browser --> Mode{"Response mode"}
+  Local --> Mode
   Mode -->|forward| Forward["Call the upstream and optionally apply JSON Merge Patch"]
   Mode -->|mock_json| Inline["Return inline JSON"]
-  Mode -->|mock_file| File["Read a local JSON file"]
+  Mode -->|mock_file, local| File["Read a local JSON file"]
   Forward --> Response["Apply status, response headers, and delay"]
   Inline --> Response
   File --> Response
@@ -226,12 +237,12 @@ Rule Host: which destination host is intercepted
 
 Asset rules are converted into Chrome dynamic DNR rules when the workspace is saved:
 
-```text
-Options Page
-  -> Background Worker
-  -> rule-core DNR conversion
-  -> chrome.declarativeNetRequest
-  -> browser network-layer redirect
+```mermaid
+flowchart LR
+  Options["Options Page"] --> Background["Background Worker"]
+  Background --> RuleCore["rule-core DNR conversion"]
+  RuleCore --> DNR["chrome.declarativeNetRequest"]
+  DNR --> Redirect["Browser network-layer redirect"]
 ```
 
 The conversion maps:
