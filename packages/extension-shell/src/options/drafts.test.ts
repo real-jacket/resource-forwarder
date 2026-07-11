@@ -297,6 +297,7 @@ describe("toRule", () => {
       },
       target: {
         forwardProfile: {
+          executionMode: "local",
           targetBaseUrl: "http://localhost:3000/base?from=target",
           stripPrefix: "/api",
           pathRewrite: [{ from: "/users", to: "/v1/users" }],

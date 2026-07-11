@@ -6,6 +6,7 @@ export const STORAGE_KEYS = {
   workspace: "resource-forwarder:workspace",
   workspaceDirty: "resource-forwarder:workspace-dirty",
   pendingDeletes: "resource-forwarder:pending-deletes",
+  browserLogs: "resource-forwarder:browser-hit-logs",
 } as const;
 export const SESSION_STORAGE_KEYS = {
   // Forward request ids whose AbortControllers live inside the worker. Persisted

@@ -44,6 +44,13 @@ export function collectUnsupportedRuleWarnings(rule: Rule): string[] {
       if (responseMode === "mock_file" && !profile.responsePolicy?.mockFilePath?.trim()) {
         warnings.push(`API forward rule ${rule.name} needs a local JSON file path.`);
       }
+      if (responseMode === "mock_file" && profile.executionMode === "browser") {
+        warnings.push(`规则 ${rule.name} 使用本地 JSON 文件，不能强制为仅浏览器执行。`);
+      }
+      const forcedPassthrough = (profile.headerPolicy?.passthrough ?? []).map((name) => name.toLowerCase());
+      if (profile.executionMode === "browser" && forcedPassthrough.includes("cookie")) {
+        warnings.push(`规则 ${rule.name} 强制透传 Cookie，不能保证在仅浏览器模式下生效。`);
+      }
       const status = profile.responsePolicy?.status;
       if (status !== undefined && (!Number.isInteger(status) || status < 100 || status > 599)) {
         warnings.push(`API forward rule ${rule.name} has an invalid response status.`);

@@ -211,7 +211,7 @@ function App() {
       if (!state.currentTab?.host) {
         setStatus("当前标签页不可识别，请切到一个正常网页。");
       } else if (!state.health) {
-        setStatus("未连接到本地服务，请先启动本地服务。");
+        setStatus("Companion 未连接；普通 API 转发仍由浏览器执行，本地文件规则暂不可用。");
       } else {
         setStatus("当前页面状态已同步。");
       }
@@ -314,7 +314,7 @@ function App() {
         <div className="sp-hero-badges">
           <span className={`sp-badge ${dashboard?.health ? "online" : "offline"}`}>
             <span className="sp-badge-dot" />
-            {dashboard?.health ? "服务在线" : "离线"}
+            {dashboard?.health ? "Companion 在线" : "浏览器模式"}
           </span>
           <span className={`sp-badge ${visibleProjects.length > 0 ? "matched" : "unmatched"}`}>
             {visibleProjects.length > 0 ? `${visibleProjects.length} 个站点` : "未匹配"}

@@ -62,4 +62,19 @@ describe("collectWorkspaceWarnings hierarchy", () => {
       expect.stringMatching(/missing rule missing-rule/),
     ]));
   });
+
+  it("warns when a browser-only rule requires local capabilities", () => {
+    const invalid = baseWorkspace();
+    invalid.rules[0].target.forwardProfile = {
+      executionMode: "browser",
+      targetBaseUrl: "",
+      responsePolicy: { mode: "mock_file", mockFilePath: "/tmp/users.json" },
+      headerPolicy: { passthrough: ["cookie"] },
+    };
+    const warnings = collectWorkspaceWarnings(invalid);
+    expect(warnings).toEqual(expect.arrayContaining([
+      expect.stringMatching(/不能强制为仅浏览器执行/),
+      expect.stringMatching(/强制透传 Cookie/),
+    ]));
+  });
 });

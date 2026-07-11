@@ -488,7 +488,7 @@ function AdvancedTab({
               />
             </div>
           </div>
-          <span className="form-hint">强制透传 cookie 时，扩展会通过 Chrome cookies 权限读取当前请求域（包括 HttpOnly）的 Cookie，再交给本地服务。</span>
+          <span className="form-hint">强制透传 cookie 属于浏览器受限能力，自动模式会通过 Chrome cookies 权限读取后交给本地 Companion。</span>
           </FormDisclosure>
 
           <FormDisclosure
@@ -628,8 +628,26 @@ function AdvancedTab({
 
           <FormDisclosure
             title="可靠性与安全"
-            description="设置超时，以及代理失败时是否允许回源"
+            description="选择执行位置、设置超时，以及代理失败时是否允许回源"
           >
+          <div className="form-group">
+            <label className="form-label" htmlFor="rule-execution-mode">执行位置</label>
+            <CustomSelect
+              id="rule-execution-mode"
+              className="cs-form"
+              value={draft.executionMode}
+              options={[
+                { value: "auto", label: "自动选择（推荐）", description: "普通规则由浏览器执行，本地文件等能力自动使用 Companion" },
+                { value: "browser", label: "仅浏览器", description: "不依赖本地服务；不支持任意文件路径和受限 Header" },
+                { value: "local", label: "本地 Companion", description: "始终通过本地转发服务执行" },
+              ]}
+              onChange={(value) => setDraft((v) => ({ ...v, executionMode: value as RuleDraft["executionMode"] }))}
+              ariaLabel="执行位置"
+            />
+            <span className="form-hint">
+              自动模式优先使用扩展后台；本地 JSON 文件、强制 Cookie 透传等浏览器受限能力会自动切换到本地 Companion。
+            </span>
+          </div>
           <div className="form-row">
             <div className="form-group">
               <label className="form-label" htmlFor="rule-timeout">超时（毫秒）</label>
@@ -650,7 +668,7 @@ function AdvancedTab({
                 className="cs-form"
                 value={draft.fallbackMode}
                 options={[
-                  { value: "native", label: "回源原请求", description: "扩展离线、SSE 或超限时继续原请求" },
+                  { value: "native", label: "回源原请求", description: "执行器不可用、SSE 或超限时继续原请求" },
                   { value: "error", label: "直接报错，不回源", description: "避免写请求误打测试或线上环境" },
                 ]}
                 onChange={(value) => setDraft((v) => ({ ...v, fallbackMode: value as RuleDraft["fallbackMode"] }))}
@@ -658,7 +676,7 @@ function AdvancedTab({
               />
             </div>
           </div>
-          <span className="form-hint">服务离线、SSE 或请求/响应超过扩展消息限制时，建议写接口选择“不回源”，避免误打测试或线上环境。</span>
+          <span className="form-hint">执行器不可用、SSE 或请求/响应超过扩展消息限制时，建议写接口选择“不回源”，避免误打测试或线上环境。</span>
           </FormDisclosure>
         </>
       )}

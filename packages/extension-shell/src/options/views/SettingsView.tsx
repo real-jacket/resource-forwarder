@@ -83,7 +83,7 @@ export function SettingsView(props: SettingsViewProps) {
     <>
       <div className="page-header">
         <div className="page-title">设置</div>
-        <div className="page-subtitle">配置本地服务地址和管理站点</div>
+        <div className="page-subtitle">管理站点，并配置需要本地文件等能力时使用的可选 Companion</div>
       </div>
 
       <div className="settings-page">
@@ -142,12 +142,12 @@ function ServiceCard({
     <div className="settings-card">
       <div className="settings-card-header">
         <div className="settings-card-title">通用设置</div>
-        <div className="settings-card-desc">配置本地转发服务地址与鉴权 token</div>
+        <div className="settings-card-desc">仅本地文件、受限 Header 或强制本地执行规则需要配置</div>
       </div>
       <div className="settings-card-body">
         <div className="settings-field-row">
           <div className="form-group">
-            <label className="form-label">本地服务地址</label>
+            <label className="form-label">本地 Companion 地址</label>
             <input
               className="form-input"
               value={service.url}
@@ -166,7 +166,7 @@ function ServiceCard({
         <div className="settings-field-row">
           <div className="form-group">
             <label className="form-label">
-              服务 token
+              Companion token
               <span style={{ color: "var(--muted)", fontWeight: "normal", marginLeft: 8 }}>
                 {service.tokenSaved ? "已保存（粘贴新值会覆盖）" : "首次启动 service 后从 ~/.resource-forwarder/token 复制"}
               </span>
@@ -201,7 +201,7 @@ function ServiceCard({
         <div className={`service-status-bar ${dashboard?.health ? "online" : "offline"}`}>
           <span className="service-status-dot" />
           <span className="service-status-text">
-            {dashboard?.health ? `服务在线 · 端口 ${service.port}` : "服务离线 · 数据仅保存在本地"}
+            {dashboard?.health ? `Companion 在线 · 端口 ${service.port}` : "Companion 未连接 · 浏览器规则仍可运行"}
           </span>
         </div>
       </div>

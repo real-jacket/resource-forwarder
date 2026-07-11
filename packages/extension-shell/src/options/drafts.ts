@@ -146,6 +146,7 @@ export function createRuleDraft(options?: {
     responseMockFilePath: responsePolicy?.mockFilePath ?? "",
     responseHeadersJson: JSON.stringify(forwardProfile?.responseHeaderPolicy?.set ?? {}, null, 2),
     responseHeaderStrip: joinCsv(forwardProfile?.responseHeaderPolicy?.strip),
+    executionMode: forwardProfile?.executionMode ?? "auto",
     timeoutMs: forwardProfile?.timeoutMs ?? 15000,
     fallbackMode: forwardProfile?.fallbackMode ?? "native",
     tags: joinCsv(options?.rule?.tags),
@@ -293,6 +294,7 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
         ? { redirectUrl: draft.redirectUrl.trim() }
         : {
             forwardProfile: {
+              ...(draft.executionMode === "auto" ? {} : { executionMode: draft.executionMode }),
               targetBaseUrl: draft.targetBaseUrl.trim(),
               stripPrefix: draft.stripPrefix.trim() || undefined,
               pathRewrite: pathRewrite.length > 0 ? pathRewrite : undefined,
@@ -306,8 +308,8 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
                 strip: splitCsv(draft.headerStrip),
                 passthrough: splitCsv(draft.headerPassthrough),
               },
-              responsePolicy: hasResponsePolicy
-                ? {
+              ...(hasResponsePolicy
+                ? { responsePolicy: {
                     mode: draft.responseMode,
                     status: responseStatus,
                     statusText: draft.responseStatusText.trim() || undefined,
@@ -318,8 +320,8 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
                       draft.responseMode === "mock_file"
                         ? draft.responseMockFilePath.trim()
                         : undefined,
-                  }
-                : undefined,
+                  } }
+                : {}),
               responseHeaderPolicy: {
                 strip: splitCsv(draft.responseHeaderStrip),
                 set: responseHeaders,
@@ -433,7 +435,7 @@ const ruleTemplatePresets: RuleTemplatePreset[] = [
     id: "api-local",
     kind: "api_forward",
     label: "本地 API 联调",
-    description: "把 /api 请求转给本地服务",
+    description: "把 /api 请求转到本机或其他环境",
     patch: {
       kind: "api_forward",
       name: "本地 API 转发",

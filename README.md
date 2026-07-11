@@ -2,16 +2,16 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A browser-based local proxy toolkit for frontend development. Resource Forwarder combines a Manifest V3 extension with a local Fastify service so developers can replace static assets, forward APIs, modify real responses, or return JSON mocks without changing application source code.
+A browser-first proxy toolkit for frontend development. The Manifest V3 extension handles ordinary API forwarding and response modification directly; an optional local Companion adds filesystem and browser-restricted capabilities.
 
 ## Core capabilities
 
 | Capability | Typical use case | Execution layer |
 | --- | --- | --- |
 | Asset replacement | Replace remote JavaScript, CSS, images, or fonts with local builds | Chrome DNR network layer |
-| API forwarding | Route `fetch` / `XMLHttpRequest` calls to a local or alternate environment | Page Bridge + local service |
-| Response modification | Keep the real upstream request while changing JSON, status, or headers | Local service |
-| JSON mocking | Skip the upstream and return inline JSON or a local `.json` file | Local service |
+| API forwarding | Route `fetch` / `XMLHttpRequest` calls to a local or alternate environment | Extension Service Worker by default |
+| Response modification | Keep the real upstream request while changing JSON, status, or headers | Shared `forward-core` in the browser or Companion |
+| JSON mocking | Return inline JSON or a local `.json` file | Browser for inline JSON; Companion for arbitrary paths |
 | Scoped rules | Control activation by project, rule set, request conditions, and priority | `rule-core` |
 | Debugging and management | Inspect matches, hit logs, DNR state, and workspace imports/exports | Options Page / Side Panel |
 
@@ -27,9 +27,8 @@ Resource Forwarder is useful when you need to:
 
 ### Requirements
 
-- Node.js 20 or newer
-- pnpm 9
 - Chrome or Edge
+- Node.js 20 or newer and pnpm 9 for building the extension or using the optional Companion
 
 ### Install and run
 
@@ -38,7 +37,7 @@ pnpm install
 pnpm dev
 ```
 
-`pnpm dev` starts both:
+`pnpm dev` starts both the extension build and optional Companion for full development:
 
 - the local forwarding service at `http://127.0.0.1:5178`;
 - the extension watch build, written to `packages/extension-shell/dist`.
@@ -50,9 +49,9 @@ pnpm dev
 3. Choose **Load unpacked**.
 4. Select `packages/extension-shell/dist`.
 
-### Configure the service token once
+### Optional: configure the Companion token
 
-Every local service endpoint except `/health` requires a bearer token. On startup, the service prints the token file path:
+Ordinary forwarding, response patches, and inline JSON mocks do not require the Companion. Rules that read arbitrary local files, force browser-restricted headers, or explicitly use `executionMode: local` do. Every Companion endpoint except `/health` requires a bearer token. On startup it prints the token file path:
 
 ```text
 [forwarder-service] auth token file: <storage_root>/token
@@ -88,7 +87,8 @@ flowchart LR
   subgraph Extension["Browser extension: extension-shell"]
     Options["Options Page<br/>Full configuration and debugging"]
     SidePanel["Side Panel<br/>Current-page status and quick toggles"]
-    Background["Background Worker<br/>Extension runtime state"]
+    Background["Background Worker<br/>Capability router"]
+    BrowserExecutor["Browser executor<br/>Forward, patch, inline mock"]
     Bridge["Content Script + Page Bridge<br/>Intercept fetch / XHR"]
     DNR["Chrome DNR<br/>Asset redirection"]
   end
@@ -96,10 +96,11 @@ flowchart LR
   subgraph Core["Shared core"]
     Types["shared-types<br/>Cross-package contracts"]
     RuleCore["rule-core<br/>Matching, sorting, validation, DNR conversion"]
+    ForwardCore["forward-core<br/>Cross-runtime forwarding and response policies"]
   end
 
-  subgraph Service["Local service: forwarder-service"]
-    Forward["Fastify /forward<br/>Request and response rewriting"]
+  subgraph Service["Optional local Companion: forwarder-service"]
+    Forward["Local adapter<br/>Filesystem and restricted capabilities"]
     Workspace["workspace.json<br/>Workspace snapshot"]
     Logs["logs/*.jsonl<br/>Daily hit logs"]
     Secrets["secrets.json<br/>Encrypted sensitive headers"]
@@ -115,14 +116,19 @@ flowchart LR
   Page --> Bridge
   Bridge --> Background
   Background --> DNR
+  Background --> BrowserExecutor
   Background <--> Forward
   Background --> RuleCore
   Forward --> RuleCore
+  BrowserExecutor --> ForwardCore
+  Forward --> ForwardCore
   RuleCore --> Types
+  ForwardCore --> RuleCore
   Forward <--> Workspace
   Forward --> Logs
   Forward <--> Secrets
   DNR --> Assets
+  BrowserExecutor --> Upstream
   Forward --> Upstream
   Forward --> MockFile
 ```
@@ -130,7 +136,7 @@ flowchart LR
 The package dependency direction remains one-way:
 
 ```text
-shared-types -> rule-core -> extension-shell / forwarder-service
+shared-types -> rule-core -> forward-core -> extension-shell / forwarder-service
 ```
 
 ## Request execution flow
@@ -264,7 +270,7 @@ API rules can combine:
 
 ### Cookie forwarding
 
-Same-host forwarding can supplement browser cookies, including HttpOnly cookies that page JavaScript cannot read.
+Browser execution uses the target host's browser credentials where Chrome permits it. Moving the source host's Cookie header, including HttpOnly cookies, is a browser-restricted capability and automatically uses the local Companion in `auto` mode.
 
 Cross-host forwarding does not include cookies by default. Add `cookie` to the header passthrough list only when the target explicitly requires it.
 
@@ -291,14 +297,18 @@ Skip the upstream and read a `.json` file through the local service.
 
 Paths may be absolute or relative to the working directory from which the forwarder service was started. Files must contain valid JSON and may not exceed 4 MiB.
 
+### Execution mode
+
+Each API rule supports `auto`, `browser`, or `local` execution. `auto` is the default: ordinary forwarding, response patches, and inline mocks run in the extension Service Worker, while arbitrary file paths and restricted headers route to the Companion. `browser` rejects local-only capabilities instead of silently changing location; `local` always uses the Companion.
+
 ### Failure behavior
 
 Each API rule can choose:
 
-- `native`: retry the original browser request when the service is offline, streaming is unsupported, or request/response limits are exceeded;
+- `native`: retry the original browser request when the selected executor is unavailable, streaming is unsupported, or request/response limits are exceeded;
 - `error`: block native fallback and surface an error to the page.
 
-For local API development, `error` is recommended to prevent an unavailable local service from silently sending requests to a shared test or production environment.
+For write APIs, `error` is recommended to prevent an unavailable executor from silently sending requests to a shared test or production environment.
 
 ## User interfaces
 
@@ -363,6 +373,7 @@ RF_EXTENSION_ID=<your-extension-id> pnpm dev:service
 | --- | --- |
 | `packages/shared-types` | Cross-package TypeScript contracts |
 | `packages/rule-core` | Workspace parsing, matching, conflict checks, and DNR conversion |
+| `packages/forward-core` | Cross-runtime request forwarding and response policy execution |
 | `packages/forwarder-service` | Fastify service, persistence, proxying, and logs |
 | `packages/extension-shell` | Background Worker, Page Bridge, Options Page, and Side Panel |
 
@@ -381,6 +392,7 @@ Package-level tests:
 
 ```bash
 pnpm --filter @resource-forwarder/rule-core test
+pnpm --filter @resource-forwarder/forward-core test
 pnpm --filter @resource-forwarder/forwarder-service test
 pnpm --filter @resource-forwarder/extension-shell test
 ```

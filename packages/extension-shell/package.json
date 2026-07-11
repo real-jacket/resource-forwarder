@@ -9,6 +9,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@resource-forwarder/forward-core": "workspace:*",
     "@resource-forwarder/rule-core": "workspace:*",
     "@resource-forwarder/shared-types": "workspace:*",
     "react": "^18.3.1",

@@ -82,6 +82,11 @@ export interface PathRewrite {
 }
 
 export interface ForwardProfile {
+  /**
+   * Select where the rule is executed. `auto` prefers the browser and falls
+   * back to the optional local companion only for local-only capabilities.
+   */
+  executionMode?: "auto" | "browser" | "local";
   targetBaseUrl: string;
   stripPrefix?: string;
   pathRewrite?: PathRewrite[];
