@@ -70,19 +70,24 @@ export function assertWorkspace(value: unknown): WorkspaceSnapshot {
     updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : new Date().toISOString(),
     projects: candidate.projects.map((project) => {
       const tags = Array.isArray(project.tags) ? project.tags : [];
-      const siteHosts = Array.isArray(project.siteHosts)
+      const explicitSiteHosts = Array.isArray(project.siteHosts)
         ? project.siteHosts.map((host: string) => normalizeImportedHost(host))
         : [];
       const siteMatchPatterns = Array.isArray(project.siteMatchPatterns) && project.siteMatchPatterns.length > 0
-        ? project.siteMatchPatterns
-        : siteHosts.length > 0
-          ? siteHosts.map((h: string) => h === "*" ? "*" : `https://${h}/*`)
+        ? normalizeSiteMatchPatterns(project.siteMatchPatterns)
+        : explicitSiteHosts.length > 0
+          ? explicitSiteHosts.map((host: string) => host === "*" ? "*" : `https://${host}/*`)
           : [];
+      const derivedSiteHosts = deriveSiteHosts(siteMatchPatterns);
+      const siteHosts = derivedSiteHosts.length > 0 ? derivedSiteHosts : explicitSiteHosts;
       return { ...project, tags, siteHosts, siteMatchPatterns };
     }),
     ruleSets: candidate.ruleSets.map((ruleSet) => ({
       ...ruleSet,
       ruleIds: Array.isArray(ruleSet.ruleIds) ? ruleSet.ruleIds : [],
+      siteMatchPatterns: Array.isArray(ruleSet.siteMatchPatterns) && ruleSet.siteMatchPatterns.length > 0
+        ? normalizeSiteMatchPatterns(ruleSet.siteMatchPatterns)
+        : undefined,
     })),
     rules: candidate.rules.map((rule) => ({
       ...rule,
@@ -108,7 +113,7 @@ export function assertWorkspace(value: unknown): WorkspaceSnapshot {
 export function deriveSiteHosts(patterns: string[]): string[] {
   const hosts = new Set<string>();
   for (const pattern of patterns) {
-    const trimmed = pattern.trim();
+    const trimmed = normalizeSiteMatchPattern(pattern);
     if (!trimmed || trimmed === "*" || trimmed === "<all_urls>") {
       hosts.add("*");
       continue;
@@ -139,7 +144,7 @@ export function matchesProjectSite(
   if (project.siteHosts.length === 0 || project.siteHosts.includes("*")) return true;
 
   try {
-    const host = new URL(pageUrl).host;
+    const host = new URL(pageUrl).hostname;
     return matchesHost(project.siteHosts, host);
   } catch {
     return false;
@@ -168,7 +173,7 @@ export function matchesRuleSetSite(
 }
 
 function matchesSitePattern(pattern: string, pageUrl: string): boolean {
-  const trimmed = pattern.trim();
+  const trimmed = normalizeSiteMatchPattern(pattern);
   if (!trimmed || trimmed === "*" || trimmed === "<all_urls>") return true;
 
   const patternUrlMatch = trimmed.match(/^(\*|https?):\/\/([^/]*)(\/.*)?$/i);
@@ -184,7 +189,7 @@ function matchesSitePattern(pattern: string, pageUrl: string): boolean {
   }
 
   if (patternScheme !== "*" && url.protocol !== `${patternScheme}:`) return false;
-  if (patternHost !== "*" && !matchesHost([patternHost!], url.host)) return false;
+  if (patternHost !== "*" && !matchesHost([normalizeImportedHost(patternHost!)], url.hostname)) return false;
 
   const pathGlob = patternPath || "/**";
   // Chrome match-pattern semantics: `*` spans `/`. Internal path glob uses single-segment `*`, so promote standalone `*` to `**`.
@@ -271,4 +276,21 @@ export function normalizeImportedHost(host: string): string {
   if (value === "*" || value === ".*") return "*";
 
   return value.replace(/\.$/, "").replace(/:\d+$/, "");
+}
+
+export function normalizeSiteMatchPattern(pattern: string): string {
+  const trimmed = pattern.trim();
+  if (!trimmed || trimmed === "*" || trimmed === "<all_urls>") return trimmed;
+
+  const candidate = /^(?:\*|https?):\/\//i.test(trimmed) ? trimmed : `*://${trimmed}`;
+  const match = candidate.match(/^(\*|https?):\/\/([^/]+)(\/.*)?$/i);
+  if (!match) return trimmed;
+
+  const [, scheme, host, path] = match;
+  const normalizedHost = normalizeImportedHost(host);
+  return normalizedHost ? `${scheme}://${normalizedHost}${path || "/*"}` : trimmed;
+}
+
+export function normalizeSiteMatchPatterns(patterns: string[]): string[] {
+  return patterns.map(normalizeSiteMatchPattern);
 }

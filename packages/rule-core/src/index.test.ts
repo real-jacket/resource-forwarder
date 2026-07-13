@@ -166,6 +166,37 @@ describe("rule-core", () => {
     expect(parsed.rules[0]?.match.host).toEqual(["app.example.com"]);
   });
 
+  it("normalizes bare project site patterns when parsing workspace snapshots", () => {
+    const parsed = parseWorkspace(JSON.stringify({
+      ...workspace,
+      projects: [
+        {
+          ...workspace.projects[0]!,
+          siteHosts: [],
+          siteMatchPatterns: ["172.17.9.216"],
+        },
+      ],
+    }));
+
+    expect(parsed.projects[0]?.siteHosts).toEqual(["172.17.9.216"]);
+    expect(parsed.projects[0]?.siteMatchPatterns).toEqual(["*://172.17.9.216/*"]);
+  });
+
+  it("derives project hosts from explicit site patterns instead of retaining stale hosts", () => {
+    const parsed = parseWorkspace(JSON.stringify({
+      ...workspace,
+      projects: [
+        {
+          ...workspace.projects[0]!,
+          siteHosts: ["stale.example.com"],
+          siteMatchPatterns: ["https://app.example.com/*"],
+        },
+      ],
+    }));
+
+    expect(parsed.projects[0]?.siteHosts).toEqual(["app.example.com"]);
+  });
+
   it("sets initiatorDomains from project siteHosts even for same-origin asset redirects", () => {
     const rules = toDynamicNetRequestRules(workspace);
     expect(rules).toHaveLength(1);
@@ -672,6 +703,14 @@ describe("rule-core", () => {
     expect(matchesProjectSite(project, "https://shimo.im/tables/abc")).toBe(true);
     expect(matchesProjectSite(project, "https://shimo.im/sheets/abc")).toBe(true);
     expect(matchesProjectSite(project, "https://other.com/abc")).toBe(false);
+  });
+
+  it("matchesProjectSite ignores the page port when comparing an IP site pattern", () => {
+    const project = {
+      siteHosts: ["172.17.9.216"],
+      siteMatchPatterns: ["http://172.17.9.216/*"],
+    };
+    expect(matchesProjectSite(project, "http://172.17.9.216:3000/dashboard")).toBe(true);
   });
 
   it("matchesProjectSite matches all URLs when both siteHosts and siteMatchPatterns are empty", () => {

@@ -24,6 +24,8 @@ export {
   matchesProjectSite,
   matchesRuleSetSite,
   normalizeImportedHost,
+  normalizeSiteMatchPattern,
+  normalizeSiteMatchPatterns,
   parseWorkspace,
   serializeWorkspace,
   trimWorkspaceForUrl,

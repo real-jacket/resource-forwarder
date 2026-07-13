@@ -6,6 +6,7 @@ import {
   detectFormat,
   deriveSiteHosts,
   matchesProjectSite,
+  normalizeSiteMatchPatterns,
   parseResourceOverrideExport,
   serializeWorkspace,
   sortRules,
@@ -70,6 +71,7 @@ import {
 } from "./drafts.js";
 import { buildRuleSearchText, localizeWarning } from "./formatters.js";
 import { isRuleEffectivelyDisabled } from "./rule-groups.js";
+import { resolveRuleContext } from "./rule-context.js";
 
 const emptyProjectDraft = (): ProjectDraft => ({
   id: "",
@@ -467,43 +469,49 @@ function App() {
     setShowRuleSetModal(true);
   }
 
-  function openRulePanel(kind: Rule["kind"], rule?: Rule): void {
-    if (!selectedProject || !selectedRuleSet) {
+  function openRulePanel(
+    kind: Rule["kind"],
+    rule?: Rule,
+    project?: Project | null,
+    ruleSet?: RuleSet | null,
+  ): void {
+    const source = resolveRuleContext({ project, ruleSet, selectedProject, selectedRuleSet });
+    if (!source.project || !source.ruleSet) {
       setStatus("请先创建一个站点，再添加规则。");
       return;
     }
-    setRuleDraft(createRuleDraft({ project: selectedProject, ruleSet: selectedRuleSet, kind, rule }));
+    setSelectedProjectId(source.project.id);
+    setSelectedRuleSetId(source.ruleSet.id);
+    setRuleDraft(createRuleDraft({ project: source.project, ruleSet: source.ruleSet, kind, rule }));
     setRulePanelTab("basic");
     setPanelMode("rule");
   }
 
   function duplicateRule(rule: Rule, project?: Project | null, ruleSet?: RuleSet | null): void {
-    const sourceProject = project ?? selectedProject;
-    const sourceRuleSet = ruleSet ?? selectedRuleSet;
-    if (!sourceProject || !sourceRuleSet) {
+    const source = resolveRuleContext({ project, ruleSet, selectedProject, selectedRuleSet });
+    if (!source.project || !source.ruleSet) {
       setStatus("请先选择一个站点，再复制规则。");
       return;
     }
-    setSelectedProjectId(sourceProject.id);
-    setSelectedRuleSetId(sourceRuleSet.id);
-    const base = createRuleDraft({ project: sourceProject, ruleSet: sourceRuleSet, kind: rule.kind, rule });
+    setSelectedProjectId(source.project.id);
+    setSelectedRuleSetId(source.ruleSet.id);
+    const base = createRuleDraft({ project: source.project, ruleSet: source.ruleSet, kind: rule.kind, rule });
     setRuleDraft({ ...base, id: "", name: `${rule.name} 副本` });
     setRulePanelTab("basic");
     setPanelMode("rule");
   }
 
   function openRuleCopyModal(rule: Rule, project?: Project | null, ruleSet?: RuleSet | null): void {
-    const sourceProject = project ?? selectedProject;
-    const sourceRuleSet = ruleSet ?? selectedRuleSet;
-    if (!sourceProject || !sourceRuleSet) {
+    const source = resolveRuleContext({ project, ruleSet, selectedProject, selectedRuleSet });
+    if (!source.project || !source.ruleSet) {
       setStatus("请先定位规则所属的站点和分组。");
       return;
     }
-    const targetProjectId = findDefaultCopyTargetProjectId(projects, sourceProject.id);
+    const targetProjectId = findDefaultCopyTargetProjectId(projects, source.project.id);
     setCopyDraft({
       mode: "rule",
-      sourceProjectId: sourceProject.id,
-      sourceRuleSetId: sourceRuleSet.id,
+      sourceProjectId: source.project.id,
+      sourceRuleSetId: source.ruleSet.id,
       sourceRuleId: rule.id,
       targetProjectId,
       targetRuleSetId: findFirstRuleSetId(ruleSets, targetProjectId),
@@ -607,7 +615,7 @@ function App() {
       const projectId = projectDraft.id || createId("project");
       const existingRuleSets =
         dashboard?.workspace.ruleSets.filter((rs) => rs.projectId === projectId) ?? [];
-      const siteMatchPatterns = splitCsv(projectDraft.siteMatchPatterns);
+      const siteMatchPatterns = normalizeSiteMatchPatterns(splitCsv(projectDraft.siteMatchPatterns));
       const payload = {
         project: {
           id: projectId,
@@ -664,7 +672,7 @@ function App() {
     try {
       const now = new Date().toISOString();
       const existing = ruleSets.find((rs) => rs.id === ruleSetDraft.id);
-      const siteMatchPatterns = splitCsv(ruleSetDraft.siteMatchPatterns);
+      const siteMatchPatterns = normalizeSiteMatchPatterns(splitCsv(ruleSetDraft.siteMatchPatterns));
       const ruleSet: RuleSet = {
         id: ruleSetDraft.id || createId("ruleset"),
         projectId: ruleSetDraft.projectId,
