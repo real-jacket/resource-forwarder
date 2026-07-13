@@ -1618,7 +1618,11 @@ summary {
 }
 
 .panel-open .rule-table .col-name {
-  width: 25% !important;
+  width: 28% !important;
+}
+
+.panel-open .rule-table .col-kind {
+  width: 92px !important;
 }
 
 .panel-open .rule-table .col-match {
@@ -1626,11 +1630,11 @@ summary {
 }
 
 .panel-open .rule-table .col-actions {
-  width: 132px !important;
+  width: 144px !important;
 }
 
 .panel-open .rule-group-patterns {
-  max-width: 220px;
+  max-width: 180px;
 }
 
 .rule-panel-header {

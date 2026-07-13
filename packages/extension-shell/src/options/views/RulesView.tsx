@@ -527,6 +527,7 @@ function GroupedRuleTable({
 }: GroupedRuleTableProps) {
   const [collapsedRuleSetIds, setCollapsedRuleSetIds] = React.useState<Set<string>>(new Set());
   const groups = buildRuleGroups(rows, selectedProjectId, projectRuleSets);
+  const visibleColumnCount = editingRuleId ? 6 : 8;
 
   return (
     <div className="rule-table-card">
@@ -536,7 +537,7 @@ function GroupedRuleTable({
             <th style={{ width: 48 }}></th>
             <th className="col-seq" style={{ width: 40 }}>总序</th>
             <th className="col-name" style={{ width: "15%" }}>规则名称</th>
-            <th style={{ width: 80 }}>匹配类型</th>
+            <th className="col-kind" style={{ width: 80 }}>匹配类型</th>
             <th className="col-match" style={{ width: "22%" }}>匹配规则</th>
             <th className="col-target">代理资源</th>
             <th className="col-time" style={{ width: 110 }}>更新时间</th>
@@ -552,6 +553,7 @@ function GroupedRuleTable({
                 collapsed={group.ruleSet ? collapsedRuleSetIds.has(group.ruleSet.id) : false}
                 busy={busy}
                 actions={actions}
+                colSpan={visibleColumnCount}
                 onToggleCollapse={
                   group.ruleSet
                     ? () =>
@@ -598,6 +600,7 @@ function GroupHeaderRow({
   collapsed,
   busy,
   actions,
+  colSpan,
   onToggleCollapse,
 }: {
   ruleSet: RuleSet | null;
@@ -605,12 +608,13 @@ function GroupHeaderRow({
   collapsed: boolean;
   busy: boolean;
   actions: RulesViewProps["actions"];
+  colSpan: number;
   onToggleCollapse?: () => void;
 }) {
   if (!ruleSet) {
     return (
       <tr className="rule-group-row">
-        <td colSpan={8}>
+        <td colSpan={colSpan}>
           <div className="rule-group-header is-orphan">
             <span className="rule-group-name">未归类规则</span>
             <span className="rule-group-meta">{ruleCount} 条</span>
@@ -622,7 +626,7 @@ function GroupHeaderRow({
 
   return (
     <tr className={`rule-group-row${ruleSet.enabled ? "" : " is-disabled"}`}>
-      <td colSpan={8}>
+      <td colSpan={colSpan}>
         <div className="rule-group-header">
           <button
             className="btn-icon"
@@ -745,7 +749,7 @@ function RuleTableRow({
           {rule.name}
         </span>
       </td>
-      <td>
+      <td className="col-kind">
         <span className={`match-badge ${rule.kind === "api_forward" ? "api" : "asset"}`}>
           {rule.kind === "api_forward" ? "API 转发" : "资源替换"}
         </span>
