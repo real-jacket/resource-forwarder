@@ -84,7 +84,7 @@ export function planDeleteProject(
 ): { workspace: WorkspaceSnapshot; deletions: PendingDeletions } {
   const ruleSetsToRemove = workspace.ruleSets.filter((ruleSet) => ruleSet.projectId === projectId);
   const ruleSetIds = ruleSetsToRemove.map((ruleSet) => ruleSet.id);
-  const ruleIds = Array.from(new Set(ruleSetsToRemove.flatMap((ruleSet) => ruleSet.ruleIds)));
+  const ruleIds = collectExclusivelyOwnedRuleIds(workspace, new Set(ruleSetIds));
   const deletions: PendingDeletions = { projectIds: [projectId], ruleSetIds, ruleIds };
   return { workspace: applyPendingDeletions(workspace, deletions), deletions };
 }
@@ -113,9 +113,28 @@ export function planDeleteRuleSet(
   ruleSetId: string,
 ): { workspace: WorkspaceSnapshot; deletions: PendingDeletions } {
   const target = workspace.ruleSets.find((ruleSet) => ruleSet.id === ruleSetId);
-  const ruleIds = target ? Array.from(new Set(target.ruleIds)) : [];
+  const ruleIds = target ? collectExclusivelyOwnedRuleIds(workspace, new Set([ruleSetId])) : [];
   const deletions: PendingDeletions = { projectIds: [], ruleSetIds: [ruleSetId], ruleIds };
   return { workspace: applyPendingDeletions(workspace, deletions), deletions };
+}
+
+function collectExclusivelyOwnedRuleIds(
+  workspace: WorkspaceSnapshot,
+  ruleSetIdsToRemove: Set<string>,
+): string[] {
+  const retainedRuleIds = new Set(
+    workspace.ruleSets
+      .filter((ruleSet) => !ruleSetIdsToRemove.has(ruleSet.id))
+      .flatMap((ruleSet) => ruleSet.ruleIds),
+  );
+  return Array.from(
+    new Set(
+      workspace.ruleSets
+        .filter((ruleSet) => ruleSetIdsToRemove.has(ruleSet.id))
+        .flatMap((ruleSet) => ruleSet.ruleIds)
+        .filter((ruleId) => !retainedRuleIds.has(ruleId)),
+    ),
+  );
 }
 
 export function applyUpsertProject(

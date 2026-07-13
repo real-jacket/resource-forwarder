@@ -613,8 +613,6 @@ function App() {
     try {
       const now = new Date().toISOString();
       const projectId = projectDraft.id || createId("project");
-      const existingRuleSets =
-        dashboard?.workspace.ruleSets.filter((rs) => rs.projectId === projectId) ?? [];
       const siteMatchPatterns = normalizeSiteMatchPatterns(splitCsv(projectDraft.siteMatchPatterns));
       const payload = {
         project: {
@@ -631,20 +629,6 @@ function App() {
             dashboard?.workspace.projects.find((p) => p.id === projectId)?.createdAt ?? now,
           updatedAt: now,
         },
-        ruleSets:
-          existingRuleSets.length > 0
-            ? existingRuleSets
-            : [
-                {
-                  id: createId("ruleset"),
-                  projectId,
-                  name: `${projectDraft.name.trim()} 默认分组`,
-                  enabled: true,
-                  ruleIds: [],
-                  createdAt: now,
-                  updatedAt: now,
-                },
-              ],
       };
       const state = await runtimeRequest<UpsertMutationResponse>({ type: "upsert-project", payload });
       hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
@@ -718,10 +702,14 @@ function App() {
   }
 
   async function deleteRuleSet(ruleSet: RuleSet): Promise<void> {
-    const ruleCount = ruleSet.ruleIds.length;
+    const retainedRuleIds = new Set(
+      ruleSets.filter((candidate) => candidate.id !== ruleSet.id).flatMap((candidate) => candidate.ruleIds),
+    );
+    const ruleCount = new Set(ruleSet.ruleIds.filter((ruleId) => !retainedRuleIds.has(ruleId))).size;
+    const retainedCount = new Set(ruleSet.ruleIds.filter((ruleId) => retainedRuleIds.has(ruleId))).size;
     const confirmed = await confirm({
       title: "删除分组",
-      message: `确认删除分组「${ruleSet.name}」？\n将同时删除其下 ${ruleCount} 条规则，此操作不可撤销。`,
+      message: `确认删除分组「${ruleSet.name}」？\n将同时删除仅属于该分组的 ${ruleCount} 条规则${retainedCount > 0 ? `，另有 ${retainedCount} 条被其他分组引用的规则会保留` : ""}。此操作不可撤销。`,
       confirmText: "删除",
       danger: true,
     });
@@ -1003,7 +991,7 @@ function App() {
   async function batchToggleProjects(enable: boolean): Promise<void> {
     const targets = projects.filter((p) => selectedProjectIds.has(p.id) && p.enabled !== enable);
     if (targets.length === 0) {
-      setStatus(`选中的分组已${enable ? "全部启用" : "全部停用"}。`);
+      setStatus(`选中的站点已${enable ? "全部启用" : "全部停用"}。`);
       return;
     }
     setBusy(true);
@@ -1012,15 +1000,12 @@ function App() {
       for (const project of targets) {
         lastState = await runtimeRequest<UpsertMutationResponse>({
           type: "upsert-project",
-          payload: {
-            project: { ...project, enabled: enable },
-            ruleSets: ruleSets.filter((rs) => rs.projectId === project.id),
-          },
+          payload: { project: { ...project, enabled: enable } },
         });
       }
       if (lastState) hydrateDashboard({ ...lastState, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
       setSelectedProjectIds(new Set());
-      setStatus(`已${enable ? "启用" : "停用"} ${targets.length} 个分组。`);
+      setStatus(`已${enable ? "启用" : "停用"} ${targets.length} 个站点。`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "批量操作失败。");
     } finally {
@@ -1036,8 +1021,8 @@ function App() {
       0,
     );
     const confirmed = await confirm({
-      title: "批量删除分组",
-      message: `确认删除 ${targets.length} 个分组？\n将同时删除 ${totalRules} 条规则，此操作不可撤销。`,
+      title: "批量删除站点",
+      message: `确认删除 ${targets.length} 个站点？\n将同时删除这些站点下的 ${totalRules} 条规则，此操作不可撤销。`,
       confirmText: "全部删除",
       danger: true,
     });
@@ -1055,7 +1040,7 @@ function App() {
       if (lastState) hydrateDashboard({ ...lastState, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
       if (selectedProjectIds.has(selectedProjectId)) setSelectedProjectId("");
       setSelectedProjectIds(new Set());
-      setStatus(`已删除 ${targets.length} 个分组。`);
+      setStatus(`已删除 ${targets.length} 个站点。`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "批量删除失败。");
     } finally {

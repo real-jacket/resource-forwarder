@@ -88,6 +88,18 @@ describe("workspace-mutations", () => {
       expect(workspace.projects).toHaveLength(2);
       expect(workspace.rules).toHaveLength(3);
     });
+
+    it("keeps rules that are still referenced by a rule set in another project", () => {
+      const input = baseWorkspace();
+      input.ruleSets[1].ruleIds.push("r2");
+
+      const { workspace, deletions } = planDeleteProject(input, "p1");
+
+      expect(workspace.projects.map((project) => project.id)).toEqual(["p2"]);
+      expect(workspace.rules.map((rule) => rule.id)).toEqual(["r2", "r3"]);
+      expect(workspace.ruleSets[0].ruleIds).toEqual(["r3", "r2"]);
+      expect(deletions.ruleIds).toEqual(["r1"]);
+    });
   });
 
   describe("planDeleteRule", () => {
@@ -118,6 +130,18 @@ describe("workspace-mutations", () => {
       expect(workspace.ruleSets).toHaveLength(2);
       expect(workspace.rules).toHaveLength(3);
       expect(deletions.ruleIds).toEqual([]);
+    });
+
+    it("keeps rules that are still referenced by another rule set", () => {
+      const input = baseWorkspace();
+      input.ruleSets[1].ruleIds.push("r2");
+
+      const { workspace, deletions } = planDeleteRuleSet(input, "rs1");
+
+      expect(workspace.ruleSets.map((rs) => rs.id)).toEqual(["rs2"]);
+      expect(workspace.rules.map((rule) => rule.id)).toEqual(["r2", "r3"]);
+      expect(workspace.ruleSets[0].ruleIds).toEqual(["r3", "r2"]);
+      expect(deletions.ruleIds).toEqual(["r1"]);
     });
   });
 
