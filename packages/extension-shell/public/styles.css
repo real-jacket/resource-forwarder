@@ -5577,7 +5577,7 @@ body {
 }
 
 .toggle-switch input:checked + .toggle-track {
-  background: #1a7f37;
+  background: var(--primary);
 }
 
 .table-empty {
