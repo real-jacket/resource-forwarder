@@ -275,7 +275,7 @@ export function normalizeImportedHost(host: string): string {
   const value = explicitUrlMatch?.[1] ?? trimmed;
   if (value === "*" || value === ".*") return "*";
 
-  return value.replace(/\.$/, "").replace(/:\d+$/, "");
+  return value.replace(/\.$/, "").replace(/:\d+$/, "").toLowerCase();
 }
 
 export function normalizeSiteMatchPattern(pattern: string): string {
@@ -288,7 +288,7 @@ export function normalizeSiteMatchPattern(pattern: string): string {
 
   const [, scheme, host, path] = match;
   const normalizedHost = normalizeImportedHost(host);
-  return normalizedHost ? `${scheme}://${normalizedHost}${path || "/*"}` : trimmed;
+  return normalizedHost ? `${scheme.toLowerCase()}://${normalizedHost}${path || "/*"}` : trimmed;
 }
 
 export function normalizeSiteMatchPatterns(patterns: string[]): string[] {

@@ -6,8 +6,11 @@ export function resolveRuleContext(options: {
   selectedProject?: Project;
   selectedRuleSet?: RuleSet;
 }): { project?: Project; ruleSet?: RuleSet } {
-  return {
-    project: options.project ?? options.selectedProject,
-    ruleSet: options.ruleSet ?? options.selectedRuleSet,
-  };
+  if (options.project && options.ruleSet?.projectId === options.project.id) {
+    return { project: options.project, ruleSet: options.ruleSet };
+  }
+  if (options.selectedProject && options.selectedRuleSet?.projectId === options.selectedProject.id) {
+    return { project: options.selectedProject, ruleSet: options.selectedRuleSet };
+  }
+  return {};
 }

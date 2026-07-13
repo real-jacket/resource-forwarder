@@ -55,4 +55,25 @@ describe("resolveRuleContext", () => {
     expect(resolved.project?.id).toBe("project-selected");
     expect(resolved.ruleSet?.id).toBe("ruleset-selected");
   });
+
+  it("falls back as a pair when only the row ruleSet exists", () => {
+    const resolved = resolveRuleContext({
+      project: null,
+      ruleSet: rowRuleSet,
+      selectedProject,
+      selectedRuleSet,
+    });
+
+    expect(resolved.project?.id).toBe("project-selected");
+    expect(resolved.ruleSet?.id).toBe("ruleset-selected");
+  });
+
+  it("rejects a selected ruleSet that belongs to another project", () => {
+    const resolved = resolveRuleContext({
+      selectedProject,
+      selectedRuleSet: { ...selectedRuleSet, projectId: "another-project" },
+    });
+
+    expect(resolved).toEqual({});
+  });
 });

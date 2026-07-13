@@ -182,6 +182,23 @@ describe("rule-core", () => {
     expect(parsed.projects[0]?.siteMatchPatterns).toEqual(["*://172.17.9.216/*"]);
   });
 
+  it("normalizes site pattern scheme and host casing before matching", () => {
+    const parsed = parseWorkspace(JSON.stringify({
+      ...workspace,
+      projects: [
+        {
+          ...workspace.projects[0]!,
+          siteHosts: [],
+          siteMatchPatterns: ["HTTPS://APP.EXAMPLE.COM/*"],
+        },
+      ],
+    }));
+
+    expect(parsed.projects[0]?.siteHosts).toEqual(["app.example.com"]);
+    expect(parsed.projects[0]?.siteMatchPatterns).toEqual(["https://app.example.com/*"]);
+    expect(matchesProjectSite(parsed.projects[0]!, "https://app.example.com/dashboard")).toBe(true);
+  });
+
   it("derives project hosts from explicit site patterns instead of retaining stale hosts", () => {
     const parsed = parseWorkspace(JSON.stringify({
       ...workspace,
