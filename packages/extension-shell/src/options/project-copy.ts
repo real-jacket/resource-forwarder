@@ -24,13 +24,14 @@ export function createProjectCopyBundle(
 
   const nextProjectId = createId("project");
   const sourceRuleSets = workspace.ruleSets.filter((ruleSet) => ruleSet.projectId === projectId);
+  const existingRuleIds = new Set(workspace.rules.map((rule) => rule.id));
   const ruleIdMap = new Map<string, string>();
   const ruleSetIdMap = new Map<string, string>();
 
   for (const ruleSet of sourceRuleSets) {
     ruleSetIdMap.set(ruleSet.id, createId("ruleset"));
     for (const ruleId of ruleSet.ruleIds) {
-      if (!ruleIdMap.has(ruleId)) {
+      if (existingRuleIds.has(ruleId) && !ruleIdMap.has(ruleId)) {
         ruleIdMap.set(ruleId, createId("rule"));
       }
     }
@@ -52,7 +53,9 @@ export function createProjectCopyBundle(
     ...ruleSet,
     id: ruleSetIdMap.get(ruleSet.id)!,
     projectId: nextProjectId,
-    ruleIds: ruleSet.ruleIds.map((ruleId) => ruleIdMap.get(ruleId)).filter((id): id is string => Boolean(id)),
+    ruleIds: Array.from(
+      new Set(ruleSet.ruleIds.map((ruleId) => ruleIdMap.get(ruleId)).filter((id): id is string => Boolean(id))),
+    ),
     createdAt: now,
     updatedAt: now,
   }));
@@ -95,9 +98,12 @@ export function createRuleSetCopyBundle(
   }
 
   const nextRuleSetId = createId("ruleset");
+  const existingRuleIds = new Set(workspace.rules.map((rule) => rule.id));
   const ruleIdMap = new Map<string, string>();
   for (const ruleId of sourceRuleSet.ruleIds) {
-    ruleIdMap.set(ruleId, createId("rule"));
+    if (existingRuleIds.has(ruleId) && !ruleIdMap.has(ruleId)) {
+      ruleIdMap.set(ruleId, createId("rule"));
+    }
   }
 
   const existingNames = workspace.ruleSets
@@ -108,9 +114,13 @@ export function createRuleSetCopyBundle(
     id: nextRuleSetId,
     projectId: targetProject.id,
     name: createCopyName(sourceRuleSet.name, existingNames),
-    ruleIds: sourceRuleSet.ruleIds
-      .map((ruleId) => ruleIdMap.get(ruleId))
-      .filter((id): id is string => Boolean(id)),
+    ruleIds: Array.from(
+      new Set(
+        sourceRuleSet.ruleIds
+          .map((ruleId) => ruleIdMap.get(ruleId))
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ),
     siteMatchPatterns: sourceRuleSet.siteMatchPatterns ? [...sourceRuleSet.siteMatchPatterns] : undefined,
     createdAt: now,
     updatedAt: now,

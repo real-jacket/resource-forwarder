@@ -124,6 +124,19 @@ describe("createProjectCopyBundle", () => {
       },
     });
   });
+
+  it("drops missing and duplicate rule references from copied project groups", () => {
+    const input: WorkspaceSnapshot = {
+      ...workspace,
+      ruleSets: [{ ...workspace.ruleSets[0], ruleIds: ["rule-api", "missing", "rule-api"] }],
+    };
+    const ids = ["project-copy", "ruleset-copy", "rule-api-copy"];
+
+    const bundle = createProjectCopyBundle(input, "project-1", now, () => ids.shift()!);
+
+    expect(bundle.ruleSets[0].ruleIds).toEqual(["rule-api-copy"]);
+    expect(bundle.rules.map((rule) => rule.id)).toEqual(["rule-api-copy"]);
+  });
 });
 
 describe("createRuleCopy", () => {
@@ -192,5 +205,18 @@ describe("createRuleSetCopyBundle", () => {
     expect(bundle.rules[0].name).toBe("API 转发");
     expect(bundle.rules[0].createdAt).toBe(now);
     expect(bundle.rules[1].target).not.toBe(workspace.rules[1].target);
+  });
+
+  it("drops missing and duplicate rule references from the copied group", () => {
+    const input: WorkspaceSnapshot = {
+      ...workspace,
+      ruleSets: [{ ...workspace.ruleSets[0], ruleIds: ["rule-api", "missing", "rule-api"] }],
+    };
+    const ids = ["ruleset-copy", "rule-api-copy"];
+
+    const bundle = createRuleSetCopyBundle(input, "ruleset-1", "project-2", now, () => ids.shift()!);
+
+    expect(bundle.ruleSet.ruleIds).toEqual(["rule-api-copy"]);
+    expect(bundle.rules.map((rule) => rule.id)).toEqual(["rule-api-copy"]);
   });
 });

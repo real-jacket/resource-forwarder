@@ -167,7 +167,10 @@ function App() {
   // the modals themselves are rendered by helper functions further down.
   useModalDismiss(showProjectModal, () => setShowProjectModal(false));
   useModalDismiss(showRuleSetModal, () => setShowRuleSetModal(false));
-  useModalDismiss(copyDraft !== null, () => setCopyDraft(null));
+  useModalDismiss(copyDraft !== null, () => {
+    if (busy) return;
+    setCopyDraft(null);
+  });
   useModalDismiss(resourceOverridePreview !== null, () => {
     if (busy) return;
     setResourceOverridePreview(null);
@@ -872,23 +875,22 @@ function App() {
       const now = new Date().toISOString();
       const bundle = createProjectCopyBundle(dashboard.workspace, project.id, now, createId);
       nextState = await runtimeRequest<UpsertMutationResponse>({
-        type: "upsert-project",
+        type: "import-workspace",
         payload: {
-          project: bundle.project,
-          ruleSets: bundle.ruleSets,
+          content: serializeWorkspace(
+            {
+              version: dashboard.workspace.version,
+              updatedAt: now,
+              projects: [bundle.project],
+              ruleSets: bundle.ruleSets,
+              rules: bundle.rules,
+            },
+            "json",
+          ),
+          format: "json",
+          merge: true,
         },
       });
-
-      for (const rule of bundle.rules) {
-        const targetRuleSet = bundle.ruleSets.find((ruleSet) => ruleSet.ruleIds.includes(rule.id));
-        if (!targetRuleSet) {
-          continue;
-        }
-        nextState = await runtimeRequest<UpsertMutationResponse>({
-          type: "upsert-rule",
-          payload: { rule, ruleSetId: targetRuleSet.id },
-        });
-      }
 
       if (nextState) {
         hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
@@ -918,9 +920,20 @@ function App() {
       const now = new Date().toISOString();
       if (copyDraft.mode === "rule") {
         const sourceRule = rules.find((rule) => rule.id === copyDraft.sourceRuleId);
+        const sourceProject = projects.find((project) => project.id === copyDraft.sourceProjectId);
+        const sourceRuleSet = ruleSets.find((ruleSet) => ruleSet.id === copyDraft.sourceRuleSetId);
         const targetProject = projects.find((project) => project.id === copyDraft.targetProjectId);
         const targetRuleSet = ruleSets.find((ruleSet) => ruleSet.id === copyDraft.targetRuleSetId);
-        if (!sourceRule || !targetProject || !targetRuleSet) {
+        if (
+          !sourceRule ||
+          !sourceProject ||
+          !sourceRuleSet ||
+          sourceRuleSet.projectId !== sourceProject.id ||
+          !sourceRuleSet.ruleIds.includes(sourceRule.id) ||
+          !targetProject ||
+          !targetRuleSet ||
+          targetRuleSet.projectId !== targetProject.id
+        ) {
           throw new Error("请选择有效的目标站点和分组。");
         }
         const copiedRule = createRuleCopy(sourceRule, now, createId);
@@ -934,7 +947,8 @@ function App() {
         setStatus(`规则「${sourceRule.name}」已复制到「${targetProject.name} / ${targetRuleSet.name}」。`);
       } else {
         const targetProject = projects.find((project) => project.id === copyDraft.targetProjectId);
-        if (!targetProject) {
+        const sourceRuleSet = ruleSets.find((ruleSet) => ruleSet.id === copyDraft.sourceRuleSetId);
+        if (!targetProject || !sourceRuleSet || sourceRuleSet.projectId !== copyDraft.sourceProjectId) {
           throw new Error("请选择有效的目标站点。");
         }
         const bundle = createRuleSetCopyBundle(
@@ -945,15 +959,22 @@ function App() {
           createId,
         );
         nextState = await runtimeRequest<UpsertMutationResponse>({
-          type: "upsert-rule-set",
-          payload: { ruleSet: bundle.ruleSet },
+          type: "import-workspace",
+          payload: {
+            content: serializeWorkspace(
+              {
+                version: dashboard.workspace.version,
+                updatedAt: now,
+                projects: [],
+                ruleSets: [bundle.ruleSet],
+                rules: bundle.rules,
+              },
+              "json",
+            ),
+            format: "json",
+            merge: true,
+          },
         });
-        for (const rule of bundle.rules) {
-          nextState = await runtimeRequest<UpsertMutationResponse>({
-            type: "upsert-rule",
-            payload: { rule, ruleSetId: bundle.ruleSet.id },
-          });
-        }
         if (nextState) {
           hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
         }
