@@ -9,6 +9,31 @@ export interface SelectOption {
   className?: string;
 }
 
+const MENU_VIEWPORT_PADDING = 8;
+const MENU_MAX_WIDTH = 440;
+
+export function resolveMenuHorizontalLayout({
+  triggerLeft,
+  triggerWidth,
+  menuWidth,
+  viewportWidth,
+}: {
+  triggerLeft: number;
+  triggerWidth: number;
+  menuWidth: number;
+  viewportWidth: number;
+}): { left: number; width: number } {
+  const availableWidth = Math.max(0, viewportWidth - MENU_VIEWPORT_PADDING * 2);
+  const width = Math.min(Math.max(triggerWidth, menuWidth), MENU_MAX_WIDTH, availableWidth);
+  return {
+    left: Math.max(
+      MENU_VIEWPORT_PADDING,
+      Math.min(triggerLeft, viewportWidth - width - MENU_VIEWPORT_PADDING),
+    ),
+    width,
+  };
+}
+
 // Counter used to give every CustomSelect a stable unique listbox id so the
 // trigger button's aria-controls / aria-activedescendant point at concrete
 // elements. useId is React 18+ so a module-scoped counter is fine and keeps
@@ -72,11 +97,12 @@ export function CustomSelect({
   const selected = options.find((o) => o.value === value);
   const [menuPosition, setMenuPosition] = useState<{
     left: number;
-    width: number;
+    minWidth: number;
+    maxWidth: number;
     top?: number;
     bottom?: number;
     maxHeight: number;
-  }>({ left: 0, width: 220, top: 0, maxHeight: 300 });
+  }>({ left: 0, minWidth: 0, maxWidth: MENU_MAX_WIDTH, top: 0, maxHeight: 300 });
 
   const visibleOptions = useMemo(() => {
     if (!searchable || !query.trim()) return options;
@@ -104,21 +130,28 @@ export function CustomSelect({
     const trigger = triggerRef.current;
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
-    const viewportPadding = 8;
     const desiredHeight = searchable ? 300 : 260;
-    const below = window.innerHeight - rect.bottom - viewportPadding;
-    const above = rect.top - viewportPadding;
+    const below = window.innerHeight - rect.bottom - MENU_VIEWPORT_PADDING;
+    const above = rect.top - MENU_VIEWPORT_PADDING;
     const openAbove = below < Math.min(220, desiredHeight) && above > below;
     const maxHeight = Math.max(120, Math.min(desiredHeight, openAbove ? above - 6 : below - 6));
-    const width = Math.min(Math.max(rect.width, 220), window.innerWidth - viewportPadding * 2);
-    const left = Math.max(
-      viewportPadding,
-      Math.min(rect.left, window.innerWidth - width - viewportPadding),
-    );
+    const menuWidth = menuRef.current?.getBoundingClientRect().width ?? rect.width;
+    const horizontal = resolveMenuHorizontalLayout({
+      triggerLeft: rect.left,
+      triggerWidth: rect.width,
+      menuWidth,
+      viewportWidth: window.innerWidth,
+    });
+    const dimensions = {
+      left: horizontal.left,
+      minWidth: Math.min(rect.width, horizontal.width),
+      maxWidth: horizontal.width,
+      maxHeight,
+    };
     setMenuPosition(
       openAbove
-        ? { left, width, bottom: window.innerHeight - rect.top + 4, maxHeight }
-        : { left, width, top: rect.bottom + 4, maxHeight },
+        ? { ...dimensions, bottom: window.innerHeight - rect.top + 4 }
+        : { ...dimensions, top: rect.bottom + 4 },
     );
   }, [searchable]);
 
@@ -281,7 +314,8 @@ export function CustomSelect({
           onKeyDown={handleKey}
           style={{
             left: menuPosition.left,
-            width: menuPosition.width,
+            minWidth: menuPosition.minWidth,
+            maxWidth: menuPosition.maxWidth,
             maxHeight: menuPosition.maxHeight,
             top: menuPosition.top,
             bottom: menuPosition.bottom,
