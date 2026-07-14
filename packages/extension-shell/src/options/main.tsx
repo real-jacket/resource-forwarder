@@ -17,7 +17,7 @@ import type {
   RuleSet,
   WorkspaceSnapshot,
 } from "@resource-forwarder/shared-types";
-import { createId, joinCsv, splitCsv } from "../shared/helpers.js";
+import { createId, joinCsv, normalizeHostInput, splitCsv } from "../shared/helpers.js";
 import {
   createProjectCopyBundle,
   createRuleCopy,
@@ -77,6 +77,7 @@ const emptyProjectDraft = (): ProjectDraft => ({
   id: "",
   name: "",
   siteMatchPatterns: "",
+  defaultRequestHosts: "",
   baseUrl: "",
   envLabel: "",
   note: "",
@@ -89,6 +90,7 @@ const emptyRuleSetDraft = (projectId = ""): RuleSetDraft => ({
   name: "",
   enabled: true,
   siteMatchPatterns: "",
+  defaultRequestHosts: "",
   baseUrl: "",
   note: "",
 });
@@ -385,8 +387,11 @@ function App() {
 
   const ruleConflicts = useMemo(() => {
     if (!dashboard || !draftRule) return [];
-    return collectRuleConflicts(dashboard.workspace, draftRule);
-  }, [dashboard, draftRule]);
+    return collectRuleConflicts(dashboard.workspace, draftRule, {
+      project: selectedProject,
+      ruleSet: selectedProjectRuleSets.find((ruleSet) => ruleSet.id === ruleDraft.ruleSetId),
+    });
+  }, [dashboard, draftRule, ruleDraft.ruleSetId, selectedProject, selectedProjectRuleSets]);
 
   const ruleWarnings = useMemo(
     () => (draftRule ? collectUnsupportedRuleWarnings(draftRule).map(localizeWarning) : []),
@@ -464,6 +469,7 @@ function App() {
             name: ruleSet.name,
             enabled: ruleSet.enabled,
             siteMatchPatterns: joinCsv(ruleSet.siteMatchPatterns ?? []),
+            defaultRequestHosts: joinCsv(ruleSet.defaultRequestHosts),
             baseUrl: ruleSet.baseUrl ?? "",
             note: ruleSet.note ?? "",
           }
@@ -617,6 +623,7 @@ function App() {
       const now = new Date().toISOString();
       const projectId = projectDraft.id || createId("project");
       const siteMatchPatterns = normalizeSiteMatchPatterns(splitCsv(projectDraft.siteMatchPatterns));
+      const defaultRequestHosts = splitCsv(projectDraft.defaultRequestHosts).map(normalizeHostInput);
       const payload = {
         project: {
           id: projectId,
@@ -624,6 +631,7 @@ function App() {
           enabled: projectDraft.enabled,
           siteHosts: deriveSiteHosts(siteMatchPatterns),
           siteMatchPatterns,
+          defaultRequestHosts: defaultRequestHosts.length > 0 ? defaultRequestHosts : undefined,
           baseUrl: projectDraft.baseUrl.trim() || undefined,
           envLabel: projectDraft.envLabel.trim() || undefined,
           note: projectDraft.note.trim() || undefined,
@@ -660,6 +668,7 @@ function App() {
       const now = new Date().toISOString();
       const existing = ruleSets.find((rs) => rs.id === ruleSetDraft.id);
       const siteMatchPatterns = normalizeSiteMatchPatterns(splitCsv(ruleSetDraft.siteMatchPatterns));
+      const defaultRequestHosts = splitCsv(ruleSetDraft.defaultRequestHosts).map(normalizeHostInput);
       const ruleSet: RuleSet = {
         id: ruleSetDraft.id || createId("ruleset"),
         projectId: ruleSetDraft.projectId,
@@ -667,6 +676,7 @@ function App() {
         enabled: ruleSetDraft.enabled,
         ruleIds: existing?.ruleIds ?? [],
         siteMatchPatterns: siteMatchPatterns.length > 0 ? siteMatchPatterns : undefined,
+        defaultRequestHosts: defaultRequestHosts.length > 0 ? defaultRequestHosts : undefined,
         baseUrl: ruleSetDraft.baseUrl.trim() || undefined,
         note: ruleSetDraft.note.trim() || undefined,
         createdAt: existing?.createdAt ?? now,

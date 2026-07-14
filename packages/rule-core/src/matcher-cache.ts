@@ -9,6 +9,7 @@ import type {
 } from "@resource-forwarder/shared-types";
 import { globToPathRegexSource } from "./glob.js";
 import { matchesProjectSite, matchesRuleSetSite } from "./workspace.js";
+import { resolveEffectiveRequestHosts } from "./target-resolution.js";
 
 /**
  * Hot-path matcher reused across many requests.
@@ -68,7 +69,7 @@ export function prepareMatcher(workspace: WorkspaceSnapshot): MatcherCache {
 
     compiled.push({
       binding: { rule, ruleSet: linkedRuleSet, project },
-      matchHost: buildHostMatcher(rule.match.host),
+      matchHost: buildHostMatcher(resolveEffectiveRequestHosts({ rule, ruleSet: linkedRuleSet, project })),
       matchPath: buildPathMatcher(rule.match.pathGlob),
       match: rule.match,
     });

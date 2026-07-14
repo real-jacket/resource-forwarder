@@ -47,7 +47,8 @@ describe("createRuleDraft", () => {
     const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, kind: "api_forward" });
     expect(draft.kind).toBe("api_forward");
     expect(draft.ruleSetId).toBe("ruleset-1");
-    expect(draft.host).toBe("example.com");
+    expect(draft.hostMode).toBe("inherit");
+    expect(draft.host).toBe("");
     expect(draft.pathGlob).toBe("/api/**");
     expect(draft.method).toBe("GET, POST");
     expect(draft.id).toBe("");
@@ -78,6 +79,7 @@ describe("createRuleDraft", () => {
     };
     const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, rule });
     expect(draft.id).toBe("rule-1");
+    expect(draft.hostMode).toBe("custom");
     expect(draft.host).toBe("a.com, b.com");
     expect(draft.redirectUrl).toBe("https://cdn/app.js");
     expect(draft.tags).toBe("t1");
@@ -196,6 +198,8 @@ describe("toRule", () => {
     draft.headersJson = JSON.stringify({ "X-Debug": "1" });
     const rule = toRule(draft, emptyWorkspace, baseProject);
     expect(rule.kind).toBe("api_forward");
+    expect(rule.match.inheritHost).toBe(true);
+    expect(rule.match.host).toEqual([]);
     expect(rule.target.forwardProfile?.targetBaseUrl).toBe("http://localhost:3000");
     expect(rule.target.forwardProfile?.headers).toEqual({ "X-Debug": "1" });
     // Generated id has the rule prefix

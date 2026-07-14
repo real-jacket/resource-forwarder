@@ -148,16 +148,16 @@ function CoreConceptsSection() {
             <tr><td><code>**</code></td><td>匹配任意层级路径（跨 <code>/</code>）</td><td><code>/api/**</code> ✓ <code>users</code>　✓ <code>v2/users/list</code></td></tr>
           </tbody>
         </table>
-        <h3>站点匹配 vs 规则 Host</h3>
+        <h3>页面匹配 vs 请求 Host</h3>
         <table className="guide-table">
           <thead><tr><th></th><th>作用</th><th>示例</th></tr></thead>
           <tbody>
             <tr><td><strong>站点匹配</strong></td><td>控制<strong>在哪些页面上</strong>生效（页面 URL 匹配时才激活规则）</td><td><code>https://shimo.im/tables/*</code></td></tr>
-            <tr><td><strong>规则级 Host</strong></td><td>控制<strong>拦截哪个域名</strong>的请求（请求目标域名）</td><td><code>as.smgv.cn</code></td></tr>
+            <tr><td><strong>默认请求 Host</strong></td><td>控制<strong>拦截哪个域名</strong>的请求；规则可依次继承分组和站点默认值</td><td><code>as.smgv.cn</code></td></tr>
           </tbody>
         </table>
         <div className="guide-warn">
-          <strong>注意：</strong>站点匹配的是<strong>当前页面的 URL</strong>，规则 Host 匹配的是<strong>请求目标的域名</strong>。例如：页面在 <code>shimo.im</code>，JS 来自 CDN <code>as.smgv.cn</code>，则站点匹配填 <code>https://shimo.im/*</code>，规则 Host 填 <code>as.smgv.cn</code>。
+          <strong>注意：</strong>站点匹配的是<strong>当前页面的 URL</strong>，请求 Host 匹配的是<strong>请求目标的域名</strong>。例如：页面在 <code>shimo.im</code>，JS 来自 CDN <code>as.smgv.cn</code>，则站点匹配填 <code>https://shimo.im/*</code>，站点或分组默认请求 Host 填 <code>as.smgv.cn</code>，多数规则只需填写路径。
         </div>
       </div>
     </details>
@@ -706,7 +706,7 @@ function AssetRedirectFlow() {
       </div>
       <div className="flow-diagram">
         <div className="flow-row">
-          <FlowNode kind="ext" label="规则注册" text="match.host" sub="写入 requestDomains" />
+          <FlowNode kind="ext" label="规则注册" text="有效请求 Host" sub="规则 > 分组 > 站点" />
           <FlowArrowRight />
           <FlowNode kind="ext" label="规则注册" text="pathGlob" sub="写入 urlFilter / regexFilter" />
           <FlowArrowRight label="注册到" />
@@ -726,7 +726,7 @@ function AssetRedirectFlow() {
         </div>
       </div>
       <p className="flow-description">
-        规则的 <code>match.host</code> 和 <code>pathGlob</code> 在注册时转为 Chrome DNR 条件，
+        规则继承解析后的有效请求 Host 和 <code>pathGlob</code> 在注册时转为 Chrome DNR 条件，
         同时把项目的 <code>siteHosts</code> 写入 <code>initiatorDomains</code>。浏览器每次请求都会经过 Chrome 网络层，依次检查
         <strong>发起页面</strong>（initiatorDomains，限定为项目站点）→
         <strong>目标域名</strong>（requestDomains）→

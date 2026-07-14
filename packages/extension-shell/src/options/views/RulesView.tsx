@@ -661,6 +661,16 @@ function GroupHeaderRow({
               ? `页面 ${ruleSet.siteMatchPatterns.join(", ")}`
               : "页面范围继承站点"}
           </span>
+          <span
+            className="rule-group-patterns"
+            title={ruleSet.defaultRequestHosts?.length
+              ? `默认请求 Host ${ruleSet.defaultRequestHosts.join(", ")}`
+              : "默认请求 Host 继承所属站点"}
+          >
+            {ruleSet.defaultRequestHosts?.length
+              ? `请求 Host ${ruleSet.defaultRequestHosts.join(", ")}`
+              : "请求 Host 继承站点"}
+          </span>
           {ruleSet.baseUrl && (
             <span className="rule-group-patterns" title={`目标基址 ${ruleSet.baseUrl}`}>
               目标基址 {ruleSet.baseUrl}

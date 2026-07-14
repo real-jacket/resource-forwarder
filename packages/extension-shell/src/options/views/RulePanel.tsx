@@ -316,6 +316,17 @@ function AdvancedTab({
   selectedProject: Project | undefined;
   selectedRuleSet: RuleSet | undefined;
 }) {
+  const inheritedHosts = selectedRuleSet?.defaultRequestHosts?.length
+    ? selectedRuleSet.defaultRequestHosts
+    : selectedProject?.defaultRequestHosts?.length
+      ? selectedProject.defaultRequestHosts
+      : selectedProject?.siteHosts ?? [];
+  const inheritedSource = selectedRuleSet?.defaultRequestHosts?.length
+    ? "分组"
+    : selectedProject?.defaultRequestHosts?.length
+      ? "站点"
+      : "站点页面";
+
   return (
     <div className="form-disclosure-stack">
       <MatchHierarchy
@@ -329,14 +340,34 @@ function AdvancedTab({
       >
       <div className="form-subsection-heading">请求目标</div>
       <div className="form-group">
-        <label className="form-label" htmlFor="rule-host">Host 覆盖（留空则沿用站点 Host）</label>
-        <input
-          id="rule-host"
-          className="form-input"
-          value={draft.host}
-          onChange={(e) => setDraft((v) => ({ ...v, host: e.target.value }))}
-          placeholder={selectedProject ? joinCsv(selectedProject.siteHosts) : "as.smgv.cn, cdn.example.com"}
+        <label className="form-label" htmlFor="rule-host-mode">请求 Host</label>
+        <CustomSelect
+          id="rule-host-mode"
+          className="cs-form"
+          value={draft.hostMode}
+          options={[
+            {
+              value: "inherit",
+              label: `继承${inheritedSource}`,
+              description: joinCsv(inheritedHosts) || "匹配所有 Host",
+            },
+            { value: "custom", label: "自定义" },
+          ]}
+          onChange={(value) => setDraft((v) => ({ ...v, hostMode: value as RuleDraft["hostMode"] }))}
+          ariaLabel="请求 Host 来源"
         />
+        {draft.hostMode === "custom" && (
+          <input
+            id="rule-host"
+            className="form-input"
+            aria-label="自定义请求 Host"
+            value={draft.host}
+            onChange={(e) => setDraft((v) => ({ ...v, host: e.target.value }))}
+            placeholder="as.smgv.cn, cdn.example.com"
+            style={{ marginTop: 8 }}
+          />
+        )}
+        <span className="form-hint">Host 匹配请求目标域名，与站点/分组的页面匹配 URL 相互独立。</span>
       </div>
 
       <div className="form-row">
@@ -770,7 +801,15 @@ function MatchHierarchy({
   const ruleSetScope = ruleSet?.siteMatchPatterns?.length
     ? ruleSet.siteMatchPatterns.join(", ")
     : "继承站点页面范围";
-  const requestScope = `${draft.host.trim() || "继承站点 Host"}  ${draft.pathGlob || "**"}`;
+  const inheritedHosts = ruleSet?.defaultRequestHosts?.length
+    ? ruleSet.defaultRequestHosts
+    : project?.defaultRequestHosts?.length
+      ? project.defaultRequestHosts
+      : project?.siteHosts ?? [];
+  const hostScope = draft.hostMode === "inherit"
+    ? `继承：${joinCsv(inheritedHosts) || "所有 Host"}`
+    : draft.host.trim() || "未填写自定义 Host";
+  const requestScope = `${hostScope}  ${draft.pathGlob || "**"}`;
 
   return (
     <section className="match-hierarchy-card" aria-label="匹配链路">

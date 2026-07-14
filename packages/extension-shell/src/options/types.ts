@@ -24,6 +24,7 @@ export interface ProjectDraft {
   id: string;
   name: string;
   siteMatchPatterns: string;
+  defaultRequestHosts: string;
   baseUrl: string;
   envLabel: string;
   note: string;
@@ -42,6 +43,7 @@ export interface RuleSetDraft {
   enabled: boolean;
   /** CSV form for the optional group-scope patterns input. Empty = follow project. */
   siteMatchPatterns: string;
+  defaultRequestHosts: string;
   baseUrl: string;
   note: string;
 }
@@ -57,6 +59,7 @@ export interface RuleDraft {
   kind: Rule["kind"];
   enabled: boolean;
   priority: number;
+  hostMode: "inherit" | "custom";
   host: string;
   pathGlob: string;
   queryMatchJson: string;

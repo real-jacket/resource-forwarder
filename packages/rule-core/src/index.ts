@@ -55,6 +55,7 @@ export { toDynamicNetRequestRules, toDynamicRule } from "./dnr.js";
 // Target resolution
 export {
   resolveBindingBaseUrl,
+  resolveEffectiveRequestHosts,
   resolveForwardProfile,
   resolveRuleTargetValue,
 } from "./target-resolution.js";

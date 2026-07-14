@@ -33,6 +33,7 @@ import {
   matchesResourceType,
   matchesRule,
   matchesRuleSetSite,
+  resolveEffectiveRequestHosts,
   matchesTabScope,
   pickMatchingRule,
   resolveForwardProfile,
@@ -456,10 +457,16 @@ function registerRoutes(
       // rule stays valid:true even when they're non-empty.
       const workspace = await storage.readWorkspace();
       const { rule } = request.body;
+      const ruleSet = request.body.ruleSetId
+        ? workspace.ruleSets.find((candidate) => candidate.id === request.body.ruleSetId)
+        : undefined;
+      const project = ruleSet
+        ? workspace.projects.find((candidate) => candidate.id === ruleSet.projectId)
+        : undefined;
       return {
         valid: true,
         warnings: collectUnsupportedRuleWarnings(rule),
-        conflicts: collectRuleConflicts(workspace, rule),
+        conflicts: collectRuleConflicts(workspace, rule, { project, ruleSet }),
       };
     },
   );
@@ -511,7 +518,10 @@ function registerRoutes(
           hierarchy,
           projectScope,
           ruleSetScope,
-          host: matchesHost(rule.match.host, context.host),
+          host: matchesHost(
+            resolved ? resolveEffectiveRequestHosts(resolved) : rule.match.host,
+            context.host,
+          ),
           path: matchesPath(rule.match.pathGlob, context.pathname),
           query: matchesQuery(rule.match, context.query),
           headers: matchesHeaders(rule.match, context.headers),
@@ -592,7 +602,7 @@ function isUsableForwardBinding(binding: RuleBinding, context: RequestContext): 
         binding.project ?? { siteHosts: [], siteMatchPatterns: [] },
         context.pageUrl,
       )) &&
-    matchesRule(binding.rule, context)
+    matchesRule(binding.rule, context, resolveEffectiveRequestHosts(binding))
   );
 }
 
@@ -625,6 +635,7 @@ const projectSchema = {
     enabled: { type: "boolean" },
     siteHosts: { type: "array", items: { type: "string" } },
     siteMatchPatterns: { type: "array", items: { type: "string" } },
+    defaultRequestHosts: { type: "array", items: { type: "string" } },
     baseUrl: optionalString,
     envLabel: optionalString,
     tags: stringArray,
@@ -645,6 +656,7 @@ const ruleSetSchema = {
     enabled: { type: "boolean" },
     ruleIds: { type: "array", items: { type: "string" } },
     siteMatchPatterns: { type: "array", items: { type: "string" } },
+    defaultRequestHosts: { type: "array", items: { type: "string" } },
     baseUrl: optionalString,
     createdAt: optionalString,
     updatedAt: optionalString,

@@ -44,6 +44,7 @@ export function createProjectCopyBundle(
     name: createCopyName(sourceProject.name, projectNames),
     siteHosts: [...sourceProject.siteHosts],
     siteMatchPatterns: sourceProject.siteMatchPatterns ? [...sourceProject.siteMatchPatterns] : undefined,
+    defaultRequestHosts: sourceProject.defaultRequestHosts ? [...sourceProject.defaultRequestHosts] : undefined,
     tags: [...sourceProject.tags],
     createdAt: now,
     updatedAt: now,
@@ -122,6 +123,7 @@ export function createRuleSetCopyBundle(
       ),
     ),
     siteMatchPatterns: sourceRuleSet.siteMatchPatterns ? [...sourceRuleSet.siteMatchPatterns] : undefined,
+    defaultRequestHosts: sourceRuleSet.defaultRequestHosts ? [...sourceRuleSet.defaultRequestHosts] : undefined,
     createdAt: now,
     updatedAt: now,
   };

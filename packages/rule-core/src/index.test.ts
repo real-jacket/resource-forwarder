@@ -104,6 +104,31 @@ describe("rule-core", () => {
     expect(match?.rule.id).toBe("rule-api");
   });
 
+  it("uses inherited group request hosts when building DNR rules", () => {
+    const inheritedWorkspace: WorkspaceSnapshot = {
+      ...workspace,
+      projects: [{ ...workspace.projects[0]!, defaultRequestHosts: ["project-cdn.example.com"] }],
+      ruleSets: [{
+        ...workspace.ruleSets[0]!,
+        ruleIds: ["rule-asset"],
+        defaultRequestHosts: ["group-cdn.example.com"],
+      }],
+      rules: [{
+        ...assetRule,
+        match: { ...assetRule.match, host: [], inheritHost: true },
+      }],
+    };
+
+    expect(toDynamicNetRequestRules(inheritedWorkspace)[0]?.condition.requestDomains).toEqual([
+      "group-cdn.example.com",
+    ]);
+
+    const parsed = parseWorkspace(JSON.stringify(inheritedWorkspace));
+    expect(parsed.projects[0]?.defaultRequestHosts).toEqual(["project-cdn.example.com"]);
+    expect(parsed.ruleSets[0]?.defaultRequestHosts).toEqual(["group-cdn.example.com"]);
+    expect(parsed.rules[0]?.match.inheritHost).toBe(true);
+  });
+
   it("only matches a rule when the current page passes both project and rule set scope", () => {
     const scopedWorkspace: WorkspaceSnapshot = {
       ...workspace,

@@ -49,21 +49,22 @@ export function formatRuleTarget(rule: Rule): string {
 
 export function formatProjectScopeSummary(project: Project): string {
   const scope = joinCsv(project.siteMatchPatterns ?? project.siteHosts) || "未填写站点匹配";
-  return project.baseUrl ? `${scope} · 基础路径 ${project.baseUrl}` : scope;
+  const requestHosts = joinCsv(project.defaultRequestHosts ?? project.siteHosts) || "所有 Host";
+  return [
+    `页面 ${scope}`,
+    `请求 Host ${requestHosts}`,
+    project.baseUrl ? `基础路径 ${project.baseUrl}` : "",
+  ].filter(Boolean).join(" · ");
 }
 
 export function formatRuleSetScopeSummary(ruleSet: RuleSet): string {
   const scope = joinCsv(ruleSet.siteMatchPatterns ?? []);
-  if (scope && ruleSet.baseUrl) {
-    return `${scope} · 基础路径 ${ruleSet.baseUrl}`;
-  }
-  if (scope) {
-    return scope;
-  }
-  if (ruleSet.baseUrl) {
-    return `基础路径 ${ruleSet.baseUrl}`;
-  }
-  return "";
+  const requestHosts = joinCsv(ruleSet.defaultRequestHosts);
+  return [
+    scope ? `页面 ${scope}` : "页面继承站点",
+    requestHosts ? `请求 Host ${requestHosts}` : "请求 Host 继承站点",
+    ruleSet.baseUrl ? `基础路径 ${ruleSet.baseUrl}` : "",
+  ].filter(Boolean).join(" · ");
 }
 
 /**

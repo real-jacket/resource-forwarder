@@ -1,5 +1,25 @@
 import type { ForwardProfile, RuleBinding } from "@resource-forwarder/shared-types";
 
+export function resolveEffectiveRequestHosts(
+  binding: Pick<RuleBinding, "project" | "ruleSet" | "rule">,
+): string[] {
+  if (!binding.rule.match.inheritHost) {
+    return binding.rule.match.host;
+  }
+
+  const ruleSetHosts = binding.ruleSet?.defaultRequestHosts;
+  if (ruleSetHosts?.length) {
+    return ruleSetHosts;
+  }
+
+  const projectHosts = binding.project?.defaultRequestHosts;
+  if (projectHosts?.length) {
+    return projectHosts;
+  }
+
+  return binding.project?.siteHosts ?? [];
+}
+
 export function resolveBindingBaseUrl(binding: Pick<RuleBinding, "project" | "ruleSet">): string | undefined {
   const ruleSetBase = getRuleSetBaseUrl(binding.ruleSet)?.trim();
   if (ruleSetBase) {

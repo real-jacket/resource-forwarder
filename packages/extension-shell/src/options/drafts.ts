@@ -114,7 +114,8 @@ export function createRuleDraft(options?: {
     kind,
     enabled: options?.rule?.enabled ?? true,
     priority: options?.rule?.priority ?? 100,
-    host: joinCsv(options?.rule?.match.host ?? options?.project?.siteHosts),
+    hostMode: options?.rule ? (options.rule.match.inheritHost ? "inherit" : "custom") : "inherit",
+    host: options?.rule?.match.inheritHost ? "" : joinCsv(options?.rule?.match.host),
     pathGlob: options?.rule?.match.pathGlob ?? (kind === "api_forward" ? "/api/**" : "/assets/**"),
     queryMatchJson: JSON.stringify(options?.rule?.match.query ?? {}, null, 2),
     headerMatchJson: JSON.stringify(options?.rule?.match.headers ?? {}, null, 2),
@@ -177,6 +178,7 @@ export function createBatchRuleDraft(options?: {
     kind: source?.kind ?? base.kind,
     enabled: source?.enabled ?? base.enabled,
     priority: source?.priority ?? base.priority,
+    hostMode: source?.hostMode ?? base.hostMode,
     host: source?.host ?? base.host,
     resourceType: source?.resourceType ?? base.resourceType,
     method: source?.method ?? base.method,
@@ -211,6 +213,7 @@ export function fromProject(project: Project): ProjectDraft {
     id: project.id,
     name: project.name,
     siteMatchPatterns: joinCsv(project.siteMatchPatterns ?? project.siteHosts.map((h) => `https://${h}/*`)),
+    defaultRequestHosts: joinCsv(project.defaultRequestHosts),
     baseUrl: project.baseUrl ?? "",
     envLabel: project.envLabel ?? "",
     note: project.note ?? "",
@@ -230,6 +233,9 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
   const existing = workspace.rules.find((r) => r.id === draft.id);
   const now = new Date().toISOString();
   const host = splitCsv(draft.host).map(normalizeHostInput);
+  if (draft.hostMode === "custom" && host.length === 0) {
+    throw new Error("自定义请求 Host 不能为空；如需匹配所有 Host，请填写 *。");
+  }
   const resourceType = splitCsv(draft.resourceType) as MatchResourceType[];
   const normalizedAssetResourceType =
     draft.kind === "asset_redirect"
@@ -276,7 +282,8 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
     kind: draft.kind,
     priority: Number.isFinite(draft.priority) ? draft.priority : 100,
     match: {
-      host: host.length > 0 ? host : project.siteHosts,
+      host: draft.hostMode === "inherit" ? [] : host,
+      ...(draft.hostMode === "inherit" ? { inheritHost: true } : {}),
       pathGlob: sanitizePathGlob(draft.pathGlob || "**"),
       query: Object.keys(queryMatch).length > 0 ? queryMatch : undefined,
       headers: Object.keys(headerMatch).length > 0 ? headerMatch : undefined,

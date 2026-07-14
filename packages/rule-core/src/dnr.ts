@@ -7,7 +7,7 @@ import type {
 } from "@resource-forwarder/shared-types";
 import { buildHostRegexSource, buildRegexFilter, escapeRegex, globToUrlFilter, sanitizePathGlob, stablePositiveHash } from "./glob.js";
 import { getEnabledRuleBindings } from "./matchers.js";
-import { resolveRuleTargetValue } from "./target-resolution.js";
+import { resolveEffectiveRequestHosts, resolveRuleTargetValue } from "./target-resolution.js";
 
 // Asset redirects run at Chrome's request layer, so they need to cover both
 // browser-initiated assets (script/image/font/...) and fetch-style loads such
@@ -68,12 +68,17 @@ export function toDynamicNetRequestRules(workspace: WorkspaceSnapshot): DynamicR
           },
         },
         binding.project?.siteHosts,
+        resolveEffectiveRequestHosts(binding),
       );
     })
     .filter((rule): rule is DynamicRedirectRule => Boolean(rule));
 }
 
-export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicRedirectRule {
+export function toDynamicRule(
+  rule: Rule,
+  projectSiteHosts?: string[],
+  requestHosts = rule.match.host,
+): DynamicRedirectRule {
   const normalizedMatchResourceTypes =
     rule.kind === "asset_redirect"
       ? normalizeAssetRedirectResourceTypes(rule.match.resourceType, rule.match.pathGlob)
@@ -88,7 +93,7 @@ export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicR
   const redirectUrl = rule.target.redirectUrl ?? "";
   const initiatorDomains = resolveInitiatorDomains(
     projectSiteHosts,
-    rule.match.host,
+    requestHosts,
     rule.match.pathGlob,
   );
   // Defensive: strip any scheme+host from pathGlob before it flows into the
@@ -97,6 +102,7 @@ export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicR
   // Chrome reject the whole updateDynamicRules batch.
   const match: typeof rule.match = {
     ...rule.match,
+    host: requestHosts,
     pathGlob: sanitizePathGlob(rule.match.pathGlob || "**"),
   };
 

@@ -54,6 +54,17 @@ export function RuleSetModal({ draft, setDraft, onClose, onSave, busy }: RuleSet
           </div>
 
           <div className="form-group">
+            <label className="form-label">默认请求 Host</label>
+            <input
+              className="form-input"
+              value={draft.defaultRequestHosts}
+              onChange={(e) => setDraft((v) => ({ ...v, defaultRequestHosts: e.target.value }))}
+              placeholder="cdn.example.com, static.example.com"
+            />
+            <span className="form-hint">留空时继承站点默认请求 Host；填写后作为分组内规则的默认请求域名。</span>
+          </div>
+
+          <div className="form-group">
             <label className="form-label">分组基础路径</label>
             <input
               className="form-input"

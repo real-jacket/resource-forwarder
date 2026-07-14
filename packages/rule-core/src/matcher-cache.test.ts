@@ -64,6 +64,39 @@ describe("prepareMatcher", () => {
     expect(match?.rule.id).toBe("high");
   });
 
+  it("resolves inherited request hosts from rule set before project defaults", () => {
+    const ws = workspace([
+      rule({
+        id: "inherited",
+        match: {
+          host: [],
+          inheritHost: true,
+          pathGlob: "/assets/**",
+          resourceType: ["fetch"],
+          tabScope: { mode: "all" },
+        },
+      }),
+    ]);
+    ws.projects[0].defaultRequestHosts = ["project-cdn.example.com"];
+    ws.ruleSets[0].defaultRequestHosts = ["group-cdn.example.com"];
+
+    const matcher = prepareMatcher(ws);
+    expect(matcher.pick({
+      url: "https://group-cdn.example.com/assets/app.js",
+      method: "GET",
+      host: "group-cdn.example.com",
+      pathname: "/assets/app.js",
+      resourceType: "fetch",
+    }, "api_forward")?.rule.id).toBe("inherited");
+    expect(matcher.pick({
+      url: "https://project-cdn.example.com/assets/app.js",
+      method: "GET",
+      host: "project-cdn.example.com",
+      pathname: "/assets/app.js",
+      resourceType: "fetch",
+    }, "api_forward")).toBeUndefined();
+  });
+
   it("filters disabled rules, rule sets, and projects out at compile time", () => {
     const ws = workspace([rule({ id: "ok" }), rule({ id: "off", enabled: false })]);
     const matcher = prepareMatcher(ws);

@@ -80,15 +80,31 @@ export function assertWorkspace(value: unknown): WorkspaceSnapshot {
           : [];
       const derivedSiteHosts = deriveSiteHosts(siteMatchPatterns);
       const siteHosts = derivedSiteHosts.length > 0 ? derivedSiteHosts : explicitSiteHosts;
-      return { ...project, tags, siteHosts, siteMatchPatterns };
+      const defaultRequestHosts = Array.isArray(project.defaultRequestHosts)
+        ? project.defaultRequestHosts.map((host: string) => normalizeImportedHost(host))
+        : undefined;
+      return {
+        ...project,
+        tags,
+        siteHosts,
+        siteMatchPatterns,
+        ...(defaultRequestHosts ? { defaultRequestHosts } : {}),
+      };
     }),
-    ruleSets: candidate.ruleSets.map((ruleSet) => ({
-      ...ruleSet,
-      ruleIds: Array.isArray(ruleSet.ruleIds) ? ruleSet.ruleIds : [],
-      siteMatchPatterns: Array.isArray(ruleSet.siteMatchPatterns) && ruleSet.siteMatchPatterns.length > 0
+    ruleSets: candidate.ruleSets.map((ruleSet) => {
+      const siteMatchPatterns = Array.isArray(ruleSet.siteMatchPatterns) && ruleSet.siteMatchPatterns.length > 0
         ? normalizeSiteMatchPatterns(ruleSet.siteMatchPatterns)
-        : undefined,
-    })),
+        : undefined;
+      const defaultRequestHosts = Array.isArray(ruleSet.defaultRequestHosts)
+        ? ruleSet.defaultRequestHosts.map((host: string) => normalizeImportedHost(host))
+        : undefined;
+      return {
+        ...ruleSet,
+        ruleIds: Array.isArray(ruleSet.ruleIds) ? ruleSet.ruleIds : [],
+        ...(siteMatchPatterns ? { siteMatchPatterns } : {}),
+        ...(defaultRequestHosts ? { defaultRequestHosts } : {}),
+      };
+    }),
     rules: candidate.rules.map((rule) => ({
       ...rule,
       tags: Array.isArray(rule.tags) ? rule.tags : [],
@@ -97,6 +113,7 @@ export function assertWorkspace(value: unknown): WorkspaceSnapshot {
         host: Array.isArray(rule.match?.host)
           ? rule.match.host.map((host: string) => normalizeImportedHost(host))
           : [],
+        ...(rule.match?.inheritHost === true ? { inheritHost: true } : {}),
         pathGlob: rule.match?.pathGlob || "**",
       },
     })),

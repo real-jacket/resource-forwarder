@@ -4,6 +4,7 @@ import {
   matchesRule,
   matchesRuleSetSite,
   pickMatchingRule,
+  resolveEffectiveRequestHosts,
   resolveForwardProfile,
   resolveRuleBinding,
 } from "@resource-forwarder/rule-core";
@@ -130,6 +131,6 @@ function isUsableForwardBinding(binding: RuleBinding, context: ReturnType<typeof
         binding.project ?? { siteHosts: [], siteMatchPatterns: [] },
         context.pageUrl,
       )) &&
-    matchesRule(binding.rule, context)
+    matchesRule(binding.rule, context, resolveEffectiveRequestHosts(binding))
   );
 }

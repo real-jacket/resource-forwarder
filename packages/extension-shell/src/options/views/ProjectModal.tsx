@@ -58,6 +58,17 @@ export function ProjectModal({ draft, setDraft, onClose, onSave, busy }: Project
           </div>
 
           <div className="form-group">
+            <label className="form-label">默认请求 Host</label>
+            <input
+              className="form-input"
+              value={draft.defaultRequestHosts}
+              onChange={(e) => setDraft((v) => ({ ...v, defaultRequestHosts: e.target.value }))}
+              placeholder="as.smgv.cn, cdn.example.com"
+            />
+            <span className="form-hint">规则未自定义 Host 时使用；留空则默认使用站点匹配 URL 中的 Host。</span>
+          </div>
+
+          <div className="form-group">
             <label className="form-label">站点基础路径</label>
             <input
               className="form-input"

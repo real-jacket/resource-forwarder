@@ -115,24 +115,26 @@ describe("formatTimestamp", () => {
 describe("scope summaries", () => {
   it("formats project scope with both match patterns and baseUrl", () => {
     expect(formatProjectScopeSummary(baseProject)).toBe(
-      "https://example.com/tables/* · 基础路径 https://dev.example.com/base/",
+      "页面 https://example.com/tables/* · 请求 Host example.com · 基础路径 https://dev.example.com/base/",
     );
   });
 
   it("falls back to hosts when project siteMatchPatterns are missing", () => {
     expect(formatProjectScopeSummary({ ...baseProject, siteMatchPatterns: undefined })).toBe(
-      "example.com · 基础路径 https://dev.example.com/base/",
+      "页面 example.com · 请求 Host example.com · 基础路径 https://dev.example.com/base/",
     );
   });
 
   it("formats rule set scope summary with both scope and baseUrl", () => {
     expect(formatRuleSetScopeSummary(baseRuleSet)).toBe(
-      "https://example.com/tables/* · 基础路径 https://dev.example.com/tables/",
+      "页面 https://example.com/tables/* · 请求 Host 继承站点 · 基础路径 https://dev.example.com/tables/",
     );
   });
 
-  it("returns an empty string when the rule set has neither patterns nor baseUrl", () => {
-    expect(formatRuleSetScopeSummary({ ...baseRuleSet, siteMatchPatterns: undefined, baseUrl: undefined })).toBe("");
+  it("describes inherited scope when the rule set has no overrides", () => {
+    expect(formatRuleSetScopeSummary({ ...baseRuleSet, siteMatchPatterns: undefined, baseUrl: undefined })).toBe(
+      "页面继承站点 · 请求 Host 继承站点",
+    );
   });
 });
 

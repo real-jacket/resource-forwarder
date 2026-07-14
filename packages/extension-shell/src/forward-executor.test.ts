@@ -92,6 +92,22 @@ describe("forward execution routing", () => {
     );
   });
 
+  it("revalidates hinted rules with inherited group request hosts", () => {
+    const item = binding({ targetBaseUrl: "https://api.example.com" });
+    item.ruleSet!.defaultRequestHosts = ["api-cdn.example.com"];
+    item.rule.match = {
+      ...item.rule.match,
+      host: [],
+      inheritHost: true,
+    };
+
+    expect(resolveForwardBinding(workspace(item), {
+      ...payload,
+      url: "https://api-cdn.example.com/api/users",
+    }).rule.id).toBe("rule-1");
+    expect(() => resolveForwardBinding(workspace(item), payload)).toThrow(/no longer matches/);
+  });
+
   it("executes inline JSON without a local service", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     const result = await executeInBrowser(binding({

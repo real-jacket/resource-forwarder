@@ -26,6 +26,8 @@ export interface Project {
   enabled: boolean;
   siteHosts: string[];
   siteMatchPatterns?: string[];
+  /** Default request-target hosts inherited by groups/rules that do not override them. */
+  defaultRequestHosts?: string[];
   baseUrl?: string;
   envLabel?: string;
   tags: string[];
@@ -49,6 +51,8 @@ export interface RuleSet {
    * single-group projects working without migration.
    */
   siteMatchPatterns?: string[];
+  /** Optional request-target host override. Empty/undefined inherits the project default. */
+  defaultRequestHosts?: string[];
   baseUrl?: string;
   note?: string;
   createdAt: string;
@@ -57,6 +61,8 @@ export interface RuleSet {
 
 export interface MatchCondition {
   host: string[];
+  /** When true, resolve hosts from the owning rule set/project instead of `host`. */
+  inheritHost?: boolean;
   pathGlob: string;
   /**
    * Query-string constraints keyed by parameter name. Values use the same

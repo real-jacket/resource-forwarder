@@ -9,6 +9,7 @@ import type {
 } from "@resource-forwarder/shared-types";
 import { prepareMatcher } from "./matcher-cache.js";
 import { escapeRegex, globToPathRegexSource } from "./glob.js";
+import { resolveEffectiveRequestHosts } from "./target-resolution.js";
 import type { RuleConflict } from "./warnings.js";
 
 export function normalizeMethod(method: string): string {
@@ -95,9 +96,9 @@ export function matchesTabScope(match: MatchCondition, tabId?: number): boolean 
   return match.tabScope.tabIds.includes(tabId);
 }
 
-export function matchesRule(rule: Rule, context: RequestContext): boolean {
+export function matchesRule(rule: Rule, context: RequestContext, hosts = rule.match.host): boolean {
   return (
-    matchesHost(rule.match.host, context.host) &&
+    matchesHost(hosts, context.host) &&
     matchesPath(rule.match.pathGlob, context.pathname) &&
     matchesQuery(rule.match, context.query) &&
     matchesHeaders(rule.match, context.headers) &&
@@ -157,8 +158,17 @@ export function pickMatchingRule(
   return prepareMatcher(workspace).pick(context, kind);
 }
 
-export function collectRuleConflicts(workspace: WorkspaceSnapshot, draft: Rule): RuleConflict[] {
-  const normalizedHosts = new Set(draft.match.host);
+export function collectRuleConflicts(
+  workspace: WorkspaceSnapshot,
+  draft: Rule,
+  context?: Pick<RuleBinding, "project" | "ruleSet">,
+): RuleConflict[] {
+  const draftBinding = context
+    ? { ...context, rule: draft }
+    : resolveRuleBinding(workspace, draft.id);
+  const normalizedHosts = new Set(
+    draftBinding ? resolveEffectiveRequestHosts({ ...draftBinding, rule: draft }) : draft.match.host,
+  );
   return workspace.rules
     .filter((rule) => rule.id !== draft.id)
     .filter((rule) => rule.kind === draft.kind)
@@ -168,7 +178,11 @@ export function collectRuleConflicts(workspace: WorkspaceSnapshot, draft: Rule):
         rule.match.pathGlob === "**" ||
         draft.match.pathGlob === "**",
     )
-    .filter((rule) => rule.match.host.some((host) => normalizedHosts.has(host) || host === "*" || normalizedHosts.has("*")))
+    .filter((rule) => {
+      const binding = resolveRuleBinding(workspace, rule.id);
+      const hosts = binding ? resolveEffectiveRequestHosts(binding) : rule.match.host;
+      return hosts.some((host) => normalizedHosts.has(host) || host === "*" || normalizedHosts.has("*"));
+    })
     .map((rule) => ({
       ruleId: rule.id,
       reason: `Potential overlap with ${rule.name} (${rule.id}).`,

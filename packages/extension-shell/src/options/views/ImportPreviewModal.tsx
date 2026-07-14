@@ -109,7 +109,14 @@ export function ImportPreviewModal({ preview, busy, error, onClose, onImport }: 
                           // Drop the wildcard host so the cross-origin badge
                           // only fires when the rule explicitly targets a
                           // domain other than the parent project's hosts.
-                          const ruleHosts = rule.match.host.filter((h) => h !== "*");
+                          const effectiveHosts = rule.match.inheritHost
+                            ? ruleSet?.defaultRequestHosts?.length
+                              ? ruleSet.defaultRequestHosts
+                              : project.defaultRequestHosts?.length
+                                ? project.defaultRequestHosts
+                                : project.siteHosts
+                            : rule.match.host;
+                          const ruleHosts = effectiveHosts.filter((h) => h !== "*");
                           const isSameOrigin =
                             ruleHosts.length > 0 &&
                             ruleHosts.every(
