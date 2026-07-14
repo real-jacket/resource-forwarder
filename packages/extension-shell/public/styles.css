@@ -2072,6 +2072,11 @@ summary {
   outline-offset: -2px;
 }
 
+.form-disclosure-static-header {
+  padding: 12px 14px;
+  color: var(--ink-secondary);
+}
+
 .form-disclosure-copy {
   display: inline-flex;
   width: calc(100% - 12px);

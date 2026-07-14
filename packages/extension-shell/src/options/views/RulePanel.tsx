@@ -337,6 +337,7 @@ function AdvancedTab({
       <FormDisclosure
         title="匹配条件"
         description="限定 Host、资源类型、方法以及 Query / Header 条件"
+        collapsible={draft.kind === "api_forward"}
       >
       <div className="form-subsection-heading">请求目标</div>
       <div className="form-group">
@@ -715,6 +716,7 @@ function AdvancedTab({
       <FormDisclosure
         title="规则行为"
         description="调整优先级、标签和默认启用状态"
+        collapsible={draft.kind === "api_forward"}
       >
       <div className="form-row">
         <div className="form-group">
@@ -759,19 +761,35 @@ function FormDisclosure({
   title,
   description,
   defaultOpen = false,
+  collapsible = true,
   tone = "default",
   children,
 }: {
   title: string;
   description: string;
   defaultOpen?: boolean;
+  collapsible?: boolean;
   tone?: "default" | "primary";
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const className = `form-disclosure ${tone === "primary" ? "is-primary" : ""}`;
+  if (!collapsible) {
+    return (
+      <section className={className}>
+        <div className="form-disclosure-static-header">
+          <span className="form-disclosure-copy">
+            <strong>{title}</strong>
+            <span>{description}</span>
+          </span>
+        </div>
+        <div className="form-disclosure-body">{children}</div>
+      </section>
+    );
+  }
   return (
     <details
-      className={`form-disclosure ${tone === "primary" ? "is-primary" : ""}`}
+      className={className}
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
