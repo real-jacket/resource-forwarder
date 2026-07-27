@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { RuleSet } from "@resource-forwarder/shared-types";
-import { buildRuleGroups, isRuleEffectivelyDisabled, toggleCollapsedRuleSetIds } from "./rule-groups.js";
+import {
+  buildRuleGroups,
+  getDefaultCollapsedRuleSetIds,
+  isRuleEffectivelyDisabled,
+  toggleCollapsedRuleSetIds,
+} from "./rule-groups.js";
 
 const ruleSetA: RuleSet = {
   id: "ruleset-a",
@@ -52,6 +57,14 @@ describe("toggleCollapsedRuleSetIds", () => {
     expect(Array.from(original)).toEqual(["ruleset-a"]);
     expect(Array.from(expanded).sort()).toEqual(["ruleset-a", "ruleset-b"]);
     expect(Array.from(collapsed)).toEqual(["ruleset-a"]);
+  });
+});
+
+describe("getDefaultCollapsedRuleSetIds", () => {
+  it("collapses disabled groups only", () => {
+    expect(Array.from(getDefaultCollapsedRuleSetIds([ruleSetA, { ...ruleSetB, enabled: false }]))).toEqual([
+      "ruleset-b",
+    ]);
   });
 });
 

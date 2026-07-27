@@ -70,6 +70,7 @@ import {
 } from "./drafts.js";
 import { buildRuleSearchText, localizeWarning } from "./formatters.js";
 import { isRuleEffectivelyDisabled } from "./rule-groups.js";
+import { resolveRuleContext } from "./rule-context.js";
 
 const emptyProjectDraft = (): ProjectDraft => ({
   id: "",
@@ -467,12 +468,20 @@ function App() {
     setShowRuleSetModal(true);
   }
 
-  function openRulePanel(kind: Rule["kind"], rule?: Rule): void {
-    if (!selectedProject || !selectedRuleSet) {
+  function openRulePanel(
+    kind: Rule["kind"],
+    rule?: Rule,
+    project?: Project | null,
+    ruleSet?: RuleSet | null,
+  ): void {
+    const source = resolveRuleContext({ project, ruleSet, selectedProject, selectedRuleSet });
+    if (!source.project || !source.ruleSet) {
       setStatus("请先创建一个站点，再添加规则。");
       return;
     }
-    setRuleDraft(createRuleDraft({ project: selectedProject, ruleSet: selectedRuleSet, kind, rule }));
+    setSelectedProjectId(source.project.id);
+    setSelectedRuleSetId(source.ruleSet.id);
+    setRuleDraft(createRuleDraft({ project: source.project, ruleSet: source.ruleSet, kind, rule }));
     setRulePanelTab("basic");
     setPanelMode("rule");
   }

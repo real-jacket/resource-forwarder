@@ -9,7 +9,11 @@ import {
   buildOptionsNavigationUrl,
   type OptionsNavigationTarget,
 } from "../shared/options-navigation.js";
-import { isRuleEffectivelyDisabled, toggleCollapsedRuleSetIds } from "../options/rule-groups.js";
+import {
+  getDefaultCollapsedRuleSetIds,
+  isRuleEffectivelyDisabled,
+  toggleCollapsedRuleSetIds,
+} from "../options/rule-groups.js";
 
 function App() {
   const [dashboard, setDashboard] = useState<GetDashboardStateResponse | null>(null);
@@ -17,6 +21,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [collapsedSiteIds, setCollapsedSiteIds] = useState<Set<string>>(new Set());
   const [collapsedRuleGroupIds, setCollapsedRuleGroupIds] = useState<Set<string>>(new Set());
+  const initializedCollapsedRuleGroups = useRef(false);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -207,6 +212,10 @@ function App() {
     setBusy(true);
     try {
       const state = await runtimeRequest<GetDashboardStateResponse>({ type: "get-dashboard-state" });
+      if (!initializedCollapsedRuleGroups.current) {
+        setCollapsedRuleGroupIds(getDefaultCollapsedRuleSetIds(state.workspace.ruleSets));
+        initializedCollapsedRuleGroups.current = true;
+      }
       setDashboard(state);
       if (!state.currentTab?.host) {
         setStatus("当前标签页不可识别，请切到一个正常网页。");
@@ -278,6 +287,9 @@ function App() {
         payload: { ruleSet: { ...ruleSet, enabled: !ruleSet.enabled } },
       });
       setDashboard({ ...state, logs: dashboard.logs, currentTab: dashboard.currentTab });
+      if (ruleSet.enabled) {
+        setCollapsedRuleGroupIds((current) => new Set(current).add(ruleSet.id));
+      }
       setStatus(`分组「${ruleSet.name}」已${ruleSet.enabled ? "停用" : "启用"}。`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "切换分组状态失败。");

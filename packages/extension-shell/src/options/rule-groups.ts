@@ -47,6 +47,10 @@ export function toggleCollapsedRuleSetIds(current: Set<string>, ruleSetId: strin
   return next;
 }
 
+export function getDefaultCollapsedRuleSetIds(ruleSets: RuleSet[]): Set<string> {
+  return new Set(ruleSets.filter((ruleSet) => !ruleSet.enabled).map((ruleSet) => ruleSet.id));
+}
+
 export function isRuleEffectivelyDisabled(
   ruleEnabled: boolean,
   ruleSetEnabled: boolean,
