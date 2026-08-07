@@ -1593,6 +1593,10 @@ summary {
 /* Editing is a focused sub-flow. Collapse the global navigation rail and
    remove table columns already repeated in the editor so the remaining list
    keeps useful names and match paths instead of compressing every column. */
+.panel-open .rule-table {
+  table-layout: auto;
+}
+
 .panel-open .rule-table .col-target,
 .panel-open .rule-table .col-time {
   display: none;

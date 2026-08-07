@@ -208,27 +208,38 @@ function App() {
     }
   }
 
-  async function refresh(): Promise<void> {
+  async function refresh(syncRemote = false): Promise<void> {
     setBusy(true);
     try {
-      const state = await runtimeRequest<GetDashboardStateResponse>({ type: "get-dashboard-state" });
-      if (!initializedCollapsedRuleGroups.current) {
-        setCollapsedRuleGroupIds(getDefaultCollapsedRuleSetIds(state.workspace.ruleSets));
-        initializedCollapsedRuleGroups.current = true;
-      }
-      setDashboard(state);
-      if (!state.currentTab?.host) {
+      const cachedState = await runtimeRequest<GetDashboardStateResponse>({ type: "get-sidepanel-state" });
+      applyDashboardState(cachedState);
+      if (!cachedState.currentTab?.host) {
         setStatus("当前标签页不可识别，请切到一个正常网页。");
-      } else if (!state.health) {
+      } else if (!cachedState.health) {
         setStatus("Companion 未连接；普通 API 转发仍由浏览器执行，本地文件规则暂不可用。");
       } else {
-        setStatus("当前页面状态已同步。");
+        setStatus("已加载本地规则。");
       }
+
+      if (!syncRemote) return;
+      setStatus("正在同步规则...");
+      await runtimeRequest({ type: "sync-workspace" });
+      const syncedState = await runtimeRequest<GetDashboardStateResponse>({ type: "get-sidepanel-state" });
+      applyDashboardState(syncedState);
+      setStatus(syncedState.health ? "当前页面状态已同步。" : "Companion 未连接；已继续使用本地规则。");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "加载侧边栏失败。");
     } finally {
       setBusy(false);
     }
+  }
+
+  function applyDashboardState(state: GetDashboardStateResponse): void {
+    if (!initializedCollapsedRuleGroups.current) {
+      setCollapsedRuleGroupIds(getDefaultCollapsedRuleSetIds(state.workspace.ruleSets));
+      initializedCollapsedRuleGroups.current = true;
+    }
+    setDashboard(state);
   }
 
   async function toggleProject(project: Project): Promise<void> {
@@ -316,7 +327,7 @@ function App() {
             <span className="sp-hero-host">{currentHost || "未识别"}</span>
           </div>
           <div className="sp-hero-actions">
-            <button className="btn btn-default btn-sm" onClick={() => void refresh()} disabled={busy}>刷新</button>
+            <button className="btn btn-default btn-sm" onClick={() => void refresh(true)} disabled={busy}>刷新</button>
             <button className="btn btn-primary btn-sm" onClick={() => void openRulesPage()}>
               {visibleProjects.length > 0 ? "查看命中规则" : "规则页"}
             </button>
