@@ -57,6 +57,9 @@ let runtimeState: RuntimeState = {
 let runtimeWarnings: string[] = [];
 let lastAppliedDnrFingerprint: string | undefined;
 let browserLogChain: Promise<void> = Promise.resolve();
+let localRuntimeHydrated = false;
+let localRuntimeHydration: Promise<void> | undefined;
+let syncWorkspacePromise: Promise<RuntimeState & { warnings: string[] }> | undefined;
 
 // Serialize write handlers so two concurrent runtime messages can't read the
 // same base workspace and clobber each other's edits. Read paths (proxyRequest,
@@ -71,7 +74,11 @@ function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
 
 // ── Extension lifecycle ──────────────────────────────────────────────────
 
-void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+chrome.action.onClicked.addListener((tab) => {
+  if (tab.id !== undefined) {
+    void chrome.sidePanel.open({ tabId: tab.id });
+  }
+});
 
 // MV3 service workers are killed after ~30s of idleness, which means anything
 // in-memory at that moment (DNR fingerprint, in-flight aborts, the timer below)
@@ -178,6 +185,8 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
   switch (message.type) {
     case "get-dashboard-state":
       return getDashboardState(message.tabId);
+    case "get-sidepanel-state":
+      return getSidepanelState(message.tabId);
     case "sync-workspace":
       return syncWorkspace();
     case "set-service-url":
@@ -362,6 +371,7 @@ async function commitWorkspace(
     runtimeState = { ...runtimeState, serviceUrl, health };
   }
   runtimeWarnings = warnings;
+  localRuntimeHydrated = true;
 
   try {
     await applyDynamicRules(runtimeState.workspace);
@@ -375,7 +385,16 @@ async function commitWorkspace(
 
 // ── Sync: local-first, then try remote service ───────────────────────────
 
-async function syncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
+function syncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
+  if (!syncWorkspacePromise) {
+    syncWorkspacePromise = performSyncWorkspace().finally(() => {
+      syncWorkspacePromise = undefined;
+    });
+  }
+  return syncWorkspacePromise;
+}
+
+async function performSyncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
   const serviceUrl = await getServiceUrl();
   const health = await getHealth(serviceUrl);
   runtimeState.serviceUrl = serviceUrl;
@@ -683,6 +702,38 @@ async function pushWorkspaceReplace(serviceUrl: string, workspace: WorkspaceSnap
 }
 
 // ── Dashboard state ──────────────────────────────────────────────────────
+
+async function hydrateRuntimeStateFromLocal(): Promise<void> {
+  if (localRuntimeHydrated) return;
+  if (!localRuntimeHydration) {
+    localRuntimeHydration = Promise.all([readLocalWorkspace(), getServiceUrl()])
+      .then(([workspace, serviceUrl]) => {
+        if (!localRuntimeHydrated) {
+          runtimeState = { ...runtimeState, serviceUrl, workspace };
+          localRuntimeHydrated = true;
+        }
+      })
+      .finally(() => {
+        localRuntimeHydration = undefined;
+      });
+  }
+  await localRuntimeHydration;
+}
+
+async function getSidepanelState(tabId?: number): Promise<DashboardState> {
+  await hydrateRuntimeStateFromLocal();
+  const [currentTab, dnrCounts] = await Promise.all([
+    getTabSnapshot(tabId),
+    readDnrRuleCounts(),
+  ]);
+  return {
+    ...runtimeState,
+    warnings: runtimeWarnings,
+    logs: [],
+    currentTab,
+    dnrRuleCount: dnrCounts,
+  };
+}
 
 async function getDashboardState(tabId?: number): Promise<DashboardState> {
   if (runtimeState.workspace.rules.length === 0) {

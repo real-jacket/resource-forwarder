@@ -1,5 +1,5 @@
 import { build, context } from "esbuild";
-import { mkdir, cp } from "node:fs/promises";
+import { mkdir, cp, rm } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,6 +12,10 @@ const publicDir = join(rootDir, "public");
 const shared = {
   bundle: true,
   sourcemap: true,
+  minify: !isWatch,
+  define: {
+    "process.env.NODE_ENV": JSON.stringify(isWatch ? "development" : "production"),
+  },
   target: ["chrome120"],
   logLevel: "info",
   absWorkingDir: rootDir,
@@ -23,6 +27,10 @@ async function copyPublicAssets() {
 }
 
 async function main() {
+  // Keep loaded unpacked extensions alive while rebuilding. Removing the whole
+  // directory briefly deletes background.js and leaves Chrome with an invalid
+  // service worker until the extension is manually reloaded.
+  await rm(join(distDir, "chunks"), { recursive: true, force: true });
   await copyPublicAssets();
 
   const builds = [
@@ -48,12 +56,9 @@ async function main() {
       globalName: "ResourceForwarderPageBridge",
       platform: "browser",
     },
-    // Combine the React-based pages into one ESM build so esbuild can hoist
-    // shared dependencies (react, react-dom, rule-core, shared-types) into a
-    // single vendor chunk via `splitting`. Both options.html and
-    // sidepanel.html load their entry as `type="module"` to consume the
-    // chunked output. Without splitting each page bundled its own copy of
-    // react-dom (~140KB each), inflating the unpacked extension size.
+    // Keep each React surface self-contained. The sidepanel is opened and
+    // destroyed frequently, so avoiding an extra shared-chunk import matters
+    // more than saving one duplicate React copy in the unpacked extension.
     {
       ...shared,
       entryPoints: {
@@ -62,12 +67,8 @@ async function main() {
       },
       outdir: "dist",
       format: "esm",
-      splitting: true,
-      // Predictable filenames for the entries (no content hash) so the static
-      // HTML can reference them directly. Auto-generated split chunks land in
-      // dist/chunks/ with hashed names.
+      splitting: false,
       entryNames: "[name]",
-      chunkNames: "chunks/[name]-[hash]",
       platform: "browser",
     },
   ];

@@ -33,6 +33,7 @@ export interface DashboardState extends RuntimeState {
 
 export type RuntimeRequest =
   | { type: "get-dashboard-state"; tabId?: number }
+  | { type: "get-sidepanel-state"; tabId?: number }
   | { type: "sync-workspace" }
   | { type: "set-service-url"; serviceUrl: string }
   | { type: "set-service-token"; token: string }
