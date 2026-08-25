@@ -33,14 +33,6 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["page-bridge.js"],
-      "run_at": "document_start",
-      "world": "MAIN",
-      "all_frames": true,
-      "match_about_blank": true
-    },
-    {
-      "matches": ["<all_urls>"],
       "js": ["content-script.js"],
       "run_at": "document_start",
       "all_frames": true,

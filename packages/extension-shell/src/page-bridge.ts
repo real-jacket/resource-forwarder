@@ -1,5 +1,5 @@
-import { prepareMatcher } from "@resource-forwarder/rule-core";
-import type { MatcherCache } from "@resource-forwarder/rule-core";
+import { prepareMatcher, type MatcherCache } from "@resource-forwarder/rule-core";
+import { needsPageBridge } from "./page-bridge-policy.js";
 import type { ForwardRequestPayload, ForwardResponsePayload, SiteContextPayload, WorkspaceSnapshot } from "@resource-forwarder/shared-types";
 import { FORWARD_BODY_LIMIT_BYTES, PAYLOAD_TOO_LARGE_SENTINEL, SERVICE_OFFLINE_SENTINEL, STREAMING_UNSUPPORTED_SENTINEL, WINDOW_SOURCE } from "./shared/constants.js";
 import { getWindowPostMessageTargetOrigin } from "./shared/window-messaging.js";
@@ -72,36 +72,11 @@ let state: SiteContextPayload = {
 // hot fetch/XHR path doesn't pay the regex-construction tax on every request.
 let matcher: MatcherCache = prepareMatcher(state.workspace as WorkspaceSnapshot);
 
-// configReady gates rule matching until the content-script delivers the workspace.
-// Without this gate, requests fired during the patch/handshake window would skip
-// every rule and silently fall through to the native implementation.
-//
-// Now that page-bridge ships as its own document_start content_script (world:
-// "MAIN"), the isolated-world content-script kicks off the site-context
-// roundtrip in parallel with us — there is no script-tag fetch to wait on.
-// 300 ms is plenty for the chrome.runtime.sendMessage hop + storage reads.
-// On timeout we resolve and let in-flight requests fall through to native; we
-// do NOT block the page longer than necessary.
-const CONFIG_READY_TIMEOUT_MS = 300;
-let configReceived = false;
-let resolveConfigReady: () => void = () => {};
-const configReady = new Promise<void>((resolve) => {
-  resolveConfigReady = resolve;
-});
-const configReadyTimer = window.setTimeout(() => {
-  if (!configReceived) {
-    resolveConfigReady();
-  }
-}, CONFIG_READY_TIMEOUT_MS);
-
 if (!pageWindow.__RESOURCE_FORWARDER_PATCHED__) {
   pageWindow.__RESOURCE_FORWARDER_PATCHED__ = true;
-  installFetchPatch();
-  installXhrPatch();
   // Announce ourselves and wait for the isolated-world content-script to hand
-  // back a private MessagePort. Until that lands every message we want to send
-  // sits in `pendingPortMessages`; messages received from the port are routed
-  // to the same handler as the legacy `window.postMessage` path.
+  // back a private MessagePort. fetch and XHR remain native until the first
+  // applicable config arrives through that port.
   window.addEventListener("message", handleHandshakeMessage);
   window.postMessage(
     { source: WINDOW_SOURCE, type: "bridge-ready" },
@@ -158,18 +133,12 @@ function routeBridgeMessage(data: { type?: string; payload?: unknown }): void {
   if (data.type === "config") {
     const next = data.payload as SiteContextPayload;
     state = next;
-    // SPA navigations resend the same workspace many times in a row. Skipping
-    // prepareMatcher when the underlying workspace hasn't changed turns the
-    // hot path on history-state-update into a no-op (we keep the existing
-    // matcher closures).
-    const fingerprint = workspaceFingerprint(next.workspace as WorkspaceSnapshot);
-    if (fingerprint !== lastWorkspaceFingerprint) {
-      matcher = prepareMatcher(next.workspace as WorkspaceSnapshot);
-      lastWorkspaceFingerprint = fingerprint;
+    matcher = prepareMatcher(next.workspace as WorkspaceSnapshot);
+    if (needsPageBridge(next.workspace)) {
+      installPatches();
+    } else {
+      uninstallPatches();
     }
-    configReceived = true;
-    window.clearTimeout(configReadyTimer);
-    resolveConfigReady();
     return;
   }
 
@@ -193,19 +162,28 @@ function routeBridgeMessage(data: { type?: string; payload?: unknown }): void {
   }
 }
 
-let lastWorkspaceFingerprint: string | undefined;
-function workspaceFingerprint(workspace: WorkspaceSnapshot): string {
-  // updatedAt is bumped on every persist, so for a server-driven flow this
-  // discriminates exactly when matcher behaviour can change. The lengths are
-  // a cheap defence against backends that forget to bump updatedAt; without
-  // them, an apparent no-op message could mask a structural change.
-  return `${workspace.updatedAt}|${workspace.projects.length}|${workspace.ruleSets.length}|${workspace.rules.length}`;
+
+let patchesInstalled = false;
+let restoreFetchPatch: (() => void) | undefined;
+let restoreXhrPatch: (() => void) | undefined;
+
+function installPatches(): void {
+  if (patchesInstalled) return;
+  installFetchPatch();
+  installXhrPatch();
+  patchesInstalled = true;
+}
+
+function uninstallPatches(): void {
+  if (!patchesInstalled) return;
+  restoreFetchPatch?.();
+  restoreXhrPatch?.();
+  patchesInstalled = false;
 }
 
 function installFetchPatch(): void {
-  const nativeFetch = window.fetch.bind(window);
-  window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    await configReady;
+  const nativeFetch = window.fetch;
+  const patchedFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 
     // Pull the abort signal from either init or the Request itself; init wins
     // because the user may pass a fresh signal alongside an existing Request.
@@ -218,7 +196,7 @@ function installFetchPatch(): void {
     const requestHeaders = Object.fromEntries(request.headers.entries());
     const match = matcher.pick(buildContext(request.url, request.method, "fetch", requestHeaders), "api_forward");
     if (!match) {
-      return nativeFetch(input, init);
+      return nativeFetch.call(window, input, init);
     }
     const allowNativeFallback = match.rule.target.forwardProfile?.fallbackMode !== "error";
 
@@ -228,7 +206,7 @@ function installFetchPatch(): void {
     const initSize = approximateBodySize(init?.body);
     if (initSize > FORWARD_BODY_LIMIT_BYTES) {
       warnPayloadTooLarge(request.url, initSize, allowNativeFallback);
-      if (allowNativeFallback) return nativeFetch(input, init);
+      if (allowNativeFallback) return nativeFetch.call(window, input, init);
       throw new TypeError(`Resource Forwarder blocked native fallback for oversized request: ${request.url}`);
     }
 
@@ -242,9 +220,15 @@ function installFetchPatch(): void {
         allowNativeFallback &&
         (isServiceOfflineError(error) || isPayloadTooLargeError(error) || isStreamingUnsupportedError(error))
       ) {
-        return nativeFetch(input, init);
+        return nativeFetch.call(window, input, init);
       }
       throw error;
+    }
+  };
+  window.fetch = patchedFetch;
+  restoreFetchPatch = () => {
+    if (window.fetch === patchedFetch) {
+      window.fetch = nativeFetch;
     }
   };
 }
@@ -266,9 +250,16 @@ function installXhrPatch(): void {
     responseURL: Object.getOwnPropertyDescriptor(xhrPrototype, "responseURL"),
     responseType: Object.getOwnPropertyDescriptor(xhrPrototype, "responseType"),
   };
+  const pinnedSurfaces = new WeakMap<XMLHttpRequest, {
+    originals: Map<string, PropertyDescriptor | undefined>;
+    installed: Map<string, PropertyDescriptor>;
+  }>();
+  const openingThroughPageWrapper = new WeakSet<XMLHttpRequest>();
+  const abortingThroughPageWrapper = new WeakSet<XMLHttpRequest>();
+  let patchActive = true;
 
-  xhrPrototype.open = function open(method: string, url: string | URL, async?: boolean, username?: string | null, password?: string | null): void {
-    xhrState.set(this, {
+  function resetXhrState(xhr: XMLHttpRequest, method: string, url: string | URL): void {
+    xhrState.set(xhr, {
       method,
       url: new URL(url.toString(), location.href).toString(),
       requestHeaders: {},
@@ -283,6 +274,15 @@ function installXhrPatch(): void {
       responseURL: "",
       responseHeaders: {},
     });
+  }
+
+  xhrPrototype.open = function open(method: string, url: string | URL, async?: boolean, username?: string | null, password?: string | null): void {
+    if (openingThroughPageWrapper.has(this)) {
+      nativeOpen.call(this, method, url.toString(), async ?? true, username ?? undefined, password ?? undefined);
+      return;
+    }
+    pinXhrSurface(this);
+    resetXhrState(this, method, url);
     nativeOpen.call(this, method, url.toString(), async ?? true, username ?? undefined, password ?? undefined);
   };
 
@@ -308,11 +308,12 @@ function installXhrPatch(): void {
     const sendNative = (): void => {
       replayHeadersToNative(xhr, current, nativeSetRequestHeader);
       nativeSend.call(xhr, body ?? null);
+      restorePinnedSurface(xhr);
     };
 
     void (async () => {
-      await configReady;
       if (current.aborted) {
+        if (!patchActive) restorePinnedSurface(xhr);
         return;
       }
 
@@ -338,17 +339,17 @@ function installXhrPatch(): void {
       try {
         const payload = await createForwardPayloadFromBody(current, body ?? undefined, match.rule.id);
         if (current.aborted) {
+          if (!patchActive) restorePinnedSurface(xhr);
           return;
         }
         current.intercepted = true;
         current.requestId = randomRequestId();
         const forwarded = await dispatchProxyRequest(current.requestId, payload);
-        if (current.aborted) {
-          return;
-        }
+        if (current.aborted) return;
         applyXhrResponse(xhr, current, forwarded);
       } catch (error) {
         if (current.aborted) {
+          if (!patchActive && !current.intercepted) restorePinnedSurface(xhr);
           return;
         }
         if (allowNativeFallback && isNativeFallbackError(error)) {
@@ -366,20 +367,14 @@ function installXhrPatch(): void {
   };
 
   xhrPrototype.abort = function abort(): void {
-    const current = xhrState.get(this);
-    if (!current?.intercepted) {
-      if (current) {
-        current.aborted = true;
-        current.readyState = 0;
-      }
+    if (abortingThroughPageWrapper.has(this)) {
       nativeAbort.call(this);
       return;
     }
-
-    current.aborted = true;
-    current.readyState = 0;
-    if (current.requestId) {
-      sendAbortMessage(current.requestId);
+    const intercepted = markRfAbort(this);
+    if (!intercepted) {
+      nativeAbort.call(this);
+      return;
     }
     dispatchXhrEvent(this, "abort");
     dispatchXhrEvent(this, "loadend");
@@ -458,6 +453,191 @@ function installXhrPatch(): void {
       },
     },
   });
+  const patchedMethods = {
+    open: xhrPrototype.open,
+    send: xhrPrototype.send,
+    setRequestHeader: xhrPrototype.setRequestHeader,
+    abort: xhrPrototype.abort,
+    getAllResponseHeaders: xhrPrototype.getAllResponseHeaders,
+    getResponseHeader: xhrPrototype.getResponseHeader,
+  };
+  const patchedDescriptors = Object.fromEntries(
+    Object.keys(descriptors).map((name) => [name, Object.getOwnPropertyDescriptor(xhrPrototype, name)]),
+  ) as typeof descriptors;
+
+  function markRfAbort(xhr: XMLHttpRequest): boolean {
+    const current = xhrState.get(xhr);
+    if (!current) return false;
+    current.aborted = true;
+    current.readyState = 0;
+    if (!current.intercepted) return false;
+    if (current.requestId) sendAbortMessage(current.requestId);
+    return true;
+  }
+
+  function pinXhrSurface(xhr: XMLHttpRequest): void {
+    if (pinnedSurfaces.has(xhr)) return;
+    const originals = new Map<string, PropertyDescriptor | undefined>();
+    const installed = new Map<string, PropertyDescriptor>();
+    pinnedSurfaces.set(xhr, { originals, installed });
+
+    for (const name of Object.keys(patchedDescriptors) as Array<keyof typeof patchedDescriptors>) {
+      if (Object.prototype.hasOwnProperty.call(xhr, name)) continue;
+      const descriptor = patchedDescriptors[name];
+      if (!descriptor) continue;
+      originals.set(name, undefined);
+      const pinned = { ...descriptor, configurable: true };
+      Object.defineProperty(xhr, name, pinned);
+      installed.set(name, Object.getOwnPropertyDescriptor(xhr, name)!);
+    }
+
+    const originalOpen = Object.getOwnPropertyDescriptor(xhr, "open");
+    originals.set("open", originalOpen);
+    const chainedOpen = function open(
+      this: XMLHttpRequest,
+      method: string,
+      url: string | URL,
+      async?: boolean,
+      username?: string | null,
+      password?: string | null,
+    ): void {
+      resetXhrState(this, method, url);
+      if (typeof originalOpen?.value === "function") {
+        openingThroughPageWrapper.add(this);
+        try {
+          originalOpen.value.call(this, method, url, async, username, password);
+        } finally {
+          openingThroughPageWrapper.delete(this);
+        }
+      } else {
+        const prototypeOpen = xhrPrototype.open;
+        if (prototypeOpen === patchedMethods.open) {
+          nativeOpen.call(this, method, url.toString(), async ?? true, username ?? undefined, password ?? undefined);
+        } else {
+          prototypeOpen.call(this, method, url.toString(), async ?? true, username ?? undefined, password ?? undefined);
+        }
+      }
+      if (!patchActive) restorePinnedSurface(this);
+    };
+    Object.defineProperty(xhr, "open", { configurable: true, writable: true, value: chainedOpen });
+    installed.set("open", Object.getOwnPropertyDescriptor(xhr, "open")!);
+
+    const originalAbort = Object.getOwnPropertyDescriptor(xhr, "abort");
+    originals.set("abort", originalAbort);
+    const chainedAbort = function abort(this: XMLHttpRequest): void {
+      const intercepted = markRfAbort(this);
+      if (typeof originalAbort?.value === "function") {
+        abortingThroughPageWrapper.add(this);
+        try {
+          originalAbort.value.call(this);
+        } finally {
+          abortingThroughPageWrapper.delete(this);
+        }
+      } else {
+        const prototypeAbort = xhrPrototype.abort;
+        if (prototypeAbort === patchedMethods.abort) {
+          if (!intercepted) nativeAbort.call(this);
+        } else {
+          prototypeAbort.call(this);
+        }
+      }
+      if (intercepted) {
+        dispatchXhrEvent(this, "abort");
+        dispatchXhrEvent(this, "loadend");
+      }
+      if (!patchActive) restorePinnedSurface(this);
+    };
+    Object.defineProperty(xhr, "abort", { configurable: true, writable: true, value: chainedAbort });
+    installed.set("abort", Object.getOwnPropertyDescriptor(xhr, "abort")!);
+
+    const originalSend = Object.getOwnPropertyDescriptor(xhr, "send");
+    originals.set("send", originalSend);
+    const chainedSend = function send(this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null): void {
+      if (typeof originalSend?.value !== "function") {
+        patchedMethods.send.call(this, body ?? null);
+        return;
+      }
+      if (patchActive) {
+        originalSend.value.call(this, body ?? null);
+        return;
+      }
+
+      replayHeadersToNative(this, getOrCreateXhrState(this), nativeSetRequestHeader);
+      const currentSetRequestHeader = Object.getOwnPropertyDescriptor(this, "setRequestHeader");
+      const installedSetRequestHeader = installed.get("setRequestHeader");
+      const isRfInstalledSetRequestHeader = Boolean(
+        currentSetRequestHeader
+        && installedSetRequestHeader
+        && currentSetRequestHeader.value === installedSetRequestHeader.value
+        && currentSetRequestHeader.get === installedSetRequestHeader.get
+        && currentSetRequestHeader.set === installedSetRequestHeader.set
+        && currentSetRequestHeader.configurable === installedSetRequestHeader.configurable
+        && currentSetRequestHeader.enumerable === installedSetRequestHeader.enumerable
+        && currentSetRequestHeader.writable === installedSetRequestHeader.writable,
+      );
+      if (isRfInstalledSetRequestHeader) {
+        Object.defineProperty(this, "setRequestHeader", {
+          configurable: true,
+          writable: true,
+          value: Function.prototype.bind.call(nativeSetRequestHeader, this),
+        });
+      }
+      try {
+        originalSend.value.call(this, body ?? null);
+      } finally {
+        if (isRfInstalledSetRequestHeader && currentSetRequestHeader) {
+          Object.defineProperty(this, "setRequestHeader", currentSetRequestHeader);
+        }
+        restorePinnedSurface(this);
+      }
+    };
+    Object.defineProperty(xhr, "send", { configurable: true, writable: true, value: chainedSend });
+    installed.set("send", Object.getOwnPropertyDescriptor(xhr, "send")!);
+
+    for (const name of ["setRequestHeader", "getAllResponseHeaders", "getResponseHeader"] as const) {
+      if (Object.prototype.hasOwnProperty.call(xhr, name)) continue;
+      originals.set(name, undefined);
+      Object.defineProperty(xhr, name, {
+        configurable: true,
+        writable: true,
+        value: Function.prototype.bind.call(patchedMethods[name], xhr),
+      });
+      installed.set(name, Object.getOwnPropertyDescriptor(xhr, name)!);
+    }
+  }
+
+  function restorePinnedSurface(xhr: XMLHttpRequest): void {
+    const surface = pinnedSurfaces.get(xhr);
+    if (!surface) return;
+    for (const [name, installed] of surface.installed) {
+      const current = Object.getOwnPropertyDescriptor(xhr, name);
+      const unchanged = current?.value === installed.value && current?.get === installed.get && current?.set === installed.set;
+      if (!unchanged) continue;
+      const original = surface.originals.get(name);
+      if (original) Object.defineProperty(xhr, name, original);
+      else delete (xhr as unknown as Record<string, unknown>)[name];
+    }
+    pinnedSurfaces.delete(xhr);
+  }
+
+  restoreXhrPatch = () => {
+    patchActive = false;
+    if (xhrPrototype.open === patchedMethods.open) xhrPrototype.open = nativeOpen;
+    if (xhrPrototype.send === patchedMethods.send) xhrPrototype.send = nativeSend;
+    if (xhrPrototype.setRequestHeader === patchedMethods.setRequestHeader) xhrPrototype.setRequestHeader = nativeSetRequestHeader;
+    if (xhrPrototype.abort === patchedMethods.abort) xhrPrototype.abort = nativeAbort;
+    if (xhrPrototype.getAllResponseHeaders === patchedMethods.getAllResponseHeaders) xhrPrototype.getAllResponseHeaders = nativeGetAllResponseHeaders;
+    if (xhrPrototype.getResponseHeader === patchedMethods.getResponseHeader) xhrPrototype.getResponseHeader = nativeGetResponseHeader;
+
+    for (const name of Object.keys(descriptors) as Array<keyof typeof descriptors>) {
+      const original = descriptors[name];
+      const patched = patchedDescriptors[name];
+      const current = Object.getOwnPropertyDescriptor(xhrPrototype, name);
+      if (original && patched && current?.get === patched.get && current?.set === patched.set) {
+        Object.defineProperty(xhrPrototype, name, original);
+      }
+    }
+  };
 }
 
 function getOrCreateXhrState(xhr: XMLHttpRequest): XhrState {
@@ -648,12 +828,7 @@ function applyXhrError(xhr: XMLHttpRequest, current: XhrState): void {
 }
 
 function dispatchXhrEvent(xhr: XMLHttpRequest, type: string): void {
-  const event = new Event(type);
-  xhr.dispatchEvent(event);
-  const handler = (xhr as unknown as Record<string, unknown>)[`on${type}`];
-  if (typeof handler === "function") {
-    handler.call(xhr, event);
-  }
+  xhr.dispatchEvent(new Event(type));
 }
 
 function dispatchProgressEvent(xhr: XMLHttpRequest, type: string, total: number): void {
@@ -665,10 +840,6 @@ function dispatchProgressEvent(xhr: XMLHttpRequest, type: string, total: number)
       ? new ProgressEvent(type, { lengthComputable: total > 0, loaded: total, total })
       : new Event(type);
   xhr.dispatchEvent(event);
-  const handler = (xhr as unknown as Record<string, unknown>)[`on${type}`];
-  if (typeof handler === "function") {
-    handler.call(xhr, event);
-  }
 }
 
 function decodeForwardBody(forwarded: ForwardResponsePayload): Uint8Array {

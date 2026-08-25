@@ -176,7 +176,7 @@ describe("dnr helpers", () => {
         projects: [
           project({
             siteHosts: ["co-dev-17.shimorelease.com"],
-            siteMatchPatterns: ["https://co-dev-17.shimorelease.com/*"],
+            siteMatchPatterns: ["*://co-dev-17.shimorelease.com/*"],
           }),
         ],
         ruleSets: [
@@ -212,7 +212,120 @@ describe("dnr helpers", () => {
     expect(groups.sessionRules).toHaveLength(0);
   });
 
-  it("keeps same-origin path-scoped asset rules dynamic so initial scripts are not missed", () => {
+  it("keeps wildcard-host projects with scoped patterns in session rules", () => {
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [project({ siteHosts: ["*"], siteMatchPatterns: ["https://app.example.com/tables/*"] })],
+        ruleSets: [{ id: "scope", projectId: "project-1", name: "Scope", enabled: true, ruleIds: ["rule"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
+        rules: [assetRule("rule", "cdn.example.com", "http://localhost:8000/app.js")],
+      },
+      [
+        { id: 1, url: "https://app.example.com/tables/abc" },
+        { id: 2, url: "https://other.example.com/tables/abc" },
+      ],
+    );
+
+    expect(groups.dynamicRules).toHaveLength(0);
+    expect(groups.sessionRules[0]?.condition.tabIds).toEqual([1]);
+  });
+
+  it("keeps partially covered multi-host projects in session rules", () => {
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [project({ siteHosts: ["a.example.com", "b.example.com"], siteMatchPatterns: ["*://a.example.com/*"] })],
+        ruleSets: [{ id: "scope", projectId: "project-1", name: "Scope", enabled: true, ruleIds: ["rule"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
+        rules: [assetRule("rule", "cdn.example.com", "http://localhost:8000/app.js")],
+      },
+      [
+        { id: 1, url: "https://a.example.com/page" },
+        { id: 2, url: "https://b.example.com/page" },
+      ],
+    );
+
+    expect(groups.dynamicRules).toHaveLength(0);
+    expect(groups.sessionRules[0]?.condition.tabIds).toEqual([1]);
+  });
+
+  it("keeps rule sets covering only a project host subset in session rules", () => {
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [project({ siteHosts: ["a.example.com", "b.example.com"], siteMatchPatterns: ["*://a.example.com/*", "*://b.example.com/*"] })],
+        ruleSets: [{ id: "scope", projectId: "project-1", name: "Scope", enabled: true, ruleIds: ["rule"], siteMatchPatterns: ["*://a.example.com/*"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
+        rules: [assetRule("rule", "cdn.example.com", "http://localhost:8000/app.js")],
+      },
+      [
+        { id: 1, url: "https://a.example.com/page" },
+        { id: 2, url: "https://b.example.com/page" },
+      ],
+    );
+
+    expect(groups.dynamicRules).toHaveLength(0);
+    expect(groups.sessionRules[0]?.condition.tabIds).toEqual([1]);
+  });
+
+  it.each([
+    ["https-only", "https://app.example.com/*", "https://app.example.com/page"],
+    ["path-scoped", "*://app.example.com/tables/*", "https://app.example.com/tables/abc"],
+  ])("keeps %s project patterns in session rules", (_label, pattern, url) => {
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [project({ siteHosts: ["app.example.com"], siteMatchPatterns: [pattern] })],
+        ruleSets: [{ id: "scope", projectId: "project-1", name: "Scope", enabled: true, ruleIds: ["rule"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
+        rules: [assetRule("rule", "cdn.example.com", "http://localhost:8000/app.js")],
+      },
+      [{ id: 1, url }],
+    );
+
+    expect(groups.dynamicRules).toHaveLength(0);
+    expect(groups.sessionRules[0]?.condition.tabIds).toEqual([1]);
+  });
+
+  it("uses tabIds without stale initiatorDomains for universal project patterns", () => {
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [project({ siteHosts: ["stale.example.com"], siteMatchPatterns: ["*"] })],
+        ruleSets: [{ id: "scope", projectId: "project-1", name: "Scope", enabled: true, ruleIds: ["rule"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
+        rules: [assetRule("rule", "cdn.example.com", "http://localhost:8000/app.js")],
+      },
+      [{ id: 7, url: "https://actual.example.com/page" }],
+    );
+
+    expect(groups.dynamicRules).toHaveLength(0);
+    expect(groups.sessionRules[0]?.condition.tabIds).toEqual([7]);
+    expect(groups.sessionRules[0]?.condition.initiatorDomains).toBeUndefined();
+  });
+
+  it.each([
+    ["siteHosts", ["app.example.com:8443"], undefined],
+    ["siteMatchPatterns", ["app.example.com"], ["*://app.example.com:8443/*"]],
+  ])("keeps explicit ports from %s in session rules", (_label, siteHosts, siteMatchPatterns) => {
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [project({ siteHosts, siteMatchPatterns })],
+        ruleSets: [{ id: "scope", projectId: "project-1", name: "Scope", enabled: true, ruleIds: ["rule"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
+        rules: [assetRule("rule", "cdn.example.com", "http://localhost:8000/app.js")],
+      },
+      [{ id: 8, url: "https://app.example.com:8443/page" }],
+    );
+
+    expect(groups.dynamicRules).toHaveLength(0);
+    expect(groups.sessionRules[0]?.condition.tabIds).toEqual([8]);
+    expect(groups.sessionRules[0]?.condition.initiatorDomains).toBeUndefined();
+  });
+
+  it("keeps same-origin path-scoped asset rules in the matching tab session", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
@@ -234,26 +347,18 @@ describe("dnr helpers", () => {
             updatedAt: "2026-01-01T00:00:00.000Z",
           },
         ],
-        rules: [
-          {
-            ...assetRule("rule-zebra", "co-dev-17.shimorelease.com", "http://localhost:8000/zebra.js"),
-            match: {
-              host: ["co-dev-17.shimorelease.com"],
-              pathGlob: "/minio/shimo-assets/table/zebra.*.js",
-              resourceType: ["script"],
-              tabScope: { mode: "all" },
-            },
-          },
-        ],
+        rules: [assetRule("rule-zebra", "co-dev-17.shimorelease.com", "http://localhost:8000/zebra.js")],
       },
-      [],
+      [
+        { id: 4, url: "https://co-dev-17.shimorelease.com/tables/abc" },
+        { id: 5, url: "https://co-dev-17.shimorelease.com/sheets/abc" },
+      ],
     );
 
-    expect(groups.dynamicRules).toHaveLength(1);
-    expect(groups.dynamicRules[0]?.condition.tabIds).toBeUndefined();
-    expect(groups.dynamicRules[0]?.condition.requestDomains).toEqual(["co-dev-17.shimorelease.com"]);
-    expect(groups.dynamicRules[0]?.condition.initiatorDomains).toEqual(["co-dev-17.shimorelease.com"]);
-    expect(groups.sessionRules).toHaveLength(0);
+    expect(groups.dynamicRules).toHaveLength(0);
+    expect(groups.sessionRules).toHaveLength(1);
+    expect(groups.sessionRules[0]?.condition.tabIds).toEqual([4]);
+    expect(groups.sessionRules[0]?.condition.initiatorDomains).toBeUndefined();
   });
 
   it("resolves relative asset redirect targets with rule set baseUrl first, then project baseUrl", () => {
@@ -372,6 +477,69 @@ describe("dnr helpers", () => {
     expect(groups.dynamicRules).toHaveLength(1);
     expect(groups.dynamicRules[0]?.condition.initiatorDomains).toEqual(["co-dev-18.shimorelease.com"]);
     expect(groups.sessionRules).toHaveLength(0);
+  });
+
+  it("separates two path-scoped rule sets in one project", () => {
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [project({ siteHosts: ["app.example.com"], siteMatchPatterns: ["https://app.example.com/*"] })],
+        ruleSets: [
+          { id: "tables", projectId: "project-1", name: "Tables", enabled: true, ruleIds: ["table-rule"], siteMatchPatterns: ["https://app.example.com/tables/*"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" },
+          { id: "sheets", projectId: "project-1", name: "Sheets", enabled: true, ruleIds: ["sheet-rule"], siteMatchPatterns: ["https://app.example.com/sheets/*"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" },
+        ],
+        rules: [
+          assetRule("table-rule", "cdn.example.com", "http://localhost:8000/table.js"),
+          assetRule("sheet-rule", "cdn.example.com", "http://localhost:8000/sheet.js"),
+        ],
+      },
+      [
+        { id: 10, url: "https://app.example.com/tables/abc" },
+        { id: 11, url: "https://app.example.com/sheets/abc" },
+      ],
+    );
+
+    expect(groups.dynamicRules).toHaveLength(0);
+    expect(groups.sessionRules.find((rule) => rule.action.redirect.url?.endsWith("table.js"))?.condition.tabIds).toEqual([10]);
+    expect(groups.sessionRules.find((rule) => rule.action.redirect.url?.endsWith("sheet.js"))?.condition.tabIds).toEqual([11]);
+  });
+
+  it("intersects explicit tab ids with project and rule set scope", () => {
+    const scopedRule = assetRule("scoped", "cdn.example.com", "http://localhost:8000/scoped.js");
+    scopedRule.match.tabScope = { mode: "tabIds", tabIds: [2, 3, 99] };
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [project({ siteHosts: ["app.example.com"], siteMatchPatterns: ["https://app.example.com/*"] })],
+        ruleSets: [{ id: "tables", projectId: "project-1", name: "Tables", enabled: true, ruleIds: ["scoped"], siteMatchPatterns: ["https://app.example.com/tables/*"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
+        rules: [scopedRule],
+      },
+      [
+        { id: 2, url: "https://app.example.com/tables/abc" },
+        { id: 3, url: "https://app.example.com/sheets/abc" },
+        { id: 4, url: "https://app.example.com/tables/def" },
+      ],
+    );
+
+    expect(groups.dynamicRules).toHaveLength(0);
+    expect(groups.sessionRules[0]?.condition.tabIds).toEqual([2]);
+  });
+
+  it("omits page-scoped rules when no tab is eligible", () => {
+    const groups = buildScopedDnrRuleGroups(
+      {
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        projects: [project({ siteHosts: ["app.example.com"], siteMatchPatterns: ["https://app.example.com/tables/*"] })],
+        ruleSets: [{ id: "tables", projectId: "project-1", name: "Tables", enabled: true, ruleIds: ["rule"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
+        rules: [assetRule("rule", "cdn.example.com", "http://localhost:8000/app.js")],
+      },
+      [{ id: 1, url: "https://app.example.com/sheets/abc" }],
+    );
+
+    expect(groups).toEqual({ dynamicRules: [], sessionRules: [] });
   });
 
 });

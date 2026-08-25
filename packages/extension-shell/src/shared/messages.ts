@@ -47,7 +47,7 @@ export type RuntimeRequest =
   | { type: "diagnose-match"; payload: MatchRequestPayload }
   | { type: "import-workspace"; payload: ImportWorkspacePayload }
   | { type: "export-workspace"; projectIds: string[]; format: "json" | "yaml" }
-  | { type: "get-site-context"; url: string; tabId?: number }
+  | { type: "get-site-context"; url: string; bridgeInstalled?: boolean }
   | { type: "proxy-request"; requestId: string; payload: ForwardRequestPayload }
   | { type: "proxy-abort"; requestId: string };
 

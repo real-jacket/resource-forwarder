@@ -1,5 +1,12 @@
-import { getEnabledRuleBindings, matchesProjectSite, resolveRuleTargetValue, toDynamicRule } from "@resource-forwarder/rule-core";
-import type { DynamicRedirectRule, Project, WorkspaceSnapshot } from "@resource-forwarder/shared-types";
+import {
+  getEnabledRuleBindings,
+  matchesProjectSite,
+  matchesRuleSetSite,
+  matchesTabScope,
+  resolveRuleTargetValue,
+  toDynamicRule,
+} from "@resource-forwarder/rule-core";
+import type { DynamicRedirectRule, Project, RuleSet, WorkspaceSnapshot } from "@resource-forwarder/shared-types";
 
 export interface TabUrlSnapshot {
   id?: number;
@@ -82,23 +89,21 @@ export function buildScopedDnrRuleGroups(
       },
       binding.project?.siteHosts,
     );
-    if (
-      isGlobalProjectScope(binding.project) ||
-      isHostWideProjectScope(binding.project) ||
-      isSameOriginAssetRule(binding.project, binding.rule.match.host)
-    ) {
+    const canStayDynamic =
+      canExpressPageScopeWithInitiatorDomains(binding.project, binding.ruleSet) &&
+      binding.rule.match.tabScope?.mode !== "tabIds";
+    if (canStayDynamic) {
       dynamicRules.push(rule);
       continue;
     }
 
-    const tabIds = collectMatchedTabIdsForProject(binding.project, tabs);
+    const condition = { ...rule.condition };
+    delete condition.initiatorDomains;
+    const tabIds = collectEligibleTabIds(binding.project, binding.ruleSet, binding.rule.match, tabs);
     if (tabIds.length > 0) {
       sessionRules.push({
         ...rule,
-        condition: {
-          ...rule.condition,
-          tabIds,
-        },
+        condition: { ...condition, tabIds },
       });
     }
   }
@@ -106,8 +111,13 @@ export function buildScopedDnrRuleGroups(
   return { dynamicRules, sessionRules };
 }
 
-function collectMatchedTabIdsForProject(project: Project | undefined, tabs: TabUrlSnapshot[]): number[] {
-  if (!project) {
+function collectEligibleTabIds(
+  project: Project | undefined,
+  ruleSet: RuleSet | undefined,
+  match: Parameters<typeof matchesTabScope>[0],
+  tabs: TabUrlSnapshot[],
+): number[] {
+  if (!project || !ruleSet) {
     return [];
   }
 
@@ -116,78 +126,74 @@ function collectMatchedTabIdsForProject(project: Project | undefined, tabs: TabU
     if (typeof tab.id !== "number" || !tab.url || !/^https?:/.test(tab.url)) {
       continue;
     }
-    if (matchesProjectSite(project, tab.url)) {
+    if (
+      matchesProjectSite(project, tab.url) &&
+      matchesRuleSetSite(ruleSet, project, tab.url) &&
+      matchesTabScope(match, tab.id)
+    ) {
       ids.push(tab.id);
     }
   }
   return ids;
 }
 
-function isGlobalProjectScope(project: Project | undefined): boolean {
-  if (!project) {
+type DnrPageScope = "global" | "host-wide" | "narrow";
+
+function canExpressPageScopeWithInitiatorDomains(
+  project: Project | undefined,
+  ruleSet: RuleSet | undefined,
+): boolean {
+  if (!project) return true;
+  const projectScope = classifyDnrPageScope(project.siteHosts, project.siteMatchPatterns);
+  if (projectScope === "narrow") return false;
+
+  const ruleSetPatterns = ruleSet?.siteMatchPatterns ?? [];
+  if (ruleSetPatterns.length === 0 || ruleSetPatterns.some(isUniversalSitePattern)) {
     return true;
   }
 
-  // 真 global：siteHosts 缺省或包含 "*" 才不限定页面来源。仅有具体 siteHosts
-  // 但没设置 siteMatchPatterns 的项目是 host-wide，不能当成 global，否则会绕过
-  // initiatorDomains 绑定，让规则在任意页面生效。
-  if (project.siteHosts.length === 0 || project.siteHosts.includes("*")) {
-    return true;
-  }
-
-  const patterns = project.siteMatchPatterns ?? [];
-  if (patterns.length === 0) {
-    return false;
-  }
-
-  return patterns.some((pattern) => {
-    const trimmed = pattern.trim();
-    return !trimmed || trimmed === "*" || trimmed === "<all_urls>";
-  });
+  const ruleSetScope = classifyDnrPageScope(project.siteHosts, ruleSetPatterns);
+  return projectScope === "host-wide" && ruleSetScope === "host-wide";
 }
 
-function isHostWideProjectScope(project: Project | undefined): boolean {
-  if (!project || project.siteHosts.length === 0) {
-    return false;
-  }
+function classifyDnrPageScope(siteHosts: string[], siteMatchPatterns?: string[]): DnrPageScope {
+  const patterns = siteMatchPatterns ?? [];
+  const concreteHosts = new Set(siteHosts.filter((host) => host !== "*" && !host.includes("*")));
+  if (siteHosts.some(hasExplicitPort)) return "narrow";
+  const hasGlobalHosts = siteHosts.length === 0 || siteHosts.includes("*");
 
-  if (project.siteHosts.some((host) => host === "*" || host.includes("*"))) {
-    return false;
-  }
-
-  const patterns = project.siteMatchPatterns ?? [];
   if (patterns.length === 0) {
-    return true;
+    if (hasGlobalHosts) return "global";
+    return concreteHosts.size === siteHosts.length ? "host-wide" : "narrow";
   }
 
-  return patterns.every((pattern) => {
-    const trimmed = pattern.trim();
-    if (!trimmed || trimmed === "*" || trimmed === "<all_urls>") {
-      return false;
-    }
+  if (patterns.some(isUniversalSitePattern)) {
+    return hasGlobalHosts ? "global" : "narrow";
+  }
+  if (hasGlobalHosts || concreteHosts.size !== siteHosts.length) {
+    return "narrow";
+  }
 
-    const match = trimmed.match(/^(?:\*|https?):\/\/([^/]+)(\/.*)?$/i);
-    if (!match) {
-      return false;
+  const coveredHosts = new Set<string>();
+  for (const pattern of patterns) {
+    const match = pattern.trim().match(/^(\*|https?):\/\/([^/]+)(\/.*)?$/i);
+    if (!match || match[1] !== "*") return "narrow";
+    const host = match[2] ?? "";
+    const path = match[3] ?? "";
+    if (hasExplicitPort(host)) return "narrow";
+    if (!concreteHosts.has(host) || (path !== "" && path !== "/" && path !== "/*" && path !== "/**")) {
+      return "narrow";
     }
-
-    const patternHost = match[1] ?? "";
-    const patternPath = match[2] ?? "";
-    const isKnownHost = project.siteHosts.includes(patternHost);
-    const isHostWidePath = patternPath === "" || patternPath === "/" || patternPath === "/*" || patternPath === "/**";
-    return isKnownHost && isHostWidePath;
-  });
+    coveredHosts.add(host);
+  }
+  return coveredHosts.size === concreteHosts.size ? "host-wide" : "narrow";
 }
 
-function isSameOriginAssetRule(project: Project | undefined, ruleHosts: string[]): boolean {
-  if (!project || project.siteHosts.length === 0 || ruleHosts.length === 0) {
-    return false;
-  }
+function isUniversalSitePattern(pattern: string): boolean {
+  const trimmed = pattern.trim();
+  return !trimmed || trimmed === "*" || trimmed === "<all_urls>";
+}
 
-  if (project.siteHosts.some((host) => host === "*" || host.includes("*"))) {
-    return false;
-  }
-
-  const concreteRuleHosts = ruleHosts.filter((host) => host !== "*" && !host.includes("*"));
-  return concreteRuleHosts.length > 0 && concreteRuleHosts.every((host) => project.siteHosts.includes(host));
+function hasExplicitPort(host: string): boolean {
+  return /:\d+$/.test(host);
 }

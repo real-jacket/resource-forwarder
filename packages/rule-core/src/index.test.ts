@@ -778,6 +778,33 @@ describe("rule-core", () => {
     expect(sheetPage.rules.map((rule) => rule.id)).toEqual(["rule-asset"]);
   });
 
+  it("keeps duplicate RuleSet membership non-executable after URL trimming", () => {
+    const ambiguousWorkspace: WorkspaceSnapshot = {
+      version: 1,
+      updatedAt: "2024-01-01T00:00:00.000Z",
+      projects: [{
+        id: "p1",
+        name: "App",
+        enabled: true,
+        siteHosts: ["app.example.com"],
+        siteMatchPatterns: ["https://app.example.com/*"],
+        tags: [],
+        createdAt: "2024-01-01T00:00:00.000Z",
+        updatedAt: "2024-01-01T00:00:00.000Z",
+      }],
+      ruleSets: [
+        { id: "tables", projectId: "p1", name: "Tables", enabled: true, ruleIds: ["rule-api"], siteMatchPatterns: ["https://app.example.com/tables/*"], createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-01T00:00:00.000Z" },
+        { id: "sheets", projectId: "p1", name: "Sheets", enabled: true, ruleIds: ["rule-api"], siteMatchPatterns: ["https://app.example.com/sheets/*"], createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-01T00:00:00.000Z" },
+      ],
+      rules: [apiRule],
+    };
+
+    const tablePage = trimWorkspaceForUrl(ambiguousWorkspace, "https://app.example.com/tables/abc");
+
+    expect(tablePage.ruleSets.map((ruleSet) => ruleSet.id)).toEqual(["tables"]);
+    expect(tablePage.rules).toHaveLength(0);
+  });
+
   it("uses regexFilter instead of path-only urlFilter for wildcard DNR hosts", () => {
     const dnr = toDynamicRule({
       ...assetRule,

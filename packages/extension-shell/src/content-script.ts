@@ -1,18 +1,18 @@
 import type { ForwardRequestPayload, SiteContextPayload } from "@resource-forwarder/shared-types";
+import { needsPageBridge } from "./page-bridge-policy.js";
 import { WINDOW_SOURCE } from "./shared/constants.js";
 import { getWindowPostMessageTargetOrigin } from "./shared/window-messaging.js";
 
-// content-script runs in the isolated world; the page-bridge lives in the main
-// world (now a separate `world: "MAIN"` content_script entry). They share the
-// DOM but not the JS realm, so we negotiate a private MessagePort to carry
-// every business message after handshake. Unlike `window.postMessage` (which
-// fans out to every listener including page scripts), a MessagePort is a
-// 1-to-1 channel that can only be addressed by its holders — so a page-side
-// attacker who happened to be listening at handshake time cannot spoof
-// proxy-response or sniff config payloads.
+// content-script runs in the isolated world; background injects page-bridge.js
+// into the main world only when the current frame has an enabled API rule.
+// They share the DOM but not the JS realm, so we negotiate a private
+// MessagePort to carry every business message after handshake.
 
 let port: MessagePort | undefined;
 const pendingMessages: Array<{ type: string; payload?: unknown }> = [];
+let bridgeExpected = false;
+let refreshVersion = 0;
+let latestSiteContext: SiteContextPayload | undefined;
 
 window.addEventListener("message", handleHandshakeMessage);
 
@@ -46,27 +46,45 @@ function handleHandshakeMessage(event: MessageEvent): void {
       getWindowPostMessageTargetOrigin(location.origin),
       [channel.port2],
     );
-    // Drain anything we tried to send before the bridge announced itself —
-    // primarily the initial `config` payload.
+    const hadPendingConfig = pendingMessages.some((message) => message.type === "config");
     for (const buffered of pendingMessages.splice(0)) {
       port.postMessage(buffered);
+    }
+    if (!hadPendingConfig && latestSiteContext) {
+      port.postMessage({ source: WINDOW_SOURCE, type: "config", payload: latestSiteContext });
     }
   }
 }
 
 async function refreshSiteContext(): Promise<void> {
+  const version = ++refreshVersion;
   try {
-    const payload = (await chrome.runtime.sendMessage({
+    const response = (await chrome.runtime.sendMessage({
       type: "get-site-context",
       url: location.href,
+      bridgeInstalled: Boolean(port) || bridgeExpected,
     })) as SiteContextPayload | { __error?: string };
 
-    if (payload && typeof payload === "object" && "__error" in payload && payload.__error) {
-      throw new Error(payload.__error);
+    if (version !== refreshVersion) {
+      return;
+    }
+    if ("__error" in response) {
+      if (response.__error) throw new Error(response.__error);
+      return;
     }
 
+    const payload = response as SiteContextPayload;
+    latestSiteContext = payload;
+    bridgeExpected = needsPageBridge(payload.workspace);
+    if (!bridgeExpected && !port) {
+      removePendingConfig();
+      return;
+    }
     sendToBridge({ type: "config", payload });
   } catch (error) {
+    if (version !== refreshVersion || !port) {
+      return;
+    }
     sendToBridge({
       type: "proxy-error",
       payload: {
@@ -83,7 +101,17 @@ function sendToBridge(message: { type: string; payload?: unknown }): void {
     port.postMessage(envelope);
     return;
   }
+  if (message.type === "config") {
+    removePendingConfig();
+  }
   pendingMessages.push(envelope);
+}
+
+function removePendingConfig(): void {
+  const index = pendingMessages.findIndex((message) => message.type === "config");
+  if (index !== -1) {
+    pendingMessages.splice(index, 1);
+  }
 }
 
 function handlePortMessage(event: MessageEvent): void {

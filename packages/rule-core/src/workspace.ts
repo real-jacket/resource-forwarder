@@ -3,7 +3,8 @@ import type {
   SupportedExportFormat,
   WorkspaceSnapshot,
 } from "@resource-forwarder/shared-types";
-import { matchesHost, matchesPath, matchesTabScope } from "./matchers.js";
+import { matchesTabScope } from "./matchers.js";
+import { matchesProjectSite, matchesRuleSetSite } from "./site-matching.js";
 
 const TEXT_ENCODABLE_TYPES = new Set([
   "application/json",
@@ -119,79 +120,6 @@ export function deriveSiteHosts(patterns: string[]): string[] {
   return Array.from(hosts);
 }
 
-/**
- * Check whether a page URL matches a project's site scope.
- *
- * Match logic (mirrors Resource Override's matchUrl semantics):
- * 1. If siteMatchPatterns is non-empty, at least one pattern must match the URL.
- * 2. Otherwise fall back to siteHosts — page host must be in the list.
- * 3. If both are empty/wildcard, the project matches all pages.
- */
-export function matchesProjectSite(
-  project: { siteHosts: string[]; siteMatchPatterns?: string[] },
-  pageUrl: string,
-): boolean {
-  const patterns = project.siteMatchPatterns ?? [];
-  if (patterns.length > 0) {
-    return patterns.some((pattern) => matchesSitePattern(pattern, pageUrl));
-  }
-
-  if (project.siteHosts.length === 0 || project.siteHosts.includes("*")) return true;
-
-  try {
-    const host = new URL(pageUrl).host;
-    return matchesHost(project.siteHosts, host);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Check whether a rule set is active for the given page URL. A rule set with
- * its own siteMatchPatterns gates on those patterns (so co-existing groups
- * under one project — sheet vs. table — only surface when the URL path lines
- * up). When the rule set has no patterns of its own, it inherits the project's
- * site scope; this keeps legacy single-group projects working without
- * migration. The parent project's matching is intentionally NOT re-checked
- * here because callers already filter by project at a higher level.
- */
-export function matchesRuleSetSite(
-  ruleSet: { siteMatchPatterns?: string[] },
-  fallbackProject: { siteHosts: string[]; siteMatchPatterns?: string[] },
-  pageUrl: string,
-): boolean {
-  const patterns = ruleSet.siteMatchPatterns ?? [];
-  if (patterns.length === 0) {
-    return matchesProjectSite(fallbackProject, pageUrl);
-  }
-  return patterns.some((pattern) => matchesSitePattern(pattern, pageUrl));
-}
-
-function matchesSitePattern(pattern: string, pageUrl: string): boolean {
-  const trimmed = pattern.trim();
-  if (!trimmed || trimmed === "*" || trimmed === "<all_urls>") return true;
-
-  const patternUrlMatch = trimmed.match(/^(\*|https?):\/\/([^/]*)(\/.*)?$/i);
-  if (!patternUrlMatch) return false;
-
-  const [, patternScheme, patternHost, patternPath] = patternUrlMatch;
-
-  let url: URL;
-  try {
-    url = new URL(pageUrl);
-  } catch {
-    return false;
-  }
-
-  if (patternScheme !== "*" && url.protocol !== `${patternScheme}:`) return false;
-  if (patternHost !== "*" && !matchesHost([patternHost!], url.host)) return false;
-
-  const pathGlob = patternPath || "/**";
-  // Chrome match-pattern semantics: `*` spans `/`. Internal path glob uses single-segment `*`, so promote standalone `*` to `**`.
-  const crossSegmentGlob = pathGlob.replace(/(?<!\*)\*(?!\*)/g, "**");
-  const normalizedGlob = crossSegmentGlob.endsWith("*") ? crossSegmentGlob : `${crossSegmentGlob}**`;
-  return matchesPath(normalizedGlob, url.pathname);
-}
 
 /**
  * Trim a workspace snapshot down to only the projects, rule sets, and rules
@@ -227,6 +155,12 @@ export function trimWorkspaceForUrl(
         urlString,
       ),
   );
+  const membershipCounts = new Map<string, number>();
+  for (const ruleSet of workspace.ruleSets) {
+    for (const ruleId of ruleSet.ruleIds) {
+      membershipCounts.set(ruleId, (membershipCounts.get(ruleId) ?? 0) + 1);
+    }
+  }
   const allowedRuleIds = new Set(allowedRuleSets.flatMap((ruleSet) => ruleSet.ruleIds));
 
   return {
@@ -235,7 +169,11 @@ export function trimWorkspaceForUrl(
     projects: workspace.projects.filter((project) => allowedProjectIds.has(project.id)),
     ruleSets: allowedRuleSets,
     rules: workspace.rules.filter(
-      (rule) => rule.enabled && allowedRuleIds.has(rule.id) && matchesTabScope(rule.match, tabId),
+      (rule) =>
+        rule.enabled &&
+        membershipCounts.get(rule.id) === 1 &&
+        allowedRuleIds.has(rule.id) &&
+        matchesTabScope(rule.match, tabId),
     ),
   };
 }

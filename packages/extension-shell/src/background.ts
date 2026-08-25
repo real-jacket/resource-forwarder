@@ -35,8 +35,9 @@ import {
   trimWorkspaceForUrl,
   type PendingDeletions,
 } from "@resource-forwarder/rule-core";
+import { needsPageBridge } from "./page-bridge-policy.js";
 import type { DashboardState, RuntimeRequest } from "./shared/messages.js";
-import { DEFAULT_SERVICE_URL, SERVICE_OFFLINE_SENTINEL, SESSION_STORAGE_KEYS, STORAGE_KEYS } from "./shared/constants.js";
+import { DEFAULT_SERVICE_URL, SERVICE_OFFLINE_SENTINEL, STORAGE_KEYS } from "./shared/constants.js";
 import { buildDynamicRuleUpdatePlan, buildScopedDnrRuleGroups } from "./dnr.js";
 import { normalizeProxyRequestError } from "./shared/service-errors.js";
 import { buildCookieHeader, shouldAttachBrowserCookies } from "./cookie-forwarding.js";
@@ -80,14 +81,10 @@ chrome.action.onClicked.addListener((tab) => {
   }
 });
 
-// MV3 service workers are killed after ~30s of idleness, which means anything
-// in-memory at that moment (DNR fingerprint, in-flight aborts, the timer below)
-// is gone on next wake. Strategy:
-//   • On boot we re-apply DNR rules and clear stale inflight ids; the page
-//     bridge will get an explicit error rather than hanging forever.
-//   • A recurring chrome.alarm acts as a low-frequency "compensation tick" so
-//     even if onStartup never fires (e.g. installed mid-session) we still
-//     reconcile DNR + push dirty work eventually.
+// MV3 service workers are killed after ~30s of idleness, so in-memory DNR
+// fingerprints, AbortControllers, and timers disappear on restart. Wake-up
+// handling therefore reconciles persistent DNR state and pending workspace
+// sync; aborts remain intentionally limited to the current worker lifetime.
 const RECONCILE_ALARM = "resource-forwarder:reconcile";
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -106,10 +103,6 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 async function onWorkerWake(reason: "install" | "startup" | "alarm"): Promise<void> {
-  // Drop any inflight forward ids from the previous worker incarnation —
-  // the AbortControllers they reference are gone, and leaving them in storage
-  // would trick abortInflight() into thinking it can still cancel them.
-  await chrome.storage.session.remove(SESSION_STORAGE_KEYS.inflightForwards).catch(() => undefined);
   // Force a DNR reconcile on every wake even if the workspace hasn't changed —
   // chrome.declarativeNetRequest is persistent and a previous worker incarnation
   // may have left stale rules (e.g. apply failed before the worker died, or the
@@ -124,8 +117,10 @@ async function onWorkerWake(reason: "install" | "startup" | "alarm"): Promise<vo
   void reason;
 }
 
-chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
-  if (changeInfo.url || changeInfo.status === "loading") {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url) {
+    void refreshDnrForNavigation(tabId, changeInfo.url);
+  } else if (changeInfo.status === "loading") {
     scheduleDnrRefresh();
   }
 });
@@ -134,25 +129,30 @@ chrome.tabs.onRemoved.addListener(() => {
   scheduleDnrRefresh();
 });
 
-// SPA route changes don't fire tabs.onUpdated, so subscribe to webNavigation.
-// onHistoryStateUpdated fires on pushState/replaceState; onReferenceFragmentUpdated
-// fires on hash-only changes. Either one means the page-bridge needs a fresh
-// site context (different rules may apply on the new path).
+// SPA route changes don't fire tabs.onUpdated, so refresh the content script in
+// the exact frame that navigated. DNR tab eligibility is page-level and only
+// needs recalculation for the main frame.
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
-  if (details.frameId !== 0) return;
-  scheduleDnrRefresh();
-  void chrome.tabs.sendMessage(details.tabId, { type: "refresh-site-context" }).catch(() => undefined);
+  if (details.frameId === 0) void refreshDnrForNavigation(details.tabId, details.url);
+  void chrome.tabs.sendMessage(
+    details.tabId,
+    { type: "refresh-site-context" },
+    { frameId: details.frameId },
+  ).catch(() => undefined);
 });
 
 chrome.webNavigation.onReferenceFragmentUpdated.addListener((details) => {
-  if (details.frameId !== 0) return;
-  scheduleDnrRefresh();
-  void chrome.tabs.sendMessage(details.tabId, { type: "refresh-site-context" }).catch(() => undefined);
+  if (details.frameId === 0) void refreshDnrForNavigation(details.tabId, details.url);
+  void chrome.tabs.sendMessage(
+    details.tabId,
+    { type: "refresh-site-context" },
+    { frameId: details.frameId },
+  ).catch(() => undefined);
 });
 
-// Coalesce bursts of tab navigation/close events into a single DNR update.
-// Without this, restoring a session (dozens of tabs flipping to "loading"
-// at once) would call updateDynamicRules dozens of times in a row.
+// Coalesce bulk events that do not carry a destination URL, such as tab-close
+// bursts and loading notifications. URL-bearing navigation events update DNR
+// immediately with their destination URL.
 const DNR_REFRESH_DEBOUNCE_MS = 200;
 let dnrRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -223,7 +223,7 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
     case "export-workspace":
       return handleExportWorkspace(message.projectIds, message.format);
     case "get-site-context":
-      return buildSiteContext(message.url, message.tabId ?? sender.tab?.id);
+      return buildSiteContext(message.url, sender, message.bridgeInstalled);
     case "proxy-request":
       return proxyRequest(message.requestId, message.payload);
     case "proxy-abort":
@@ -768,13 +768,42 @@ async function readDnrRuleCounts(): Promise<{ dynamic: number; session: number }
 }
 
 // ── Site context / proxy ─────────────────────────────────────────────────
+const pendingBridgeInjections = new Map<string, Promise<void>>();
 
-async function buildSiteContext(url: string, tabId?: number): Promise<SiteContextPayload> {
+async function buildSiteContext(
+  url: string,
+  sender: chrome.runtime.MessageSender,
+  bridgeInstalled = false,
+): Promise<SiteContextPayload> {
   if (runtimeState.workspace.rules.length === 0 && runtimeState.health === null) {
     await syncWorkspace().catch(() => undefined);
   }
 
+  const tabId = sender.tab?.id;
   const scopedWorkspace = trimWorkspaceForUrl(runtimeState.workspace, url, tabId);
+  if (needsPageBridge(scopedWorkspace) && !bridgeInstalled) {
+    if (typeof tabId !== "number") {
+      throw new Error("Cannot inject the page bridge without a sender tab.");
+    }
+    const frameId = sender.frameId ?? 0;
+    const documentId = sender.documentId;
+    const key = typeof documentId === "string"
+      ? `${tabId}:document:${documentId}`
+      : `${tabId}:frame:${frameId}`;
+    let injection = pendingBridgeInjections.get(key);
+    if (!injection) {
+      const target = typeof documentId === "string"
+        ? { tabId, documentIds: [documentId] }
+        : { tabId, frameIds: [frameId] };
+      injection = chrome.scripting.executeScript({
+        target,
+        files: ["page-bridge.js"],
+        world: "MAIN",
+      }).then(() => undefined).finally(() => pendingBridgeInjections.delete(key));
+      pendingBridgeInjections.set(key, injection);
+    }
+    await injection;
+  }
   return {
     serviceUrl: runtimeState.serviceUrl,
     workspace: scopedWorkspace,
@@ -787,7 +816,6 @@ async function buildSiteContext(url: string, tabId?: number): Promise<SiteContex
 async function proxyRequest(requestId: string, payload: ForwardRequestPayload) {
   const controller = new AbortController();
   inflightForwards.set(requestId, controller);
-  await persistInflightId(requestId);
   const startedAt = Date.now();
   let binding: ReturnType<typeof resolveForwardBinding> | undefined;
   let target = payload.url;
@@ -859,7 +887,6 @@ async function proxyRequest(requestId: string, payload: ForwardRequestPayload) {
     throw normalizeProxyRequestError(error);
   } finally {
     inflightForwards.delete(requestId);
-    await unpersistInflightId(requestId);
   }
 }
 
@@ -943,42 +970,9 @@ function abortInflight(requestId: string): void {
   if (controller) {
     controller.abort();
     inflightForwards.delete(requestId);
-    void unpersistInflightId(requestId);
   }
 }
 
-/**
- * Persist inflight forward ids so a worker restart can at least clear stale
- * ones (see onWorkerWake). The values themselves are opaque correlation ids;
- * losing them on disk is harmless, the worst outcome is a stale id surviving
- * one tick longer than necessary.
- */
-async function persistInflightId(requestId: string): Promise<void> {
-  try {
-    const stored = await chrome.storage.session.get(SESSION_STORAGE_KEYS.inflightForwards);
-    const current = (stored[SESSION_STORAGE_KEYS.inflightForwards] as string[]) ?? [];
-    if (current.includes(requestId)) return;
-    await chrome.storage.session.set({
-      [SESSION_STORAGE_KEYS.inflightForwards]: [...current, requestId],
-    });
-  } catch {
-    /* ignore — best-effort */
-  }
-}
-
-async function unpersistInflightId(requestId: string): Promise<void> {
-  try {
-    const stored = await chrome.storage.session.get(SESSION_STORAGE_KEYS.inflightForwards);
-    const current = (stored[SESSION_STORAGE_KEYS.inflightForwards] as string[]) ?? [];
-    const next = current.filter((id) => id !== requestId);
-    if (next.length === current.length) return;
-    await chrome.storage.session.set({
-      [SESSION_STORAGE_KEYS.inflightForwards]: next,
-    });
-  } catch {
-    /* ignore */
-  }
-}
 
 // ── Tab / health / service helpers ───────────────────────────────────────
 
@@ -1076,8 +1070,56 @@ async function serviceFetch(path: string, init?: RequestInit & { serviceUrl?: st
   return fetch(url, { ...init, headers });
 }
 
-async function applyDynamicRules(workspace: WorkspaceSnapshot): Promise<void> {
-  const tabs = await chrome.tabs.query({});
+interface PendingDnrApply {
+  workspace: WorkspaceSnapshot;
+  navigation?: { tabId: number; url: string };
+  waiters: Array<{ resolve: () => void; reject: (reason?: unknown) => void }>;
+}
+
+let dnrApplyRunning = false;
+let pendingDnrApply: PendingDnrApply | undefined;
+
+function applyDynamicRules(
+  workspace: WorkspaceSnapshot,
+  navigation?: { tabId: number; url: string },
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const request: PendingDnrApply = { workspace, navigation, waiters: [{ resolve, reject }] };
+    if (!dnrApplyRunning) {
+      dnrApplyRunning = true;
+      runDnrApply(request);
+      return;
+    }
+    if (pendingDnrApply) request.waiters.unshift(...pendingDnrApply.waiters);
+    pendingDnrApply = request;
+  });
+}
+
+function runDnrApply(request: PendingDnrApply): void {
+  void applyDynamicRulesNow(request.workspace, request.navigation)
+    .then(
+      () => request.waiters.forEach(({ resolve }) => resolve()),
+      (error) => request.waiters.forEach(({ reject }) => reject(error)),
+    )
+    .finally(() => {
+      const next = pendingDnrApply;
+      pendingDnrApply = undefined;
+      if (next) runDnrApply(next);
+      else dnrApplyRunning = false;
+    });
+}
+
+async function applyDynamicRulesNow(
+  workspace: WorkspaceSnapshot,
+  navigation?: { tabId: number; url: string },
+): Promise<void> {
+  const queriedTabs = await chrome.tabs.query({});
+  const tabs = queriedTabs.map((tab) =>
+    navigation && tab.id === navigation.tabId ? { ...tab, url: navigation.url } : tab,
+  );
+  if (navigation && !tabs.some((tab) => tab.id === navigation.tabId)) {
+    tabs.push({ id: navigation.tabId, url: navigation.url } as chrome.tabs.Tab);
+  }
   const { dynamicRules, sessionRules } = buildScopedDnrRuleGroups(workspace, tabs);
 
   // Chrome only accepts the `tabIds` condition on session-scoped rules. Keep
@@ -1157,6 +1199,12 @@ async function refreshDnrForTabs(): Promise<void> {
   try {
     await applyDynamicRules(runtimeState.workspace);
   } catch { /* swallow — will retry on next navigation */ }
+}
+
+async function refreshDnrForNavigation(tabId: number, url: string): Promise<void> {
+  try {
+    await applyDynamicRules(runtimeState.workspace, { tabId, url });
+  } catch { /* swallow — will retry on the next navigation or reconcile tick */ }
 }
 
 async function notifyTabsToRefresh(): Promise<void> {

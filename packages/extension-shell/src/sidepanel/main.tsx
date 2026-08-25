@@ -4,6 +4,7 @@ import { matchesProjectSite, matchesRuleSetSite, sortRules } from "@resource-for
 import type { Project, Rule, RuleSet } from "@resource-forwarder/shared-types";
 import { joinCsv } from "../shared/helpers.js";
 import type { GetDashboardStateResponse, UpsertMutationResponse } from "../shared/messages.js";
+import { collectExecutableRuleIds } from "./rule-execution.js";
 import { runtimeRequest } from "../shared/messages.js";
 import {
   buildOptionsNavigationUrl,
@@ -79,6 +80,13 @@ function App() {
 
   const currentHost = dashboard?.currentTab?.host ?? "";
   const currentUrl = dashboard?.currentTab?.url ?? "";
+
+  const executableRuleIds = useMemo(
+    () => dashboard && currentUrl
+      ? collectExecutableRuleIds(dashboard.workspace, currentUrl, dashboard.currentTab?.id)
+      : new Set<string>(),
+    [dashboard, currentUrl],
+  );
 
   const matchedProjects = useMemo(() => {
     if (!dashboard || !currentUrl) {
@@ -166,8 +174,8 @@ function App() {
   }, [dashboard, visibleProjects, matchedRuleSetsByProject]);
 
   const activeRuleCount = useMemo(
-    () => matchedRules.filter((rule) => rule.enabled).length,
-    [matchedRules],
+    () => matchedRules.filter((rule) => executableRuleIds.has(rule.id)).length,
+    [matchedRules, executableRuleIds],
   );
 
   const dnrRegisteredCount =
@@ -313,7 +321,9 @@ function App() {
     if (!dashboard) return { total: 0, enabled: 0 };
     const ids = new Set(ruleSet.ruleIds);
     const total = ids.size;
-    const enabled = dashboard.workspace.rules.filter((rule) => ids.has(rule.id) && rule.enabled).length;
+    const enabled = dashboard.workspace.rules.filter(
+      (rule) => ids.has(rule.id) && executableRuleIds.has(rule.id),
+    ).length;
     return { total, enabled };
   };
 
@@ -346,7 +356,7 @@ function App() {
           {dnrRegisteredCount > 0 && (
             <span
               className={`sp-badge ${dnrBadgeTone}`}
-              title="Chrome 中已注册的 DNR 规则数（asset_redirect 通过浏览器请求层直接重定向，不受当前页面匹配影响）"
+              title="DNR 已注册仅表示规则存在于 Chrome，不代表当前页面已匹配或规则正在生效"
             >
               {dnrRegisteredCount} 条 DNR 已注册
             </span>
@@ -462,7 +472,7 @@ function App() {
           <div className="sp-rule-groups">
             {ruleGroups.map(({ project, ruleSet, rules }) => {
               const parentDisabled = !project.enabled || !ruleSet.enabled;
-              const enabledCount = rules.filter((r) => r.enabled).length;
+              const enabledCount = rules.filter((rule) => executableRuleIds.has(rule.id)).length;
               const blockedBy = !project.enabled ? "站点" : !ruleSet.enabled ? "分组" : null;
               return (
                 <div
@@ -498,7 +508,7 @@ function App() {
                   </div>
                   {!collapsedRuleGroupIds.has(ruleSet.id) && <div className="sp-rule-list">
                     {rules.map((rule) => {
-                      const visuallyOff = isRuleEffectivelyDisabled(rule.enabled, ruleSet.enabled, project.enabled);
+                      const visuallyOff = !executableRuleIds.has(rule.id);
                       return (
                         <div
                           className={`sp-rule-item${visuallyOff ? " is-off" : ""}`}

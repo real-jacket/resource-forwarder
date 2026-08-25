@@ -2,16 +2,12 @@ import { describe, expect, it } from "vitest";
 import manifest from "../public/manifest.json" with { type: "json" };
 
 describe("extension manifest", () => {
-  it("injects the API proxy bridge directly into the main world at document_start", () => {
+  it("keeps page-bridge.js out of static content scripts", () => {
     const bridge = manifest.content_scripts.find((entry) => entry.js?.includes("page-bridge.js"));
-    expect(bridge).toBeDefined();
-    expect(bridge?.world).toBe("MAIN");
-    expect(bridge?.run_at).toBe("document_start");
-    expect(bridge?.all_frames).toBe(true);
-    expect(bridge?.match_about_blank).toBe(true);
+    expect(bridge).toBeUndefined();
   });
 
-  it("registers the isolated-world content script alongside the bridge", () => {
+  it("registers the isolated-world content script at document_start", () => {
     const isolated = manifest.content_scripts.find((entry) => entry.js?.includes("content-script.js"));
     expect(isolated).toBeDefined();
     expect(isolated?.run_at).toBe("document_start");

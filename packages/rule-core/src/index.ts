@@ -21,13 +21,12 @@ export {
   deriveSiteHosts,
   detectFormat,
   isTextualContentType,
-  matchesProjectSite,
-  matchesRuleSetSite,
   normalizeImportedHost,
   parseWorkspace,
   serializeWorkspace,
   trimWorkspaceForUrl,
 } from "./workspace.js";
+export { matchesProjectSite, matchesRuleSetSite } from "./site-matching.js";
 
 // Matchers
 export {

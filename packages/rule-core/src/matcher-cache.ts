@@ -8,7 +8,7 @@ import type {
   WorkspaceSnapshot,
 } from "@resource-forwarder/shared-types";
 import { globToPathRegexSource } from "./glob.js";
-import { matchesProjectSite, matchesRuleSetSite } from "./workspace.js";
+import { matchesProjectSite, matchesRuleSetSite } from "./site-matching.js";
 
 /**
  * Hot-path matcher reused across many requests.
