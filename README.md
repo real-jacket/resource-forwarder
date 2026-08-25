@@ -162,7 +162,9 @@ flowchart TD
   Kind -->|asset_redirect| DNR["Redirect in the Chrome DNR network layer"]
   DNR --> AssetTarget["Load the replacement HTTPS asset"]
 
-  Kind -->|api_forward| Bridge["Page Bridge intercepts fetch / XHR"]
+  Kind -->|api_forward| Context["Isolated content script requests sender-frame context"]
+  Context --> Inject["Background dynamically injects the MAIN-world bridge when needed"]
+  Inject --> Bridge["Page Bridge patches fetch / XHR after applicable config"]
   Bridge --> Background["Background validates the matched rule"]
   Background --> Executor{"Execution location"}
   Executor -->|browser| Browser["Browser executor"]

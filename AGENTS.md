@@ -53,25 +53,25 @@ Dependency direction is intentionally one-way:
 ### Asset redirect (`asset_redirect`)
 
 1. Options page updates workspace via background runtime messages.
-2. Background syncs workspace from service and converts enabled asset rules to dynamic DNR rules (`chrome.declarativeNetRequest.updateDynamicRules`).
-3. Browser applies redirect directly at request layer (no service hop).
+2. Background syncs workspace and converts enabled asset rules to DNR rules.
+3. Truly global and fully host-wide page scopes use dynamic rules; page-, scheme-, path-, or tab-scoped rules use session rules with eligible `tabIds`.
+4. Browser applies redirects directly at request layer (no service hop).
 
-Generated DNR rules carry `initiatorDomains` bound to the project's `siteHosts`
-(unless the project is wildcard / `*`). This means a rule only fires when the
-request is initiated by a page inside the owning project's site scope — so a
-disabled or unmatched project cannot leak its rules onto unrelated pages. The
-only exception is true global projects (`siteHosts` empty or contains `*`),
-which intentionally have no initiator restriction.
+Dynamic host-wide rules carry `initiatorDomains` bound to the project's
+`siteHosts`. Any Project or RuleSet page scope that cannot be represented by
+host-only initiator domains is enforced with session-rule `tabIds` instead.
+True global projects intentionally have no initiator restriction.
 
 ### API forward (`api_forward`)
 
-1. Content script injects `page-bridge.js` into page context.
-2. Page bridge patches `fetch` + `XMLHttpRequest`, checks matching rules, and emits proxy requests to content script via `window.postMessage`.
-3. Content script forwards proxy request to extension background.
-4. Background re-validates the hinted rule against the full workspace and chooses an executor.
-5. Ordinary forwarding, response patches, and inline JSON mocks execute in the extension service worker through `forward-core`.
-6. Arbitrary local file paths, restricted headers, or rules explicitly set to `local` use the optional local service `/forward` adapter.
-7. Background/content script/page bridge return the response back to page code.
+1. The isolated content script requests site context for its current URL.
+2. Background trims the workspace using the actual sender tab/frame and injects `page-bridge.js` into that frame with `chrome.scripting.executeScript({ world: "MAIN" })` only when an enabled API rule applies.
+3. After the private MessagePort handshake delivers the first applicable config, Page Bridge patches `fetch` + `XMLHttpRequest` and emits proxy requests to the content script.
+4. Content script forwards proxy requests to extension background.
+5. Background re-validates the hinted rule against the full workspace and chooses an executor.
+6. Ordinary forwarding, response patches, and inline JSON mocks execute in the extension service worker through `forward-core`.
+7. Arbitrary local file paths, restricted headers, or rules explicitly set to `local` use the optional local service `/forward` adapter.
+8. Background/content script/page bridge return the response back to page code.
 
 ## Persistence and state boundaries
 

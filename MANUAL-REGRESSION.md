@@ -235,6 +235,20 @@ fetch("https://example.com/api/profile").then(r => r.json()).then(console.log).c
 - background DevTools 无未捕获 promise rejection
 - 重启 `pnpm dev:service` 后下次 fetch 自动恢复转发
 
+### 6.1 SPA 离开并重新进入 API 作用域
+
+- 配置仅匹配 `/tables/*` 的 enabled `api_forward` RuleSet，打开 `/tables/demo`。
+- 发起命中请求，确认走扩展转发。
+- 执行 `history.pushState({}, "", "/sheets/demo")`，再次发请求，确认走页面原生 fetch/XHR。
+- 再执行 `history.pushState({}, "", "/tables/demo")`，确认同一 frame 恢复扩展转发，且没有重复 bridge handshake 或脚本注入报错。
+
+### 6.2 iframe SPA frame scope
+
+- 在主页面创建一个同源 iframe，使 iframe 初始 URL 命中 API RuleSet。
+- 在 iframe 内发起请求，确认该 frame 命中转发。
+- 仅在 iframe 内 `history.pushState` 到不匹配路径；主页面保持不变。iframe 后续请求应恢复原生，主页面行为不变。
+- iframe 再导航回匹配路径后应恢复转发。Background DevTools 中 `tabs.sendMessage` 的目标 `frameId` 应为发生导航的 iframe，而不是固定为 0。
+
 ## 7. sidepanel 视觉
 
 打开 sidepanel，找一条**长 URL/路径**的规则：
@@ -256,6 +270,12 @@ fetch("https://example.com/api/profile").then(r => r.json()).then(console.log).c
 - 在 background DevTools 给 `chrome.declarativeNetRequest.updateDynamicRules` 临时打断点并抛错，触发一次 commitWorkspace（在 options 切换一条规则）。
 - 期望：sidepanel `warnings` 出现「DNR 规则应用失败」一条；`lastAppliedDnrFingerprint` 被清空。
 - 移除断点，下次 commitWorkspace 或 alarms tick（≤ 1 分钟）应重新成功 apply 而**不被 fingerprint 检查短路**，sidepanel `N 条 DNR 已注册` 数恢复一致。
+
+### 7.3 session DNR 导航时序
+
+主 frame 的 `tabs.onUpdated(changeInfo.url)` 与 SPA `webNavigation` 事件会立即使用事件携带的目标 URL 更新 session rules，不经过 200 ms debounce；debounce 仅保留给关闭标签页、无 URL 的 loading burst 等批量事件。
+
+残余竞态：冷导航时 Chrome 可能在 URL 事件送达扩展、异步 `updateSessionRules` 完成之前就启动首批子资源请求。无法由 `initiatorDomains` 完整表达的 scheme/path/port scope 必须继续使用 session rules，因此这一极短窗口无法通过提前注册 dynamic rule 消除；验收时应以 URL 事件后的请求为准，并记录是否观察到首批 cold-load 资源早于 session update。
 
 ## 8. token 鉴权与 Host 防御
 
@@ -301,14 +321,14 @@ fetch("https://example.com/api/wake").then(r => r.json()).then(console.log)
 
 期望：worker 重新拉起后请求正常返回；不会出现"假离线"导致走原生 fetch（早先版本会因 `runtimeState.health == null` 直接 throw `__RF_SERVICE_OFFLINE__`）。
 
-### 9.2 inflight 跨重启清理
+### 9.2 inflight 跨重启生命周期
 
 ```js
 // 起一堆未完成的 fetch
 for (let i = 0; i < 5; i++) fetch("https://example.com/api/long-" + i);
 ```
 
-立刻 Stop service worker。等扩展自动 wake 后，发新的 fetch；老的 5 条对应的 `inflightForwards` 不应在新 worker 里残留——chrome.storage.session 会在 wake 时被清空。
+立刻 Stop service worker。旧 worker 的内存 `AbortController` 会随进程一起消失，旧请求可因 worker 终止而失败；重新 wake 后发出的新请求应正常工作。`chrome.storage.session` 不再记录无法恢复的 inflight id。
 
 ### 9.3 alarms 周期 reconcile
 

@@ -162,7 +162,9 @@ flowchart TD
   Kind -->|asset_redirect| DNR["Chrome DNR 网络层重定向"]
   DNR --> AssetTarget["浏览器加载替换后的 HTTPS 资源"]
 
-  Kind -->|api_forward| Bridge["Page Bridge 拦截 fetch / XHR"]
+  Kind -->|api_forward| Context["隔离世界 Content Script 请求当前 sender frame 的 context"]
+  Context --> Inject["Background 仅在需要时动态注入 MAIN-world Bridge"]
+  Inject --> Bridge["Page Bridge 收到适用配置后 patch fetch / XHR"]
   Bridge --> Background["Background 重新验证命中规则"]
   Background --> Executor{"执行位置"}
   Executor -->|浏览器| Browser["浏览器执行器"]
