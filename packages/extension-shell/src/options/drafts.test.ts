@@ -211,6 +211,31 @@ describe("toRule", () => {
     expect(rule.target.forwardProfile).toBeUndefined();
   });
 
+  it("round-trips an existing explicit tab scope without exposing an editor", () => {
+    const existing: Rule = {
+      id: "tab-scoped",
+      name: "tab scoped",
+      enabled: true,
+      kind: "asset_redirect",
+      priority: 100,
+      match: {
+        host: ["cdn.example.com"],
+        pathGlob: "/assets/**",
+        resourceType: ["script"],
+        tabScope: { mode: "tabIds", tabIds: [7, 9] },
+      },
+      target: { redirectUrl: "https://local.example.com/app.js" },
+      tags: [],
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-01T00:00:00.000Z",
+    };
+    const scopedWorkspace: WorkspaceSnapshot = { ...emptyWorkspace, rules: [existing] };
+    const draft = createRuleDraft({ project: baseProject, ruleSet: baseRuleSet, rule: existing });
+
+    expect(draft.tabScope).toEqual({ mode: "tabIds", tabIds: [7, 9] });
+    expect(toRule(draft, scopedWorkspace, baseProject).match.tabScope).toEqual({ mode: "tabIds", tabIds: [7, 9] });
+  });
+
   it("upgrades legacy asset_redirect default resource types on save", () => {
     const existing: Rule = {
       id: "rule-existing-asset",

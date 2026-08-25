@@ -124,6 +124,9 @@ export function createRuleDraft(options?: {
         : options?.rule?.match.resourceType ?? defaultApiTypes,
     ),
     method: joinCsv(options?.rule?.match.method ?? (kind === "api_forward" ? ["GET", "POST"] : undefined)),
+    tabScope: options?.rule?.match.tabScope?.mode === "tabIds"
+      ? { mode: "tabIds", tabIds: [...options.rule.match.tabScope.tabIds] }
+      : { mode: "all" },
     redirectUrl: options?.rule?.target.redirectUrl ?? "",
     targetBaseUrl: forwardProfile?.targetBaseUrl ?? "",
     stripPrefix: forwardProfile?.stripPrefix ?? "",
@@ -180,6 +183,9 @@ export function createBatchRuleDraft(options?: {
     host: source?.host ?? base.host,
     resourceType: source?.resourceType ?? base.resourceType,
     method: source?.method ?? base.method,
+    tabScope: source?.tabScope.mode === "tabIds"
+      ? { mode: "tabIds", tabIds: [...source.tabScope.tabIds] }
+      : { mode: "all" },
     redirectUrl: source?.kind === "asset_redirect" ? source.redirectUrl : base.redirectUrl,
     targetBaseUrl: source?.kind === "api_forward" ? source.targetBaseUrl : base.targetBaseUrl,
     stripPrefix: source?.kind === "api_forward" ? source.stripPrefix : base.stripPrefix,
@@ -287,7 +293,9 @@ export function toRule(draft: RuleDraft, workspace: WorkspaceSnapshot, project: 
             ? defaultApiTypes
             : defaultAssetTypes,
       method: draft.kind === "api_forward" ? (method.length > 0 ? method : ["GET", "POST"]) : undefined,
-      tabScope: { mode: "all" as const },
+      tabScope: draft.tabScope.mode === "tabIds"
+        ? { mode: "tabIds", tabIds: [...draft.tabScope.tabIds] }
+        : { mode: "all" },
     },
     target:
       draft.kind === "asset_redirect"

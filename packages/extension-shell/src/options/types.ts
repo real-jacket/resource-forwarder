@@ -1,4 +1,4 @@
-import type { MatchResourceType, Rule } from "@resource-forwarder/shared-types";
+import type { MatchResourceType, Rule, TabScope } from "@resource-forwarder/shared-types";
 
 /** The four top-level tabs in the options page. */
 export type AppView = "rules" | "debug" | "import-export" | "settings" | "about";
@@ -63,6 +63,7 @@ export interface RuleDraft {
   headerMatchJson: string;
   resourceType: string;
   method: string;
+  tabScope: TabScope;
   redirectUrl: string;
   targetBaseUrl: string;
   stripPrefix: string;

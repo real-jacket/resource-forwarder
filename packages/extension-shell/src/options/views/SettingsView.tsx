@@ -201,7 +201,7 @@ function ServiceCard({
         <div className={`service-status-bar ${dashboard?.health ? "online" : "offline"}`}>
           <span className="service-status-dot" />
           <span className="service-status-text">
-            {dashboard?.health ? `Companion 在线 · 端口 ${service.port}` : "Companion 未连接 · 浏览器规则仍可运行"}
+            {dashboard?.health ? `Companion 在线 · 端口 ${service.port}` : "Companion 未连接 · 浏览器模式仍可用，仅本地文件和受限 Header 能力不可用"}
           </span>
         </div>
       </div>
