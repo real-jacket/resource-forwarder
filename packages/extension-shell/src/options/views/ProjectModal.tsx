@@ -47,25 +47,25 @@ export function ProjectModal({ draft, setDraft, onClose, onSave, busy }: Project
           </div>
 
           <div className="form-group">
-            <label className="form-label">站点匹配</label>
+            <label className="form-label">站点页面范围</label>
             <input
               className="form-input"
               value={draft.siteMatchPatterns}
               onChange={(e) => setDraft((v) => ({ ...v, siteMatchPatterns: e.target.value }))}
               placeholder="https://shimo.im/tables/*, https://shimodev.com/*"
             />
-            <span className="form-hint">规则仅在当前页面匹配此模式时生效，多个用逗号分隔。支持 * 通配符</span>
+            <span className="form-hint">命中任一模式即生效；多个用逗号分隔，支持 *。</span>
           </div>
 
           <div className="form-group">
-            <label className="form-label">站点基础路径</label>
+            <label className="form-label">默认目标基址（完整 URL）</label>
             <input
               className="form-input"
               value={draft.baseUrl}
               onChange={(e) => setDraft((v) => ({ ...v, baseUrl: e.target.value }))}
-              placeholder="https://dev.example.com/base/"
+              placeholder="例如 https://dev.example.com/base/"
             />
-            <span className="form-hint">规则目标填相对路径时，会优先使用分组基础路径；未填写分组基础路径时回退到这里。</span>
+            <span className="form-hint">用于解析规则中的相对目标；分组基址优先。</span>
           </div>
 
           <div className="form-row">

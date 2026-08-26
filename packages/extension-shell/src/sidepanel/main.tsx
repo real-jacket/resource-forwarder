@@ -352,7 +352,7 @@ function App() {
           <span className={`sp-badge ${visibleProjects.length > 0 ? "matched" : "unmatched"}`}>
             {visibleProjects.length > 0 ? `${visibleProjects.length} 个站点` : "未匹配"}
           </span>
-          <span className="sp-badge neutral">{activeRuleCount} / {matchedRules.length} 条规则生效</span>
+          <span className="sp-badge neutral">{activeRuleCount} / {matchedRules.length} 条页面可生效</span>
           {dnrRegisteredCount > 0 && (
             <span
               className={`sp-badge ${dnrBadgeTone}`}
@@ -366,7 +366,10 @@ function App() {
 
       {/* Matched sites */}
       <div className="sp-section">
-        <div className="sp-section-title">命中站点</div>
+        <div className="sp-section-title">当前页面匹配链路</div>
+        <div className="sp-scope-note">
+          当前页面已通过站点与分组范围；下面只展示还需按请求路径等条件继续匹配的规则。
+        </div>
         {visibleProjects.length === 0 ? (
           <div className="sp-empty">
             当前页面未匹配到任何站点或分组，请在规则页添加站点 / 分组匹配 URL。
@@ -463,7 +466,7 @@ function App() {
 
       {/* Active rules */}
       <div className="sp-section">
-        <div className="sp-section-title">生效规则</div>
+        <div className="sp-section-title">当前页面可生效规则</div>
         {ruleGroups.length === 0 ? (
           <div className="sp-empty">
             {matchedProjects.length > 0 ? "匹配到站点但暂无规则。" : "先匹配站点后显示规则。"}
@@ -505,6 +508,9 @@ function App() {
                     <span className="sp-rule-group-project" title={project.name}>
                       {project.name}
                     </span>
+                    <span className="sp-rule-group-scope" title={formatEffectiveScope(project, ruleSet)}>
+                      页面：{formatEffectiveScope(project, ruleSet)}
+                    </span>
                   </div>
                   {!collapsedRuleGroupIds.has(ruleSet.id) && <div className="sp-rule-list">
                     {rules.map((rule) => {
@@ -530,8 +536,8 @@ function App() {
                                 {formatKind(rule.kind)}
                               </span>
                             </div>
-                            <div className="sp-rule-path">{rule.match.pathGlob}</div>
-                            <div className="sp-rule-target">{formatRuleTarget(rule)}</div>
+                            <div className="sp-rule-path">页面范围已通过 · 请求路径：{rule.match.pathGlob}</div>
+                            <div className="sp-rule-target">执行目标基址：{formatRuleTarget(rule, project, ruleSet)}</div>
                           </div>
                         </div>
                       );
@@ -557,11 +563,22 @@ function formatKind(kind: Rule["kind"]): string {
   return kind === "api_forward" ? "API 转发" : "资源替换";
 }
 
-function formatRuleTarget(rule: Rule): string {
+function formatEffectiveScope(project: Project, ruleSet: RuleSet): string {
+  return (ruleSet.siteMatchPatterns?.length
+    ? ruleSet.siteMatchPatterns
+    : project.siteMatchPatterns?.length
+      ? project.siteMatchPatterns
+      : project.siteHosts).join(", ") || "全部页面";
+}
+
+function formatRuleTarget(rule: Rule, project: Project, ruleSet: RuleSet): string {
   if (rule.kind === "asset_redirect") {
     return rule.target.redirectUrl || "未填写 HTTPS 地址";
   }
-  return rule.target.forwardProfile?.targetBaseUrl || "未填写目标地址";
+  const target = rule.target.forwardProfile?.targetBaseUrl;
+  if (target) return target;
+  const fallback = ruleSet.baseUrl || project.baseUrl;
+  return fallback ? `${fallback}（继承基址）` : "未填写目标地址";
 }
 
 const rootElement = document.getElementById("app");

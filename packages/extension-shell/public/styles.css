@@ -4621,6 +4621,15 @@ details[open] .import-preview-warnings-summary::before {
   border-bottom: 1px solid var(--border);
 }
 
+.sp-scope-note {
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: var(--primary-soft);
+  color: var(--ink-secondary);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 /* -- Empty state -- */
 .sp-empty {
   padding: 16px 12px;
@@ -4829,6 +4838,17 @@ details[open] .import-preview-warnings-summary::before {
   color: var(--muted);
   max-width: 140px;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-rule-group-scope {
+  flex-basis: 100%;
+  margin-left: 28px;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

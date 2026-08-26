@@ -37,11 +37,11 @@ export function RuleSetModal({ draft, setDraft, onClose, onSave, busy }: RuleSet
               placeholder="例如：tables / sheets / assets"
               autoFocus
             />
-            <span className="form-hint">用于区分同一站点下的不同应用或子模块，分组内的规则会一起启停。</span>
+            <span className="form-hint">同一站点下的规则分组，可统一启停。</span>
           </div>
 
           <div className="form-group">
-            <label className="form-label">分组匹配 URL</label>
+            <label className="form-label">分组页面范围</label>
             <input
               className="form-input"
               value={draft.siteMatchPatterns}
@@ -49,19 +49,19 @@ export function RuleSetModal({ draft, setDraft, onClose, onSave, busy }: RuleSet
               placeholder="https://shimo.im/tables/*, https://as.smgv.cn/table/*"
             />
             <span className="form-hint">
-              留空时跟随所属站点；填写后只有当前页面 URL 命中这些模式时，分组才出现在侧边栏的「当前页面」视图。多个用逗号分隔。
+              留空继承站点；填写后进一步缩小页面范围。
             </span>
           </div>
 
           <div className="form-group">
-            <label className="form-label">分组基础路径</label>
+            <label className="form-label">分组目标基址（完整 URL）</label>
             <input
               className="form-input"
               value={draft.baseUrl}
               onChange={(e) => setDraft((v) => ({ ...v, baseUrl: e.target.value }))}
-              placeholder="https://dev.example.com/tables/"
+              placeholder="例如 https://dev.example.com/tables/"
             />
-            <span className="form-hint">规则目标填相对路径时优先使用这里；留空时回退到站点基础路径。</span>
+            <span className="form-hint">用于解析规则中的相对目标；留空使用站点基址。</span>
           </div>
 
           <div className="form-group">

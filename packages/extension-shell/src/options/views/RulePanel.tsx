@@ -236,7 +236,7 @@ function BasicTab({
 
       <div className="form-group">
         <label className="form-label" htmlFor="rule-path">
-          匹配路径 <span className="form-label-required">*</span>
+          请求路径 <span className="form-label-required">*</span>
         </label>
         <input
           id="rule-path"
@@ -257,7 +257,7 @@ function BasicTab({
             className="form-input"
             value={draft.targetBaseUrl}
             onChange={(e) => setDraft((v) => ({ ...v, targetBaseUrl: e.target.value }))}
-            placeholder="http://127.0.0.1:3000"
+            placeholder="例如 /api 或 http://127.0.0.1:3000"
           />
           {draft.responseMode !== "forward" && <span className="form-hint">当前为 Mock 响应模式，目标地址可以留空。</span>}
         </div>
@@ -324,12 +324,12 @@ function AdvancedTab({
         draft={draft}
       />
       <FormDisclosure
-        title="匹配条件"
-        description="限定 Host、资源类型、方法以及 Query / Header 条件"
+        title="请求级匹配条件"
+        description="页面范围命中后，再按 Host、资源类型、方法和 Query / Header 筛选请求"
       >
       <div className="form-subsection-heading">请求目标</div>
       <div className="form-group">
-        <label className="form-label" htmlFor="rule-host">Host 覆盖（留空则沿用站点 Host）</label>
+        <label className="form-label" htmlFor="rule-host">请求 Host 限定</label>
         <input
           id="rule-host"
           className="form-input"
@@ -341,7 +341,7 @@ function AdvancedTab({
 
       <div className="form-row">
         <div className="form-group">
-          <label className="form-label" htmlFor="rule-resource-type">资源类型</label>
+          <label className="form-label" htmlFor="rule-resource-type">资源类型限定</label>
           <input
             id="rule-resource-type"
             className="form-input"
@@ -351,7 +351,7 @@ function AdvancedTab({
           />
         </div>
         <div className="form-group">
-          <label className="form-label" htmlFor="rule-method">HTTP 方法</label>
+          <label className="form-label" htmlFor="rule-method">HTTP 方法限定</label>
           <input
             id="rule-method"
             className="form-input"
@@ -366,7 +366,7 @@ function AdvancedTab({
         <>
           <div className="form-subsection-heading">附加条件</div>
           <div className="form-group">
-            <label className="form-label" htmlFor="rule-query-match">Query 参数匹配（JSON）</label>
+            <label className="form-label" htmlFor="rule-query-match">Query 参数限定（JSON）</label>
             <textarea
               id="rule-query-match"
               className="form-textarea form-textarea-code"
@@ -378,7 +378,7 @@ function AdvancedTab({
           </div>
 
           <div className="form-group">
-            <label className="form-label" htmlFor="rule-header-match">请求 Header 匹配（JSON）</label>
+            <label className="form-label" htmlFor="rule-header-match">请求 Header 限定（JSON）</label>
             <textarea
               id="rule-header-match"
               className="form-textarea form-textarea-code"
@@ -770,30 +770,30 @@ function MatchHierarchy({
   const ruleSetScope = ruleSet?.siteMatchPatterns?.length
     ? ruleSet.siteMatchPatterns.join(", ")
     : "继承站点页面范围";
-  const requestScope = `${draft.host.trim() || "继承站点 Host"}  ${draft.pathGlob || "**"}`;
+  const requestScope = `${draft.host.trim() || "继承当前页面 Host"}  ${draft.pathGlob || "**"}`;
 
   return (
     <section className="match-hierarchy-card" aria-label="匹配链路">
       <div className="match-hierarchy-header">
         <div>
           <strong>匹配链路</strong>
-          <span>页面范围和请求条件必须同时通过</span>
+          <span>页面级范围 + 请求级条件，全部通过才会执行</span>
         </div>
         <span className="match-hierarchy-logic">AND</span>
       </div>
       <div className="match-hierarchy-layers">
         <div className={`match-hierarchy-layer${project?.enabled === false ? " is-disabled" : ""}`}>
-          <span>站点页面</span>
+          <span>站点页面范围</span>
           <strong>{projectScope}</strong>
           {project?.enabled === false && <em>站点已停用</em>}
         </div>
         <div className={`match-hierarchy-layer${ruleSet?.enabled === false ? " is-disabled" : ""}`}>
-          <span>分组页面</span>
+          <span>分组页面范围</span>
           <strong>{ruleSet ? ruleSetScope : "尚未选择分组"}</strong>
           {ruleSet?.enabled === false && <em>分组已停用</em>}
         </div>
         <div className={`match-hierarchy-layer${draft.enabled ? "" : " is-disabled"}`}>
-          <span>规则请求</span>
+          <span>请求级条件</span>
           <strong>{requestScope}</strong>
           {!draft.enabled && <em>规则已停用</em>}
         </div>

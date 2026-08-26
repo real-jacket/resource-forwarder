@@ -215,7 +215,7 @@ function BatchRuleCard({
             className="form-input"
             value={draft.targetBaseUrl}
             onChange={(e) => update({ targetBaseUrl: e.target.value })}
-            placeholder="http://127.0.0.1:3000"
+            placeholder="例如 /api 或 http://127.0.0.1:3000"
           />
         </div>
       ) : (
