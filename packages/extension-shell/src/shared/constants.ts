@@ -4,6 +4,7 @@ export const STORAGE_KEYS = {
   serviceToken: "resource-forwarder:service-token",
   managedRuleIds: "resource-forwarder:managed-dnr-rule-ids",
   workspace: "resource-forwarder:workspace",
+  serviceRevision: "resource-forwarder:service-revision",
   workspaceDirty: "resource-forwarder:workspace-dirty",
   pendingDeletes: "resource-forwarder:pending-deletes",
   browserLogs: "resource-forwarder:browser-hit-logs",

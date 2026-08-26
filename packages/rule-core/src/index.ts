@@ -90,6 +90,18 @@ export {
 } from "./workspace-mutations.js";
 export type { PendingDeletions } from "./workspace-mutations.js";
 
+// Agent-managed ownership and atomic switch helpers
+export {
+  getSwitchGroup,
+  isAgentManagedProject,
+  mergeUserOwnedSlice,
+  projectSubtree,
+  replaceProjectSubtree,
+  switchProjectGroup,
+  validateProjectSubtree,
+  workspaceWithoutAgentManaged,
+  reserveAgentManagedIds,
+} from "./agent-control.js";
 // Matcher cache (pre-compiled matchers for hot paths)
 export { prepareMatcher } from "./matcher-cache.js";
 export type { MatcherCache } from "./matcher-cache.js";

@@ -6,7 +6,9 @@ import {
   detectFormat,
   deriveSiteHosts,
   matchesProjectSite,
+  isAgentManagedProject,
   parseResourceOverrideExport,
+  parseWorkspace,
   serializeWorkspace,
   sortRules,
 } from "@resource-forwarder/rule-core";
@@ -614,6 +616,11 @@ function App() {
     try {
       const now = new Date().toISOString();
       const projectId = projectDraft.id || createId("project");
+      const existingProject = dashboard?.workspace.projects.find((project) => project.id === projectId);
+      if (existingProject && isAgentManagedProject(existingProject)) {
+        setStatus("agent-managed 站点为只读，请使用 agent control。");
+        return;
+      }
       const existingRuleSets =
         dashboard?.workspace.ruleSets.filter((rs) => rs.projectId === projectId) ?? [];
       const siteMatchPatterns = splitCsv(projectDraft.siteMatchPatterns);
@@ -627,9 +634,8 @@ function App() {
           baseUrl: projectDraft.baseUrl.trim() || undefined,
           envLabel: projectDraft.envLabel.trim() || undefined,
           note: projectDraft.note.trim() || undefined,
-          tags: [],
-          createdAt:
-            dashboard?.workspace.projects.find((p) => p.id === projectId)?.createdAt ?? now,
+          tags: existingProject?.tags ?? [],
+          createdAt: existingProject?.createdAt ?? now,
           updatedAt: now,
         },
         ruleSets:
@@ -669,6 +675,11 @@ function App() {
       setStatus("请先选择一个站点，再创建分组。");
       return;
     }
+    const owningProject = projects.find((project) => project.id === ruleSetDraft.projectId);
+    if (owningProject && isAgentManagedProject(owningProject)) {
+      setStatus("agent-managed 分组为只读，请使用 agent control。");
+      return;
+    }
     setBusy(true);
     try {
       const now = new Date().toISOString();
@@ -703,6 +714,11 @@ function App() {
   }
 
   async function toggleRuleSet(ruleSet: RuleSet): Promise<void> {
+    const owningProject = projects.find((project) => project.id === ruleSet.projectId);
+    if (owningProject && isAgentManagedProject(owningProject)) {
+      setStatus("agent-managed 分组为只读，请使用 agent control。");
+      return;
+    }
     setBusy(true);
     try {
       const state = await runtimeRequest<UpsertMutationResponse>({
@@ -719,6 +735,11 @@ function App() {
   }
 
   async function deleteRuleSet(ruleSet: RuleSet): Promise<void> {
+    const owningProject = projects.find((project) => project.id === ruleSet.projectId);
+    if (owningProject && isAgentManagedProject(owningProject)) {
+      setStatus("agent-managed 分组为只读，请使用 agent control。");
+      return;
+    }
     const ruleCount = ruleSet.ruleIds.length;
     const confirmed = await confirm({
       title: "删除分组",
@@ -749,6 +770,10 @@ function App() {
       setStatus("请先选择站点。");
       return;
     }
+    if (isAgentManagedProject(selectedProject)) {
+      setStatus("agent-managed 规则为只读，请使用 agent control。");
+      return;
+    }
     setBusy(true);
     try {
       const rule = toRule(ruleDraft, dashboard.workspace, selectedProject);
@@ -769,6 +794,10 @@ function App() {
 
   async function saveRuleAndContinue(): Promise<void> {
     if (!dashboard || !selectedProject) return;
+    if (isAgentManagedProject(selectedProject)) {
+      setStatus("agent-managed 规则为只读，请使用 agent control。");
+      return;
+    }
     setBusy(true);
     try {
       const rule = toRule(ruleDraft, dashboard.workspace, selectedProject);
@@ -790,6 +819,10 @@ function App() {
   async function saveBatchRules(): Promise<void> {
     if (!dashboard || !selectedProject || !selectedRuleSet) {
       setStatus("请先选择站点。");
+      return;
+    }
+    if (isAgentManagedProject(selectedProject)) {
+      setStatus("agent-managed 规则为只读，请使用 agent control。");
       return;
     }
     if (batchRuleDrafts.length === 0) {
@@ -829,6 +862,10 @@ function App() {
   }
 
   async function toggleProject(project: Project): Promise<void> {
+    if (isAgentManagedProject(project)) {
+      setStatus("agent-managed 站点为只读，请使用 agent control。");
+      return;
+    }
     setBusy(true);
     try {
       const state = await runtimeRequest<UpsertMutationResponse>({
@@ -848,6 +885,10 @@ function App() {
   }
 
   async function deleteProject(project: Project): Promise<void> {
+    if (isAgentManagedProject(project)) {
+      setStatus("agent-managed 站点为只读，请使用 agent control。");
+      return;
+    }
     const ruleCount = ruleCountByProjectId.get(project.id) ?? 0;
     const confirmed = await confirm({
       title: "删除站点",
@@ -874,6 +915,10 @@ function App() {
   }
 
   async function duplicateProject(project: Project): Promise<void> {
+    if (isAgentManagedProject(project)) {
+      setStatus("agent-managed 站点为只读，请使用 agent control。");
+      return;
+    }
     if (!dashboard) {
       setStatus("请先加载站点后再复制。");
       return;
@@ -936,6 +981,11 @@ function App() {
         if (!sourceRule || !targetProject || !targetRuleSet) {
           throw new Error("请选择有效的目标站点和分组。");
         }
+        const sourceRuleSet = ruleSets.find((ruleSet) => ruleSet.ruleIds.includes(sourceRule.id));
+        const sourceProject = sourceRuleSet ? projects.find((project) => project.id === sourceRuleSet.projectId) : undefined;
+        if (isAgentManagedProject(targetProject) || (sourceProject && isAgentManagedProject(sourceProject))) {
+          throw new Error("agent-managed 规则为只读，请使用 agent control。");
+        }
         const copiedRule = createRuleCopy(sourceRule, now, createId);
         nextState = await runtimeRequest<UpsertMutationResponse>({
           type: "upsert-rule",
@@ -949,6 +999,9 @@ function App() {
         const targetProject = projects.find((project) => project.id === copyDraft.targetProjectId);
         if (!targetProject) {
           throw new Error("请选择有效的目标站点。");
+        }
+        if (isAgentManagedProject(targetProject) || (copySourceProject && isAgentManagedProject(copySourceProject)) || (copySourceRuleSet && isAgentManagedProject(projects.find((project) => project.id === copySourceRuleSet.projectId) ?? targetProject))) {
+          throw new Error("agent-managed 分组为只读，请使用 agent control。");
         }
         const bundle = createRuleSetCopyBundle(
           dashboard.workspace,
@@ -986,6 +1039,8 @@ function App() {
   }
 
   function toggleProjectSelection(id: string): void {
+    const project = projects.find((candidate) => candidate.id === id);
+    if (project && isAgentManagedProject(project)) return;
     setSelectedProjectIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -995,14 +1050,14 @@ function App() {
   }
 
   function toggleAllProjectSelection(): void {
-    const visibleIds = filteredProjects.map((p) => p.id);
+    const visibleIds = filteredProjects.filter((project) => !isAgentManagedProject(project)).map((p) => p.id);
     setSelectedProjectIds((prev) =>
       prev.size === visibleIds.length ? new Set() : new Set(visibleIds),
     );
   }
 
   async function batchToggleProjects(enable: boolean): Promise<void> {
-    const targets = projects.filter((p) => selectedProjectIds.has(p.id) && p.enabled !== enable);
+    const targets = projects.filter((p) => !isAgentManagedProject(p) && selectedProjectIds.has(p.id) && p.enabled !== enable);
     if (targets.length === 0) {
       setStatus(`选中的分组已${enable ? "全部启用" : "全部停用"}。`);
       return;
@@ -1030,7 +1085,7 @@ function App() {
   }
 
   async function batchDeleteProjects(): Promise<void> {
-    const targets = projects.filter((p) => selectedProjectIds.has(p.id));
+    const targets = projects.filter((p) => !isAgentManagedProject(p) && selectedProjectIds.has(p.id));
     if (targets.length === 0) return;
     const totalRules = targets.reduce(
       (sum, p) => sum + (ruleCountByProjectId.get(p.id) ?? 0),
@@ -1065,6 +1120,12 @@ function App() {
   }
 
   async function deleteRule(rule: Rule): Promise<void> {
+    const owningRuleSet = ruleSets.find((ruleSet) => ruleSet.ruleIds.includes(rule.id));
+    const owningProject = owningRuleSet ? projects.find((project) => project.id === owningRuleSet.projectId) : undefined;
+    if (owningProject && isAgentManagedProject(owningProject)) {
+      setStatus("agent-managed 规则为只读，请使用 agent control。");
+      return;
+    }
     const confirmed = await confirm({
       title: "删除规则",
       message: `确认删除规则「${rule.name}」？此操作不可撤销。`,
@@ -1086,6 +1147,12 @@ function App() {
   }
 
   async function toggleRule(rule: Rule): Promise<void> {
+    const owningRuleSet = ruleSets.find((ruleSet) => ruleSet.ruleIds.includes(rule.id));
+    const owningProject = owningRuleSet ? projects.find((project) => project.id === owningRuleSet.projectId) : undefined;
+    if (owningProject && isAgentManagedProject(owningProject)) {
+      setStatus("agent-managed 规则为只读，请使用 agent control。");
+      return;
+    }
     setBusy(true);
     try {
       const owningRuleSet = ruleSets.find((rs) => rs.ruleIds.includes(rule.id));
@@ -1113,6 +1180,15 @@ function App() {
       setImportSource("resource-override");
       setStatus("已识别为 Resource Override 配置，请先点击“预览导入”。");
       return;
+    }
+    try {
+      const candidate = parseWorkspace(importText, detectFormat(importText));
+      if (candidate.projects.some(isAgentManagedProject)) {
+        setStatus("导入不能修改 agent-managed 站点，请使用 agent control。");
+        return;
+      }
+    } catch {
+      // The existing import flow reports malformed workspace content below.
     }
 
     setBusy(true);

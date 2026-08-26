@@ -172,10 +172,12 @@ export function mergeWorkspaces(
 ): WorkspaceSnapshot {
   return {
     version: Math.max(current.version, imported.version),
+    revision: current.revision,
     updatedAt: new Date().toISOString(),
     projects: mergeArray(current.projects, imported.projects),
     ruleSets: mergeArray(current.ruleSets, imported.ruleSets),
     rules: mergeArray(current.rules, imported.rules),
+    ...(current.agentReservations ? { agentReservations: current.agentReservations } : {}),
   };
 }
 

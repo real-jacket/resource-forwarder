@@ -6,6 +6,7 @@ import { CustomSelect } from "../components/CustomSelect.js";
 import { formatRuleTarget, formatTimestamp } from "../formatters.js";
 import { buildRuleGroups, isRuleEffectivelyDisabled, toggleCollapsedRuleSetIds } from "../rule-groups.js";
 import { buildSiteActionMenuItems, getSiteTogglePresentation, getToolbarLayoutFlags } from "../rules-toolbar.js";
+import { isAgentManagedProject } from "@resource-forwarder/rule-core";
 
 export interface RuleRow {
   rule: Rule;
@@ -103,7 +104,7 @@ export function RulesView(props: RulesViewProps) {
           <EmptyState
             kind="no-rules"
             projectsExists={props.projects.length > 0}
-            canCreateRule={!!props.selectedProject && !!props.selectedRuleSet}
+            canCreateRule={!!props.selectedProject && !isAgentManagedProject(props.selectedProject) && !!props.selectedRuleSet}
             actions={props.actions}
             setView={props.setView}
           />
@@ -146,12 +147,14 @@ export function RulesView(props: RulesViewProps) {
 function ContextBar(props: RulesViewProps & { layoutFlags: ReturnType<typeof getToolbarLayoutFlags> }) {
   const { selectedProject, projects, busy, actions, projectRuleSets } = props;
   const siteActionMenuItems = selectedProject ? buildSiteActionMenuItems(selectedProject.enabled) : [];
+  const selectedProjectReadOnly = selectedProject ? isAgentManagedProject(selectedProject) : false;
   const siteToggle = selectedProject ? getSiteTogglePresentation(selectedProject.enabled) : null;
   return (
     <div className="rules-context-bar">
       <div className="rules-context-main">
         <div className="rules-context-section">
           <span className="rules-context-label">站点</span>
+          {selectedProjectReadOnly && <span className="rule-group-badge">agent-managed（只读）</span>}
           <CustomSelect
             className="cs-wide"
             value={props.selectedProjectId}
@@ -173,6 +176,7 @@ function ContextBar(props: RulesViewProps & { layoutFlags: ReturnType<typeof get
               className="btn btn-default btn-sm"
               title="编辑站点"
               onClick={() => actions.openProjectModal(selectedProject)}
+              disabled={selectedProjectReadOnly}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" aria-hidden="true">
                 <path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5z" />
@@ -183,7 +187,7 @@ function ContextBar(props: RulesViewProps & { layoutFlags: ReturnType<typeof get
               className={`btn btn-default btn-sm toolbar-toggle-state ${siteToggle?.tone === "primary" ? "is-primary" : "is-neutral"}`}
               title={siteToggle?.title}
               onClick={() => void actions.toggleProject(selectedProject)}
-              disabled={busy}
+              disabled={busy || selectedProjectReadOnly}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" aria-hidden="true">
                 {selectedProject.enabled ? (
@@ -200,11 +204,13 @@ function ContextBar(props: RulesViewProps & { layoutFlags: ReturnType<typeof get
               </svg>
               {siteToggle?.label}
             </button>
-            <SiteOverflowMenu
-              items={siteActionMenuItems}
-              onDuplicate={() => void actions.duplicateProject(selectedProject)}
-              onDelete={() => void actions.deleteProject(selectedProject)}
-            />
+            {!selectedProjectReadOnly && (
+              <SiteOverflowMenu
+                items={siteActionMenuItems}
+                onDuplicate={() => void actions.duplicateProject(selectedProject)}
+                onDelete={() => void actions.deleteProject(selectedProject)}
+              />
+            )}
           </div>
         )}
 
@@ -226,7 +232,7 @@ function ContextBar(props: RulesViewProps & { layoutFlags: ReturnType<typeof get
               className="btn btn-default btn-sm"
               title="新建分组"
               onClick={() => actions.openRuleSetModal()}
-              disabled={busy}
+              disabled={busy || selectedProjectReadOnly}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" aria-hidden="true">
                 <line x1="12" y1="5" x2="12" y2="19" />
@@ -250,7 +256,7 @@ function ContextBar(props: RulesViewProps & { layoutFlags: ReturnType<typeof get
         <button
           className="btn btn-primary"
           onClick={() => actions.openBatchRulePanel("api_forward")}
-          disabled={!props.layoutFlags.canCreateRule}
+          disabled={!props.layoutFlags.canCreateRule || selectedProjectReadOnly}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
             <line x1="12" y1="5" x2="12" y2="19" />
@@ -549,6 +555,7 @@ function GroupedRuleTable({
               <GroupHeaderRow
                 ruleSet={group.ruleSet}
                 ruleCount={group.rows.length}
+                readOnly={Boolean((group.ruleSet && dashboard?.workspace.projects.find((project) => project.id === group.ruleSet!.projectId) && isAgentManagedProject(dashboard.workspace.projects.find((project) => project.id === group.ruleSet!.projectId)!)) || (!group.ruleSet && group.rows[0]?.project && isAgentManagedProject(group.rows[0].project)))}
                 collapsed={group.ruleSet ? collapsedRuleSetIds.has(group.ruleSet.id) : false}
                 busy={busy}
                 actions={actions}
@@ -570,6 +577,7 @@ function GroupedRuleTable({
                       ruleSet={ruleSet}
                       index={index}
                       busy={busy}
+                      readOnly={Boolean(project && isAgentManagedProject(project))}
                       actions={actions}
                       editing={rule.id === editingRuleId}
                     />
@@ -599,12 +607,14 @@ function GroupHeaderRow({
   busy,
   actions,
   onToggleCollapse,
+  readOnly,
 }: {
   ruleSet: RuleSet | null;
   ruleCount: number;
   collapsed: boolean;
   busy: boolean;
   actions: RulesViewProps["actions"];
+  readOnly: boolean;
   onToggleCollapse?: () => void;
 }) {
   if (!ruleSet) {
@@ -639,7 +649,7 @@ function GroupHeaderRow({
               type="checkbox"
               checked={ruleSet.enabled}
               onChange={() => void actions.toggleRuleSet(ruleSet)}
-              disabled={busy}
+              disabled={busy || readOnly}
             />
             <span className="toggle-track" />
           </label>
@@ -668,7 +678,7 @@ function GroupHeaderRow({
               className="btn-icon"
               title="编辑分组"
               onClick={() => actions.openRuleSetModal(ruleSet)}
-              disabled={busy}
+              disabled={busy || readOnly}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
@@ -679,7 +689,7 @@ function GroupHeaderRow({
               className="btn-icon"
               title="复制到站点"
               onClick={() => actions.openRuleSetCopyModal(ruleSet)}
-              disabled={busy}
+              disabled={busy || readOnly}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <path d="M14 4h6v6" />
@@ -692,7 +702,7 @@ function GroupHeaderRow({
               className="btn-icon btn-icon-danger"
               title="删除分组"
               onClick={() => void actions.deleteRuleSet(ruleSet)}
-              disabled={busy}
+              disabled={busy || readOnly}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <polyline points="3 6 5 6 21 6" />
@@ -714,6 +724,7 @@ function RuleTableRow({
   busy,
   actions,
   editing,
+  readOnly,
 }: {
   rule: Rule;
   project: Project | null;
@@ -722,6 +733,7 @@ function RuleTableRow({
   busy: boolean;
   actions: RulesViewProps["actions"];
   editing: boolean;
+  readOnly: boolean;
 }) {
   const visuallyOff = isRuleEffectivelyDisabled(rule.enabled, ruleSet?.enabled ?? true, project?.enabled ?? true);
   return (
@@ -732,7 +744,7 @@ function RuleTableRow({
             type="checkbox"
             checked={rule.enabled}
             onChange={() => void actions.toggleRule(rule)}
-            disabled={busy || !(ruleSet?.enabled ?? true) || !(project?.enabled ?? true)}
+            disabled={busy || readOnly || !(ruleSet?.enabled ?? true) || !(project?.enabled ?? true)}
           />
           <span className="toggle-track" />
         </label>
@@ -767,19 +779,19 @@ function RuleTableRow({
       </td>
       <td className="col-actions">
         <div className="rule-actions-cell">
-          <button className="btn-icon" title="编辑" onClick={() => actions.openRulePanel(rule.kind, rule, project, ruleSet)}>
+          <button className="btn-icon" title="编辑" onClick={() => actions.openRulePanel(rule.kind, rule, project, ruleSet)} disabled={readOnly}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
               <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
             </svg>
           </button>
-          <button className="btn-icon" title="复制为草稿" onClick={() => actions.duplicateRule(rule, project, ruleSet)}>
+          <button className="btn-icon" title="复制为草稿" onClick={() => actions.duplicateRule(rule, project, ruleSet)} disabled={readOnly}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <rect x="9" y="9" width="13" height="13" rx="2" />
               <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
             </svg>
           </button>
-          <button className="btn-icon" title="复制到..." onClick={() => actions.openRuleCopyModal(rule, project, ruleSet)}>
+          <button className="btn-icon" title="复制到..." onClick={() => actions.openRuleCopyModal(rule, project, ruleSet)} disabled={readOnly}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <path d="M14 4h6v6" />
               <path d="M10 14 20 4" />
@@ -791,7 +803,7 @@ function RuleTableRow({
             className="btn-icon btn-icon-danger"
             title="删除"
             onClick={() => void actions.deleteRule(rule)}
-            disabled={busy}
+            disabled={busy || readOnly}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <polyline points="3 6 5 6 21 6" />

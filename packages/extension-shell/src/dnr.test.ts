@@ -30,6 +30,7 @@ const project = (overrides: Partial<Project> = {}): Project => ({
 
 const workspace = (projects: Project[]): WorkspaceSnapshot => ({
   version: 1,
+  revision: 0,
   updatedAt: "2026-01-01T00:00:00.000Z",
   projects,
   ruleSets: [],
@@ -82,6 +83,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [
           project({ id: "tables", siteMatchPatterns: ["https://app.example.com/tables/*"], siteHosts: ["app.example.com"] }),
@@ -129,6 +131,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [
           project({ id: "global", siteMatchPatterns: [], siteHosts: ["*"] }),
@@ -172,6 +175,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [
           project({
@@ -216,6 +220,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [project({ siteHosts: ["*"], siteMatchPatterns: ["https://app.example.com/tables/*"] })],
         ruleSets: [{ id: "scope", projectId: "project-1", name: "Scope", enabled: true, ruleIds: ["rule"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
@@ -235,6 +240,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [project({ siteHosts: ["a.example.com", "b.example.com"], siteMatchPatterns: ["*://a.example.com/*"] })],
         ruleSets: [{ id: "scope", projectId: "project-1", name: "Scope", enabled: true, ruleIds: ["rule"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
@@ -254,6 +260,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [project({ siteHosts: ["a.example.com", "b.example.com"], siteMatchPatterns: ["*://a.example.com/*", "*://b.example.com/*"] })],
         ruleSets: [{ id: "scope", projectId: "project-1", name: "Scope", enabled: true, ruleIds: ["rule"], siteMatchPatterns: ["*://a.example.com/*"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
@@ -276,6 +283,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [project({ siteHosts: ["app.example.com"], siteMatchPatterns: [pattern] })],
         ruleSets: [{ id: "scope", projectId: "project-1", name: "Scope", enabled: true, ruleIds: ["rule"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
@@ -292,6 +300,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [project({ siteHosts: ["stale.example.com"], siteMatchPatterns: ["*"] })],
         ruleSets: [{ id: "scope", projectId: "project-1", name: "Scope", enabled: true, ruleIds: ["rule"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
@@ -312,6 +321,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [project({ siteHosts, siteMatchPatterns })],
         ruleSets: [{ id: "scope", projectId: "project-1", name: "Scope", enabled: true, ruleIds: ["rule"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
@@ -329,6 +339,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [
           project({
@@ -365,6 +376,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [
           project({
@@ -406,6 +418,7 @@ describe("dnr helpers", () => {
     const fallbackGroups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [
           project({
@@ -441,6 +454,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [
           project({
@@ -483,6 +497,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [project({ siteHosts: ["app.example.com"], siteMatchPatterns: ["https://app.example.com/*"] })],
         ruleSets: [
@@ -511,6 +526,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [project({ siteHosts: ["app.example.com"], siteMatchPatterns: ["https://app.example.com/*"] })],
         ruleSets: [{ id: "tables", projectId: "project-1", name: "Tables", enabled: true, ruleIds: ["scoped"], siteMatchPatterns: ["https://app.example.com/tables/*"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
@@ -531,6 +547,7 @@ describe("dnr helpers", () => {
     const groups = buildScopedDnrRuleGroups(
       {
         version: 1,
+        revision: 0,
         updatedAt: "2026-01-01T00:00:00.000Z",
         projects: [project({ siteHosts: ["app.example.com"], siteMatchPatterns: ["https://app.example.com/tables/*"] })],
         ruleSets: [{ id: "tables", projectId: "project-1", name: "Tables", enabled: true, ruleIds: ["rule"], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],

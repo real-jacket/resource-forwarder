@@ -60,6 +60,7 @@ const assetRule: Rule = {
 
 const workspace: WorkspaceSnapshot = {
   version: 1,
+  revision: 0,
   updatedAt: "2024-01-01T00:00:00.000Z",
   projects: [
     {

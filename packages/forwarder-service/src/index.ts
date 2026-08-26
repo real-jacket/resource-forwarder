@@ -1,29 +1,43 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import type {
+  AppliedRevisionPayload,
+  AppliedRevisionResponse,
   ForwardRequestPayload,
   ImportWorkspacePayload,
   LogsResponse,
   MatchRequestPayload,
   MatchResponse,
   MatchTraceEntry,
+  MutationResponse,
   ProjectsResponse,
   RequestContext,
+  RevisionGuard,
   RuleBinding,
   RuleSet,
   RulesResponse,
   SchemaResponse,
   ServiceHealthResponse,
+  ServiceWorkspaceResponse,
+  SubtreePayload,
   SupportedExportFormat,
+  SwitchProjectsPayload,
   UpsertProjectPayload,
   UpsertRulePayload,
+  WorkspaceSnapshot,
   ValidateRuleResponse,
 } from "@resource-forwarder/shared-types";
 import {
+  applyUpsertProject,
+  applyUpsertRule,
+  applyUpsertRuleSet,
   collectRuleConflicts,
   collectUnsupportedRuleWarnings,
   collectWorkspaceWarnings,
+  getSwitchGroup,
+  isAgentManagedProject,
+  planDeleteRuleSet,
   matchesHeaders,
   matchesHost,
   matchesMethod,
@@ -34,13 +48,22 @@ import {
   matchesRule,
   matchesRuleSetSite,
   matchesTabScope,
+  mergeUserOwnedSlice,
+  parseWorkspace,
   pickMatchingRule,
   resolveForwardProfile,
   resolveRuleBinding,
   resolveRuleTargetValue,
+  workspaceWithoutAgentManaged,
+  validateProjectSubtree,
 } from "@resource-forwarder/rule-core";
 import { buildForwardTargetUrl, createRequestContext, forwardThroughRule, STREAMING_UNSUPPORTED } from "./proxy.js";
-import { WorkspaceStorage } from "./storage.js";
+import {
+  InvalidAppliedRevisionError,
+  RevisionConflictError,
+  RevisionRequiredError,
+  WorkspaceStorage,
+} from "./storage.js";
 import { HitLogger } from "./hit-logger.js";
 
 export const SERVICE_VERSION = "0.1.0";
@@ -164,6 +187,199 @@ export function buildServer({ storage, logger, disableRateLimit, rateLimit: rate
   return app;
 }
 
+type MutationQuery = { force?: boolean | string };
+
+type RuleSetMutationPayload = RevisionGuard & { ruleSet: RuleSet };
+
+class AgentManagedMutationError extends Error {
+  readonly statusCode = 403;
+  readonly code = "AGENT_MANAGED_READ_ONLY";
+
+  constructor() {
+    super("Agent-managed projects can only be changed through dedicated agent control routes.");
+    this.name = "AgentManagedMutationError";
+  }
+}
+
+function mutationResponse(workspace: WorkspaceSnapshot): MutationResponse {
+  return {
+    workspace,
+    revision: workspace.revision,
+    warnings: collectWorkspaceWarnings(workspace),
+  };
+}
+
+function readRevisionGuard(body: RevisionGuard, header: string | string[] | undefined): number | undefined {
+  if (typeof body.ifRevision === "number") return body.ifRevision;
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (!raw) return undefined;
+  const normalized = raw.trim().replace(/^W\//i, "").replace(/^"|"$/g, "");
+  const parsed = Number(normalized);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function forceRequested(query: MutationQuery | undefined): boolean {
+  return query?.force === true || query?.force === "true";
+}
+
+function sendMutationError(reply: FastifyReply, error: unknown): void {
+  const candidate = error as {
+    code?: unknown;
+    currentRevision?: unknown;
+    message?: unknown;
+    statusCode?: unknown;
+    workspace?: unknown;
+  };
+  const status = typeof candidate.statusCode === "number" && candidate.statusCode >= 400
+    ? candidate.statusCode
+    : 409;
+  const body: Record<string, unknown> = {
+    code: typeof candidate.code === "string" ? candidate.code : "MUTATION_REJECTED",
+    message: typeof candidate.message === "string" ? candidate.message : "Mutation rejected.",
+  };
+  if (typeof candidate.currentRevision === "number") body.currentRevision = candidate.currentRevision;
+  if (candidate.workspace && typeof candidate.workspace === "object") body.workspace = candidate.workspace;
+  void reply.status(status).send(body);
+}
+
+function assertGenericProjectWriteAllowed(
+  workspace: WorkspaceSnapshot,
+  project: UpsertProjectPayload["project"],
+  nestedRuleSets: RuleSet[] = [],
+): void {
+  const existing = workspace.projects.find((candidate) => candidate.id === project.id);
+  if (isAgentManagedProject(project) || (existing && isAgentManagedProject(existing)) || isReservedProjectId(workspace, project.id)) {
+    throw new AgentManagedMutationError();
+  }
+  for (const ruleSet of nestedRuleSets) {
+    const existingRuleSet = workspace.ruleSets.find((candidate) => candidate.id === ruleSet.id);
+    const referencedProject = workspace.projects.find((candidate) => candidate.id === ruleSet.projectId);
+    if (
+      isReservedRuleSetId(workspace, ruleSet.id) ||
+      (existingRuleSet && isProjectAgentOwned(workspace, existingRuleSet.projectId)) ||
+      (referencedProject && isAgentManagedProject(referencedProject)) ||
+      isReservedProjectId(workspace, ruleSet.projectId)
+    ) {
+      throw new AgentManagedMutationError();
+    }
+    for (const ruleId of ruleSet.ruleIds) {
+      const binding = resolveRuleBinding(workspace, ruleId);
+      if (isReservedRuleId(workspace, ruleId) || (binding?.project && isAgentManagedProject(binding.project))) {
+        throw new AgentManagedMutationError();
+      }
+    }
+  }
+}
+
+function isProjectAgentOwned(workspace: WorkspaceSnapshot, projectId: string): boolean {
+  const project = workspace.projects.find((candidate) => candidate.id === projectId);
+  return Boolean(project && isAgentManagedProject(project));
+}
+
+function isReservedProjectId(workspace: WorkspaceSnapshot, id: string): boolean {
+  return workspace.agentReservations?.projectIds.includes(id) ?? false;
+}
+
+function isReservedRuleSetId(workspace: WorkspaceSnapshot, id: string): boolean {
+  return workspace.agentReservations?.ruleSetIds.includes(id) ?? false;
+}
+
+function isReservedRuleId(workspace: WorkspaceSnapshot, id: string): boolean {
+  return workspace.agentReservations?.ruleIds.includes(id) ?? false;
+}
+
+function assertGenericRuleWriteAllowed(workspace: WorkspaceSnapshot, payload: UpsertRulePayload): void {
+  const existing = resolveRuleBinding(workspace, payload.rule.id);
+  const targetRuleSet = payload.ruleSetId
+    ? workspace.ruleSets.find((ruleSet) => ruleSet.id === payload.ruleSetId)
+    : undefined;
+  const targetProject = targetRuleSet
+    ? workspace.projects.find((project) => project.id === targetRuleSet.projectId)
+    : undefined;
+  if (isReservedRuleId(workspace, payload.rule.id) || (existing?.project && isAgentManagedProject(existing.project))) {
+    throw new AgentManagedMutationError();
+  }
+  if (targetProject && isAgentManagedProject(targetProject)) throw new AgentManagedMutationError();
+  if (targetRuleSet && isReservedRuleSetId(workspace, targetRuleSet.id)) throw new AgentManagedMutationError();
+}
+
+function assertGenericRuleSetWriteAllowed(workspace: WorkspaceSnapshot, ruleSet: RuleSet): void {
+  const existing = workspace.ruleSets.find((candidate) => candidate.id === ruleSet.id);
+  const existingProject = existing ? workspace.projects.find((candidate) => candidate.id === existing.projectId) : undefined;
+  const project = workspace.projects.find((candidate) => candidate.id === ruleSet.projectId);
+  if (
+    isReservedRuleSetId(workspace, ruleSet.id) ||
+    (existingProject && isAgentManagedProject(existingProject)) ||
+    (project && isAgentManagedProject(project)) ||
+    isReservedProjectId(workspace, ruleSet.projectId)
+  ) {
+    throw new AgentManagedMutationError();
+  }
+  for (const ruleId of ruleSet.ruleIds) {
+    const binding = resolveRuleBinding(workspace, ruleId);
+    if (isReservedRuleId(workspace, ruleId) || (binding?.project && isAgentManagedProject(binding.project))) {
+      throw new AgentManagedMutationError();
+    }
+  }
+}
+
+function replaceUserOwnedWorkspace(current: WorkspaceSnapshot, imported: WorkspaceSnapshot): WorkspaceSnapshot {
+  const agentProjects = current.projects.filter(isAgentManagedProject);
+  const agentProjectIds = new Set([
+    ...(current.agentReservations?.projectIds ?? []),
+    ...agentProjects.map((project) => project.id),
+  ]);
+  const agentRuleSets = current.ruleSets.filter((ruleSet) => agentProjects.some((project) => project.id === ruleSet.projectId));
+  const agentRuleSetIds = new Set([
+    ...(current.agentReservations?.ruleSetIds ?? []),
+    ...agentRuleSets.map((ruleSet) => ruleSet.id),
+  ]);
+  const agentRuleIds = new Set([
+    ...(current.agentReservations?.ruleIds ?? []),
+    ...agentRuleSets.flatMap((ruleSet) => ruleSet.ruleIds),
+  ]);
+  const importedUser = workspaceWithoutAgentManaged(imported);
+  return {
+    ...importedUser,
+    agentReservations: current.agentReservations,
+    projects: [...agentProjects, ...importedUser.projects.filter((project) => !agentProjectIds.has(project.id))],
+    ruleSets: [...agentRuleSets, ...importedUser.ruleSets.filter((ruleSet) => !agentRuleSetIds.has(ruleSet.id) && !agentProjectIds.has(ruleSet.projectId))],
+    rules: [...current.rules.filter((rule) => agentRuleIds.has(rule.id)), ...importedUser.rules.filter((rule) => !agentRuleIds.has(rule.id))],
+    revision: current.revision,
+  };
+}
+function assertImportedWorkspaceOwnership(workspace: WorkspaceSnapshot, imported: WorkspaceSnapshot): void {
+  if (imported.agentReservations && (
+    imported.agentReservations.projectIds.length > 0 ||
+    imported.agentReservations.ruleSetIds.length > 0 ||
+    imported.agentReservations.ruleIds.length > 0
+  )) {
+    throw new AgentManagedMutationError();
+  }
+  for (const project of imported.projects) {
+    if (isAgentManagedProject(project) || isReservedProjectId(workspace, project.id) || isProjectAgentOwned(workspace, project.id)) {
+      throw new AgentManagedMutationError();
+    }
+  }
+  for (const ruleSet of imported.ruleSets) {
+    if (isReservedRuleSetId(workspace, ruleSet.id) || isReservedProjectId(workspace, ruleSet.projectId) || isProjectAgentOwned(workspace, ruleSet.projectId)) {
+      throw new AgentManagedMutationError();
+    }
+    for (const ruleId of ruleSet.ruleIds) {
+      const binding = resolveRuleBinding(workspace, ruleId);
+      if (isReservedRuleId(workspace, ruleId) || (binding?.project && isAgentManagedProject(binding.project))) {
+        throw new AgentManagedMutationError();
+      }
+    }
+  }
+  for (const rule of imported.rules) {
+    const binding = resolveRuleBinding(workspace, rule.id);
+    if (isReservedRuleId(workspace, rule.id) || (binding?.project && isAgentManagedProject(binding.project))) {
+      throw new AgentManagedMutationError();
+    }
+  }
+}
+
 // All HTTP route handlers in one place so they share lifecycle with the parent
 // Fastify instance and can be registered inside a child plugin (see above).
 function registerRoutes(
@@ -186,30 +402,128 @@ function registerRoutes(
     // the WorkspaceStorage instance directly.
   }));
 
+  app.get("/workspace", async (): Promise<ServiceWorkspaceResponse> => {
+    const workspace = await storage.readWorkspace();
+    return { workspace, revision: workspace.revision };
+  });
+
   app.get("/projects", async (): Promise<ProjectsResponse> => {
     const workspace = await storage.readWorkspace();
     return {
       projects: workspace.projects,
       ruleSets: workspace.ruleSets,
       updatedAt: workspace.updatedAt,
+      revision: workspace.revision,
     };
   });
 
-  app.put<{ Params: { id: string }; Body: UpsertProjectPayload }>(
+  app.put<{ Params: { id: string }; Querystring: MutationQuery; Body: UpsertProjectPayload }>(
     "/projects/:id",
     {
       schema: {
         params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] },
+        querystring: mutationQuerySchema,
         body: upsertProjectBodySchema,
       },
     },
     async (request, reply) => {
       if (request.params.id !== request.body.project.id) {
-        return reply.status(400).send({ message: "Project id mismatch." });
+        return reply.status(400).send({ code: "PROJECT_ID_MISMATCH", message: "Project id mismatch." });
       }
+      try {
+        const workspace = await storage.readWorkspace();
+        assertGenericProjectWriteAllowed(workspace, request.body.project, request.body.ruleSets ?? []);
+        const next = await storage.applyMutation(
+          readRevisionGuard(request.body, request.headers["if-match"]),
+          forceRequested(request.query),
+          (current) => {
+            assertGenericProjectWriteAllowed(current, request.body.project, request.body.ruleSets ?? []);
+            return applyUpsertProject(current, request.body);
+          },
+        );
+        return mutationResponse(next);
+      } catch (error) {
+        sendMutationError(reply, error);
+      }
+    },
+  );
 
-      const workspace = await storage.upsertProject(request.body);
-      return { workspace, warnings: collectWorkspaceWarnings(workspace) };
+  app.put<{ Params: { id: string }; Querystring: MutationQuery; Body: SubtreePayload }>(
+    "/projects/:id/subtree",
+    {
+      schema: {
+        params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] },
+        querystring: mutationQuerySchema,
+        body: subtreeBodySchema,
+      },
+    },
+    async (request, reply) => {
+      if (request.params.id !== request.body.project.id) {
+        return reply.status(400).send({ code: "PROJECT_ID_MISMATCH", message: "Project id mismatch." });
+      }
+      if (!isAgentManagedProject(request.body.project)) {
+        return reply.status(403).send({ code: "AGENT_MANAGED_REQUIRED", message: "Subtree control requires agent-managed ownership." });
+      }
+      const subtree = {
+        project: request.body.project,
+        ruleSets: request.body.ruleSets,
+        rules: request.body.rules,
+      };
+      try {
+        validateProjectSubtree(await storage.readWorkspace(), subtree);
+        const next = await storage.replaceProjectSubtree(
+          request.params.id,
+          subtree,
+          readRevisionGuard(request.body, request.headers["if-match"]),
+          forceRequested(request.query),
+        );
+        return mutationResponse(next);
+      } catch (error) {
+        sendMutationError(reply, error);
+      }
+    },
+  );
+
+  app.post<{ Querystring: MutationQuery; Body: SwitchProjectsPayload }>(
+    "/projects/switch",
+    {
+      schema: { querystring: mutationQuerySchema, body: switchProjectsBodySchema },
+    },
+    async (request, reply) => {
+      try {
+        const workspace = await storage.readWorkspace();
+        const target = workspace.projects.find((project) => project.id === request.body.projectId);
+        if (!target) return reply.status(404).send({ code: "PROJECT_NOT_FOUND", message: "Project not found." });
+        if (!isAgentManagedProject(target)) throw new AgentManagedMutationError();
+        if (request.body.switchGroup !== undefined && getSwitchGroup(target) !== request.body.switchGroup) {
+          return reply.status(409).send({ code: "SWITCH_GROUP_MISMATCH", message: "Target project is not in the requested switch group." });
+        }
+        const next = await storage.switchProjects(
+          request.body,
+          readRevisionGuard(request.body, request.headers["if-match"]),
+          forceRequested(request.query),
+        );
+        return mutationResponse(next);
+      } catch (error) {
+        sendMutationError(reply, error);
+      }
+    },
+  );
+
+  app.delete<{ Params: { id: string }; Querystring: MutationQuery }>(
+    "/projects/:id",
+    { schema: { params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] }, querystring: mutationQuerySchema } },
+    async (request, reply) => {
+      try {
+        const next = await storage.deleteProject(
+          request.params.id,
+          readRevisionGuard({}, request.headers["if-match"]),
+          forceRequested(request.query),
+        );
+        return mutationResponse(next);
+      } catch (error) {
+        sendMutationError(reply, error);
+      }
     },
   );
 
@@ -222,57 +536,127 @@ function registerRoutes(
     return {
       rules,
       updatedAt: workspace.updatedAt,
+      revision: workspace.revision,
     };
   });
 
-  app.put<{ Params: { id: string }; Body: UpsertRulePayload }>(
+  app.put<{ Params: { id: string }; Querystring: MutationQuery; Body: UpsertRulePayload }>(
     "/rules/:id",
     {
       schema: {
         params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] },
+        querystring: mutationQuerySchema,
         body: upsertRuleBodySchema,
       },
     },
     async (request, reply) => {
       if (request.params.id !== request.body.rule.id) {
-        return reply.status(400).send({ message: "Rule id mismatch." });
+        return reply.status(400).send({ code: "RULE_ID_MISMATCH", message: "Rule id mismatch." });
       }
-
-      const workspace = await storage.upsertRule(request.body);
-      return { workspace, warnings: collectWorkspaceWarnings(workspace) };
+      try {
+        const workspace = await storage.readWorkspace();
+        assertGenericRuleWriteAllowed(workspace, request.body);
+        const next = await storage.applyMutation(
+          readRevisionGuard(request.body, request.headers["if-match"]),
+          forceRequested(request.query),
+          (current) => {
+            assertGenericRuleWriteAllowed(current, request.body);
+            return applyUpsertRule(current, request.body);
+          },
+        );
+        return mutationResponse(next);
+      } catch (error) {
+        sendMutationError(reply, error);
+      }
     },
   );
 
-  app.put<{ Params: { id: string }; Body: { ruleSet: RuleSet } }>(
+  app.delete<{ Params: { id: string }; Querystring: MutationQuery }>(
+    "/rules/:id",
+    { schema: { params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] }, querystring: mutationQuerySchema } },
+    async (request, reply) => {
+      try {
+        const next = await storage.deleteRule(
+          request.params.id,
+          readRevisionGuard({}, request.headers["if-match"]),
+          forceRequested(request.query),
+        );
+        return mutationResponse(next);
+      } catch (error) {
+        sendMutationError(reply, error);
+      }
+    },
+  );
+
+  app.put<{ Params: { id: string }; Querystring: MutationQuery; Body: RuleSetMutationPayload }>(
     "/rule-sets/:id",
     {
       schema: {
         params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] },
+        querystring: mutationQuerySchema,
         body: upsertRuleSetBodySchema,
       },
     },
     async (request, reply) => {
       if (request.params.id !== request.body.ruleSet.id) {
-        return reply.status(400).send({ message: "Rule set id mismatch." });
+        return reply.status(400).send({ code: "RULE_SET_ID_MISMATCH", message: "Rule set id mismatch." });
       }
-
-      const workspace = await storage.upsertRuleSet(request.body.ruleSet);
-      return { workspace, warnings: collectWorkspaceWarnings(workspace) };
+      try {
+        const workspace = await storage.readWorkspace();
+        assertGenericRuleSetWriteAllowed(workspace, request.body.ruleSet);
+        const next = await storage.applyMutation(
+          readRevisionGuard(request.body, request.headers["if-match"]),
+          forceRequested(request.query),
+          (current) => {
+            assertGenericRuleSetWriteAllowed(current, request.body.ruleSet);
+            return applyUpsertRuleSet(current, request.body.ruleSet);
+          },
+        );
+        return mutationResponse(next);
+      } catch (error) {
+        sendMutationError(reply, error);
+      }
     },
   );
 
-  app.delete<{ Params: { id: string } }>(
+  app.delete<{ Params: { id: string }; Querystring: MutationQuery }>(
     "/rule-sets/:id",
-    {
-      schema: {
-        params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] },
-      },
-    },
-    async (request) => {
-      const workspace = await storage.deleteRuleSet(request.params.id);
-      return { workspace, warnings: collectWorkspaceWarnings(workspace) };
+    { schema: { params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] }, querystring: mutationQuerySchema } },
+    async (request, reply) => {
+      try {
+        const workspace = await storage.readWorkspace();
+        const target = workspace.ruleSets.find((ruleSet) => ruleSet.id === request.params.id);
+        if (target) {
+          const project = workspace.projects.find((candidate) => candidate.id === target.projectId);
+          if (project && isAgentManagedProject(project)) throw new AgentManagedMutationError();
+        }
+        const next = await storage.applyMutation(
+          readRevisionGuard({}, request.headers["if-match"]),
+          forceRequested(request.query),
+          (current) => planDeleteRuleSet(current, request.params.id).workspace,
+        );
+        return mutationResponse(next);
+      } catch (error) {
+        sendMutationError(reply, error);
+      }
     },
   );
+
+  app.post<{ Body: AppliedRevisionPayload }>(
+    "/applied",
+    { schema: { body: appliedRevisionBodySchema } },
+    async (request, reply): Promise<AppliedRevisionResponse | void> => {
+      try {
+        return await storage.recordAppliedRevision(request.body.revision);
+      } catch (error) {
+        sendMutationError(reply, error);
+      }
+    },
+  );
+
+  app.get("/applied", async (): Promise<AppliedRevisionResponse> => ({
+    appliedRevision: await storage.readAppliedRevision(),
+  }));
 
   app.post<{ Body: ForwardRequestPayload }>(
     "/forward",
@@ -407,14 +791,29 @@ function registerRoutes(
     },
   );
 
-  app.post<{ Body: ImportWorkspacePayload }>(
+  app.post<{ Querystring: MutationQuery; Body: ImportWorkspacePayload }>(
     "/import",
     {
-      schema: { body: importWorkspaceBodySchema },
+      schema: { querystring: mutationQuerySchema, body: importWorkspaceBodySchema },
     },
-    async (request) => {
-      const workspace = await storage.importWorkspace(request.body);
-      return { workspace, warnings: collectWorkspaceWarnings(workspace) };
+    async (request, reply) => {
+      try {
+        const imported = parseWorkspace(request.body.content, request.body.format);
+        assertImportedWorkspaceOwnership(await storage.readWorkspace(), imported);
+        const next = await storage.applyMutation(
+          readRevisionGuard(request.body, request.headers["if-match"]),
+          forceRequested(request.query),
+          (current) => {
+            assertImportedWorkspaceOwnership(current, imported);
+            return request.body.merge
+              ? mergeUserOwnedSlice(current, imported)
+              : replaceUserOwnedWorkspace(current, imported);
+          },
+        );
+        return mutationResponse(next);
+      } catch (error) {
+        sendMutationError(reply, error);
+      }
     },
   );
 
@@ -671,13 +1070,53 @@ const ruleSchema = {
   additionalProperties: true,
 } as const;
 
+const revisionProperty = { type: "integer", minimum: 0 } as const;
+
+const mutationQuerySchema = {
+  type: "object",
+  properties: { force: { type: "string", enum: ["true", "false"] } },
+  additionalProperties: false,
+} as const;
+
 const upsertProjectBodySchema = {
   type: "object",
   required: ["project"],
   properties: {
     project: projectSchema,
     ruleSets: { type: "array", items: ruleSetSchema },
+    ifRevision: revisionProperty,
   },
+  additionalProperties: false,
+} as const;
+
+const subtreeBodySchema = {
+  type: "object",
+  required: ["project", "ruleSets", "rules"],
+  properties: {
+    project: projectSchema,
+    ruleSets: { type: "array", items: ruleSetSchema },
+    rules: { type: "array", items: ruleSchema },
+    ifRevision: revisionProperty,
+  },
+  additionalProperties: false,
+} as const;
+
+const switchProjectsBodySchema = {
+  type: "object",
+  required: ["projectId", "enabled"],
+  properties: {
+    projectId: { type: "string", maxLength: 200 },
+    switchGroup: { type: "string", maxLength: 200 },
+    enabled: { type: "boolean" },
+    ifRevision: revisionProperty,
+  },
+  additionalProperties: false,
+} as const;
+
+const appliedRevisionBodySchema = {
+  type: "object",
+  required: ["revision"],
+  properties: { revision: revisionProperty },
   additionalProperties: false,
 } as const;
 
@@ -687,6 +1126,7 @@ const upsertRuleBodySchema = {
   properties: {
     rule: ruleSchema,
     ruleSetId: { type: "string", maxLength: 200 },
+    ifRevision: revisionProperty,
   },
   additionalProperties: false,
 } as const;
@@ -696,6 +1136,7 @@ const upsertRuleSetBodySchema = {
   required: ["ruleSet"],
   properties: {
     ruleSet: ruleSetSchema,
+    ifRevision: revisionProperty,
   },
   additionalProperties: false,
 } as const;
@@ -707,6 +1148,7 @@ const importWorkspaceBodySchema = {
     content: { type: "string" },
     format: { type: "string", enum: ["json", "yaml"] },
     merge: { type: "boolean", default: false },
+    ifRevision: revisionProperty,
   },
   additionalProperties: false,
 } as const;

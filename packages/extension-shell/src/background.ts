@@ -4,11 +4,11 @@ import type {
   HitRecord,
   ImportWorkspacePayload,
   LogsResponse,
-  ProjectsResponse,
+  MutationResponse,
   RuleSet,
-  RulesResponse,
   RuntimeState,
   ServiceHealthResponse,
+  ServiceWorkspaceResponse,
   SiteContextPayload,
   UpsertProjectPayload,
   UpsertRulePayload,
@@ -23,9 +23,10 @@ import {
   collectWorkspaceWarnings,
   createEmptyWorkspace,
   emptyPendingDeletions,
+  isAgentManagedProject,
   isPendingDeletionsEmpty,
   mergePendingDeletions,
-  mergeWorkspaces,
+  mergeUserOwnedSlice,
   parseWorkspace,
   planDeleteProject,
   planDeleteRule,
@@ -33,6 +34,7 @@ import {
   resolveRuleBinding,
   serializeWorkspace,
   trimWorkspaceForUrl,
+  workspaceWithoutAgentManaged,
   type PendingDeletions,
 } from "@resource-forwarder/rule-core";
 import { needsPageBridge } from "./page-bridge-policy.js";
@@ -47,6 +49,7 @@ import {
   resolveForwardBinding,
   STREAMING_UNSUPPORTED,
 } from "./forward-executor.js";
+import { reconcileAgentManagedSubtrees, replaceUserOwnedSlice, userOwnedSlice } from "./agent-reconciliation.js";
 
 // ── Runtime state ────────────────────────────────────────────────────────
 
@@ -56,6 +59,7 @@ let runtimeState: RuntimeState = {
   workspace: createEmptyWorkspace(),
 };
 let runtimeWarnings: string[] = [];
+let lastServiceRevision: number | undefined;
 let lastAppliedDnrFingerprint: string | undefined;
 let browserLogChain: Promise<void> = Promise.resolve();
 let localRuntimeHydrated = false;
@@ -207,7 +211,7 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
     case "delete-rule":
       return handleDeleteRule(message.ruleId);
     case "upsert-rule-set":
-      return handleUpsertRuleSet(message.payload.ruleSet);
+      return handleUpsertRuleSet(message.payload);
     case "delete-rule-set":
       return handleDeleteRuleSet(message.ruleSetId);
     case "get-logs":
@@ -266,9 +270,6 @@ async function readPendingPushOps(): Promise<string[]> {
   return [];
 }
 
-async function isDirty(): Promise<boolean> {
-  return (await readPendingPushOps()).length > 0;
-}
 
 async function clearPendingPushOp(opId: string): Promise<void> {
   await mutatePendingPushOps((ops) => ops.filter((id) => id !== opId));
@@ -336,50 +337,85 @@ async function appendPendingDeletions(extra: Partial<PendingDeletions>): Promise
   });
 }
 
-async function clearPendingDeletions(): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.pendingDeletes]: emptyPendingDeletions() });
+async function clearPendingDeletions(completed: PendingDeletions): Promise<void> {
+  return withWriteLock(async () => {
+    const current = await readPendingDeletions();
+    const completedProjects = new Set(completed.projectIds);
+    const completedRuleSets = new Set(completed.ruleSetIds);
+    const completedRules = new Set(completed.ruleIds);
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.pendingDeletes]: {
+        projectIds: current.projectIds.filter((id) => !completedProjects.has(id)),
+        ruleSetIds: current.ruleSetIds.filter((id) => !completedRuleSets.has(id)),
+        ruleIds: current.ruleIds.filter((id) => !completedRules.has(id)),
+      },
+    });
+  });
+}
+
+async function clearPendingPushOps(completed: string[]): Promise<void> {
+  if (completed.length === 0) return;
+  const completedSet = new Set(completed);
+  await mutatePendingPushOps((ops) => ops.filter((id) => !completedSet.has(id)));
 }
 
 /**
- * Persist workspace, then update runtimeState, then apply DNR rules and notify
- * tabs. This is the single place to "commit" a workspace change.
- *
- * Persistence intentionally happens BEFORE the in-memory state mutation: if
- * chrome.storage.local fails (quota exceeded, transient error), runtimeState
- * keeps the last known-good snapshot and the failure surfaces as a warning,
- * so a subsequent syncWorkspace can recover instead of advertising a broken
- * snapshot to UI consumers.
+ * Persist workspace, update runtime state, apply both DNR buckets, then notify
+ * tabs. A service revision is ACKed only when local persistence succeeded and
+ * applyDynamicRules resolved; offline/local-only snapshots and either DNR
+ * failure never produce a browser-applied ACK.
  */
 async function commitWorkspace(
   workspace: WorkspaceSnapshot,
   serviceUrl: string,
   health: ServiceHealthResponse | null,
+  ackRevision?: number,
 ): Promise<RuntimeState & { warnings: string[] }> {
+  const knownServiceRevision = lastServiceRevision ?? runtimeState.serviceRevision;
+  if (ackRevision !== undefined && knownServiceRevision !== undefined && ackRevision < knownServiceRevision) {
+    return { ...runtimeState, warnings: runtimeWarnings };
+  }
   const warnings = collectWorkspaceWarnings(workspace);
 
-  let persisted = true;
   try {
     await writeLocalWorkspace(workspace);
-  } catch (e) {
-    persisted = false;
-    warnings.push(`本地存储写入失败：${e instanceof Error ? e.message : String(e)}`);
+  } catch (error) {
+    warnings.push(`本地存储写入失败：${error instanceof Error ? error.message : String(error)}`);
+    runtimeWarnings = warnings;
+    runtimeState = { ...runtimeState, serviceUrl, health };
+    localRuntimeHydrated = true;
+    return { ...runtimeState, warnings };
   }
 
-  if (persisted) {
-    runtimeState = { serviceUrl, health, workspace };
-  } else {
-    runtimeState = { ...runtimeState, serviceUrl, health };
+  if (ackRevision !== undefined) {
+    const accepted = await setLastServiceRevision(ackRevision);
+    if (!accepted) return { ...runtimeState, warnings: runtimeWarnings };
   }
+  runtimeState = {
+    ...runtimeState,
+    serviceUrl,
+    health,
+    workspace,
+    serviceRevision: ackRevision ?? lastServiceRevision,
+  };
   runtimeWarnings = warnings;
   localRuntimeHydrated = true;
 
   try {
     await applyDynamicRules(runtimeState.workspace);
-  } catch (e) {
-    runtimeWarnings.push(`DNR 规则应用失败：${e instanceof Error ? e.message : String(e)}`);
+  } catch (error) {
+    runtimeWarnings.push(`DNR 规则应用失败：${error instanceof Error ? error.message : String(error)}`);
+    throw error;
   }
-  void notifyTabsToRefresh();
 
+  if (health && ackRevision !== undefined) {
+    try {
+      await postAppliedRevision(serviceUrl, ackRevision);
+    } catch (error) {
+      runtimeWarnings.push(`浏览器应用 ACK 发送失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  await notifyTabsToRefresh();
   return { ...runtimeState, warnings: runtimeWarnings };
 }
 
@@ -397,11 +433,9 @@ function syncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
 async function performSyncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
   const serviceUrl = await getServiceUrl();
   const health = await getHealth(serviceUrl);
-  runtimeState.serviceUrl = serviceUrl;
-  runtimeState.health = health;
+  runtimeState = { ...runtimeState, serviceUrl, health };
 
   const localWorkspace = await readLocalWorkspace();
-
   if (!health) {
     runtimeWarnings = [
       localWorkspace.rules.length > 0
@@ -412,94 +446,115 @@ async function performSyncWorkspace(): Promise<RuntimeState & { warnings: string
   }
 
   const pendingDeletions = await readPendingDeletions();
-  const hasPendingDeletions = !isPendingDeletionsEmpty(pendingDeletions);
-  const dirty = await isDirty();
+  const pendingPushOps = await readPendingPushOps();
+  const dirty = pendingPushOps.length > 0;
+  const localWithDeletions = applyPendingDeletions(localWorkspace, pendingDeletions);
 
-  // Service is reachable — push dirty local changes first.
-  // When deletions are queued we MUST push as `merge: false` (replace mode):
-  // a merge import only adds/updates entries, so deleted rules would silently
-  // resurrect on the next pull. With `merge: true` the service would still
-  // hold the deleted rule, we'd pull it back, and the user's "delete" would
-  // appear to never have happened. This is the heart of the offline-resurrect
-  // bug, fixed by preferring replace whenever pendingDeletions is non-empty.
-  if (dirty || hasPendingDeletions) {
-    const localWithDeletions = applyPendingDeletions(localWorkspace, pendingDeletions);
+  if (dirty || !isPendingDeletionsEmpty(pendingDeletions)) {
     try {
-      await serviceJson(`/import`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        serviceUrl,
-        body: JSON.stringify({
-          content: serializeWorkspace(localWithDeletions, "json"),
+      if (!isPendingDeletionsEmpty(pendingDeletions)) {
+        await syncPendingDeletions(serviceUrl, pendingDeletions);
+      }
+      if (dirty) {
+        await sendGuardedMutation<MutationResponse>(serviceUrl, "/import", "POST", (revision) => ({
+          content: serializeWorkspace(userOwnedSlice(localWithDeletions), "json"),
           format: "json",
-          merge: !hasPendingDeletions,
-        } satisfies ImportWorkspacePayload),
-      });
-      await mutatePendingPushOps(() => []);
-      if (hasPendingDeletions) await clearPendingDeletions();
+          merge: true,
+          ifRevision: revision,
+        } satisfies ImportWorkspacePayload));
+      }
+      await clearPendingPushOps(pendingPushOps);
     } catch {
-      // Push failed — keep dirty/pending state, surface local data.
-      return commitWorkspace(localWithDeletions, serviceUrl, health);
+      try {
+        const serviceWorkspace = await pullServiceWorkspace(serviceUrl);
+        return commitWorkspace(
+          reconcileAgentManagedSubtrees(localWithDeletions, serviceWorkspace),
+          serviceUrl,
+          health,
+        );
+      } catch {
+        return commitWorkspace(localWithDeletions, serviceUrl, health);
+      }
     }
   }
 
-  // Pull latest from service — fall back to local if service goes away mid-sync.
-  let workspace: WorkspaceSnapshot;
   try {
-    const [projects, rules] = await Promise.all([
-      serviceJson<ProjectsResponse>("/projects", { serviceUrl }),
-      serviceJson<RulesResponse>("/rules", { serviceUrl }),
-    ]);
-    workspace = {
-      version: 1,
-      updatedAt: maxUpdatedAt(projects.updatedAt, rules.updatedAt),
-      projects: projects.projects,
-      ruleSets: projects.ruleSets,
-      rules: rules.rules,
-    };
+    const workspace = await pullServiceWorkspace(serviceUrl);
+    return commitWorkspace(workspace, serviceUrl, health, workspace.revision);
   } catch {
-    return commitWorkspace(localWorkspace, serviceUrl, health);
+    return commitWorkspace(reconcileAgentManagedSubtrees(localWorkspace, localWorkspace), serviceUrl, health);
   }
+}
 
-  return commitWorkspace(workspace, serviceUrl, health);
+async function syncPendingDeletions(serviceUrl: string, pending: PendingDeletions): Promise<void> {
+  let serviceWorkspace = await pullServiceWorkspace(serviceUrl);
+  for (const projectId of pending.projectIds) {
+    const project = serviceWorkspace.projects.find((candidate) => candidate.id === projectId);
+    if (!project || isAgentManagedProject(project)) continue;
+    const result = await sendGuardedMutation<MutationResponse>(serviceUrl, `/projects/${encodeURIComponent(projectId)}`, "DELETE", () => undefined);
+    serviceWorkspace = result.workspace;
+  }
+  for (const ruleSetId of pending.ruleSetIds) {
+    const ruleSet = serviceWorkspace.ruleSets.find((candidate) => candidate.id === ruleSetId);
+    const project = ruleSet ? serviceWorkspace.projects.find((candidate) => candidate.id === ruleSet.projectId) : undefined;
+    if (!ruleSet || (project && isAgentManagedProject(project))) continue;
+    const result = await sendGuardedMutation<MutationResponse>(serviceUrl, `/rule-sets/${encodeURIComponent(ruleSetId)}`, "DELETE", () => undefined);
+    serviceWorkspace = result.workspace;
+  }
+  for (const ruleId of pending.ruleIds) {
+    const binding = resolveRuleBinding(serviceWorkspace, ruleId);
+    if (!binding || (binding.project && isAgentManagedProject(binding.project))) continue;
+    const result = await sendGuardedMutation<MutationResponse>(serviceUrl, `/rules/${encodeURIComponent(ruleId)}`, "DELETE", () => undefined);
+    serviceWorkspace = result.workspace;
+  }
+  await clearPendingDeletions(pending);
 }
 
 // ── Write handlers: local-first, then best-effort push to service ────────
 
 async function handleImportWorkspace(payload: ImportWorkspacePayload): Promise<RuntimeState & { warnings: string[] }> {
   return withWriteLock(async () => {
-    let nextWorkspace: WorkspaceSnapshot;
+    let imported: WorkspaceSnapshot;
+    const localWorkspace = await readLocalWorkspace();
     try {
-      const imported = parseWorkspace(payload.content, payload.format ?? "json");
-      const localWorkspace = await readLocalWorkspace();
-      nextWorkspace = payload.merge ? mergeWorkspaces(localWorkspace, imported) : imported;
-    } catch (e) {
-      throw new Error(`解析导入数据失败：${e instanceof Error ? e.message : String(e)}`);
+      imported = parseWorkspace(payload.content, payload.format ?? "json");
+    } catch (error) {
+      throw new Error(`解析导入数据失败：${error instanceof Error ? error.message : String(error)}`);
     }
-
+    const nextWorkspace = payload.merge
+      ? mergeUserOwnedSlice(localWorkspace, imported)
+      : replaceUserOwnedSlice(localWorkspace, imported);
     const serviceUrl = await getServiceUrl();
-    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
-    schedulePush((opId) => pushToService(serviceUrl, payload).then((health) => recordPushResult(opId, health)));
+    const result = await commitWorkspaceAndStartPush(
+      nextWorkspace,
+      serviceUrl,
+      (opId) => sendGuardedMutation<MutationResponse>(serviceUrl, "/import", "POST", (revision) => ({
+        content: serializeWorkspace(userOwnedSlice(nextWorkspace), "json"),
+        format: "json",
+        merge: true,
+        ifRevision: revision,
+      } satisfies ImportWorkspacePayload)).then((response) => recordMutationResult(opId, serviceUrl, response)),
+    );
     return result;
   });
 }
 
 async function handleUpsertProject(payload: UpsertProjectPayload): Promise<RuntimeState & { warnings: string[] }> {
   return withWriteLock(async () => {
+    if (isAgentManagedProject(payload.project)) throw new Error("agent-managed 项目为只读，请使用 agent control。");
     const localWorkspace = await readLocalWorkspace();
+    if (localWorkspace.projects.some((project) => project.id === payload.project.id && isAgentManagedProject(project))) {
+      throw new Error("agent-managed 项目为只读，请使用 agent control。");
+    }
     const nextWorkspace = applyUpsertProject(localWorkspace, payload);
     const serviceUrl = await getServiceUrl();
-
-    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
-    schedulePush((opId) =>
-      tryServiceCall(serviceUrl, async () => {
-        await serviceJson(`/projects/${payload.project.id}`, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          serviceUrl,
-          body: JSON.stringify(payload),
-        });
-      }).then((health) => recordPushResult(opId, health)),
+    const result = await commitWorkspaceAndStartPush(
+      nextWorkspace,
+      serviceUrl,
+      (opId) => sendGuardedMutation<MutationResponse>(serviceUrl, `/projects/${encodeURIComponent(payload.project.id)}`, "PUT", (revision) => ({
+        ...payload,
+        ifRevision: revision,
+      })).then((response) => recordMutationResult(opId, serviceUrl, response)),
     );
     return result;
   });
@@ -508,21 +563,23 @@ async function handleUpsertProject(payload: UpsertProjectPayload): Promise<Runti
 async function handleDeleteProject(projectId: string): Promise<RuntimeState & { warnings: string[] }> {
   return withWriteLock(async () => {
     const localWorkspace = await readLocalWorkspace();
+    const project = localWorkspace.projects.find((candidate) => candidate.id === projectId);
+    if (project && isAgentManagedProject(project)) throw new Error("agent-managed 项目为只读，请使用 agent control。");
     const { workspace: nextWorkspace, deletions } = planDeleteProject(localWorkspace, projectId);
-
     const serviceUrl = await getServiceUrl();
-    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
-
-    schedulePush((opId) =>
-      pushWorkspaceReplace(serviceUrl, nextWorkspace).then(async (health) => {
-        if (!health) {
-          await appendPendingDeletions(deletions);
-          await markPushFailed(opId);
-        } else {
-          await clearPendingPushOp(opId);
-          runtimeState.health = health;
-        }
-      }),
+    const result = await commitWorkspaceAndStartPush(
+      nextWorkspace,
+      serviceUrl,
+      (opId) => sendGuardedMutation<MutationResponse>(serviceUrl, `/projects/${encodeURIComponent(projectId)}`, "DELETE", () => undefined)
+        .then((response) => recordMutationResult(opId, serviceUrl, response))
+        .catch(async (error) => {
+          await appendPendingDeletions({
+            projectIds: project && !isAgentManagedProject(project) ? deletions.projectIds : [],
+            ruleSetIds: deletions.ruleSetIds,
+            ruleIds: deletions.ruleIds,
+          });
+          throw error;
+        }),
     );
     return result;
   });
@@ -531,19 +588,25 @@ async function handleDeleteProject(projectId: string): Promise<RuntimeState & { 
 async function handleUpsertRule(payload: UpsertRulePayload): Promise<RuntimeState & { warnings: string[] }> {
   return withWriteLock(async () => {
     const localWorkspace = await readLocalWorkspace();
+    const existing = resolveRuleBinding(localWorkspace, payload.rule.id);
+    const targetRuleSet = payload.ruleSetId
+      ? localWorkspace.ruleSets.find((ruleSet) => ruleSet.id === payload.ruleSetId)
+      : undefined;
+    const targetProject = targetRuleSet
+      ? localWorkspace.projects.find((project) => project.id === targetRuleSet.projectId)
+      : undefined;
+    if ((existing?.project && isAgentManagedProject(existing.project)) || (targetProject && isAgentManagedProject(targetProject))) {
+      throw new Error("agent-managed 规则为只读，请使用 agent control。");
+    }
     const nextWorkspace = applyUpsertRule(localWorkspace, payload);
     const serviceUrl = await getServiceUrl();
-
-    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
-    schedulePush((opId) =>
-      tryServiceCall(serviceUrl, async () => {
-        await serviceJson(`/rules/${payload.rule.id}`, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          serviceUrl,
-          body: JSON.stringify(payload),
-        });
-      }).then((health) => recordPushResult(opId, health)),
+    const result = await commitWorkspaceAndStartPush(
+      nextWorkspace,
+      serviceUrl,
+      (opId) => sendGuardedMutation<MutationResponse>(serviceUrl, `/rules/${encodeURIComponent(payload.rule.id)}`, "PUT", (revision) => ({
+        ...payload,
+        ifRevision: revision,
+      })).then((response) => recordMutationResult(opId, serviceUrl, response)),
     );
     return result;
   });
@@ -552,45 +615,42 @@ async function handleUpsertRule(payload: UpsertRulePayload): Promise<RuntimeStat
 async function handleDeleteRule(ruleId: string): Promise<RuntimeState & { warnings: string[] }> {
   return withWriteLock(async () => {
     const localWorkspace = await readLocalWorkspace();
+    const binding = resolveRuleBinding(localWorkspace, ruleId);
+    if (binding?.project && isAgentManagedProject(binding.project)) throw new Error("agent-managed 规则为只读，请使用 agent control。");
     const { workspace: nextWorkspace, deletions } = planDeleteRule(localWorkspace, ruleId);
-
     const serviceUrl = await getServiceUrl();
-    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
-
-    schedulePush((opId) =>
-      pushWorkspaceReplace(serviceUrl, nextWorkspace).then(async (health) => {
-        if (!health) {
-          // Persist the deleted rule id so that even after a future merge-pull
-          // brings the rule back from the service, syncWorkspace knows to
-          // re-apply the removal before pushing replace mode.
-          await appendPendingDeletions(deletions);
-          await markPushFailed(opId);
-        } else {
-          await clearPendingPushOp(opId);
-          runtimeState.health = health;
-        }
-      }),
+    const result = await commitWorkspaceAndStartPush(
+      nextWorkspace,
+      serviceUrl,
+      (opId) => sendGuardedMutation<MutationResponse>(serviceUrl, `/rules/${encodeURIComponent(ruleId)}`, "DELETE", () => undefined)
+        .then((response) => recordMutationResult(opId, serviceUrl, response))
+        .catch(async (error) => {
+          await appendPendingDeletions({ ruleIds: binding?.project && isAgentManagedProject(binding.project) ? [] : deletions.ruleIds });
+          throw error;
+        }),
     );
     return result;
   });
 }
 
-async function handleUpsertRuleSet(ruleSet: RuleSet): Promise<RuntimeState & { warnings: string[] }> {
+async function handleUpsertRuleSet(payload: { ruleSet: RuleSet }): Promise<RuntimeState & { warnings: string[] }> {
   return withWriteLock(async () => {
     const localWorkspace = await readLocalWorkspace();
-    const nextWorkspace = applyUpsertRuleSet(localWorkspace, ruleSet);
+    const existing = localWorkspace.ruleSets.find((candidate) => candidate.id === payload.ruleSet.id);
+    const project = localWorkspace.projects.find((candidate) => candidate.id === payload.ruleSet.projectId);
+    const existingProject = existing ? localWorkspace.projects.find((candidate) => candidate.id === existing.projectId) : undefined;
+    if ((project && isAgentManagedProject(project)) || (existingProject && isAgentManagedProject(existingProject))) {
+      throw new Error("agent-managed 分组为只读，请使用 agent control。");
+    }
+    const nextWorkspace = applyUpsertRuleSet(localWorkspace, payload.ruleSet);
     const serviceUrl = await getServiceUrl();
-
-    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
-    schedulePush((opId) =>
-      tryServiceCall(serviceUrl, async () => {
-        await serviceJson(`/rule-sets/${ruleSet.id}`, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          serviceUrl,
-          body: JSON.stringify({ ruleSet }),
-        });
-      }).then((health) => recordPushResult(opId, health)),
+    const result = await commitWorkspaceAndStartPush(
+      nextWorkspace,
+      serviceUrl,
+      (opId) => sendGuardedMutation<MutationResponse>(serviceUrl, `/rule-sets/${encodeURIComponent(payload.ruleSet.id)}`, "PUT", (revision) => ({
+        ...payload,
+        ifRevision: revision,
+      })).then((response) => recordMutationResult(opId, serviceUrl, response)),
     );
     return result;
   });
@@ -599,46 +659,63 @@ async function handleUpsertRuleSet(ruleSet: RuleSet): Promise<RuntimeState & { w
 async function handleDeleteRuleSet(ruleSetId: string): Promise<RuntimeState & { warnings: string[] }> {
   return withWriteLock(async () => {
     const localWorkspace = await readLocalWorkspace();
+    const target = localWorkspace.ruleSets.find((ruleSet) => ruleSet.id === ruleSetId);
+    const project = target ? localWorkspace.projects.find((candidate) => candidate.id === target.projectId) : undefined;
+    if (project && isAgentManagedProject(project)) throw new Error("agent-managed 分组为只读，请使用 agent control。");
     const { workspace: nextWorkspace, deletions } = planDeleteRuleSet(localWorkspace, ruleSetId);
-
     const serviceUrl = await getServiceUrl();
-    const result = await commitWorkspace(nextWorkspace, serviceUrl, runtimeState.health);
-
-    schedulePush((opId) =>
-      pushWorkspaceReplace(serviceUrl, nextWorkspace).then(async (health) => {
-        if (!health) {
-          await appendPendingDeletions(deletions);
-          await markPushFailed(opId);
-        } else {
-          await clearPendingPushOp(opId);
-          runtimeState.health = health;
-        }
-      }),
+    const result = await commitWorkspaceAndStartPush(
+      nextWorkspace,
+      serviceUrl,
+      (opId) => sendGuardedMutation<MutationResponse>(serviceUrl, `/rule-sets/${encodeURIComponent(ruleSetId)}`, "DELETE", () => undefined)
+        .then((response) => recordMutationResult(opId, serviceUrl, response))
+        .catch(async (error) => {
+          await appendPendingDeletions({
+            ruleSetIds: project && isAgentManagedProject(project) ? [] : deletions.ruleSetIds,
+            ruleIds: deletions.ruleIds,
+          });
+          throw error;
+        }),
     );
     return result;
   });
 }
 
-/**
- * Wrap a fire-and-forget push: register a unique op id under the dirty key,
- * await the work, and let the push callback decide whether to clear or keep
- * the op id. Failures inside the push are still treated as "dirty" so we do
- * not lose track of unsynchronised local state.
- */
-function schedulePush(work: (opId: string) => Promise<void>): void {
-  const opId = createOpId();
-  void mutatePendingPushOps((ops) => [...ops, opId])
-    .then(() => work(opId))
-    .catch(() => markPushFailed(opId));
+interface RegisteredPush {
+  opId: string;
+  start: () => void;
 }
 
-async function recordPushResult(opId: string, health: ServiceHealthResponse | null): Promise<void> {
-  if (!health) {
-    await markPushFailed(opId);
-    return;
-  }
+async function registerPush(work: (opId: string) => Promise<void>): Promise<RegisteredPush> {
+  const opId = createOpId();
+  const ops = await readPendingPushOps();
+  await chrome.storage.local.set({ [STORAGE_KEYS.workspaceDirty]: [...ops, opId] });
+  return {
+    opId,
+    start: () => {
+      void work(opId).catch(() => markPushFailed(opId));
+    },
+  };
+}
+
+async function commitWorkspaceAndStartPush(
+  workspace: WorkspaceSnapshot,
+  serviceUrl: string,
+  work: (opId: string) => Promise<void>,
+): Promise<RuntimeState & { warnings: string[] }> {
+  const registration = await registerPush(work);
+  const result = await commitWorkspace(workspace, serviceUrl, runtimeState.health);
+  registration.start();
+  return result;
+}
+
+async function recordMutationResult(opId: string, serviceUrl: string, response: MutationResponse): Promise<void> {
   await clearPendingPushOp(opId);
-  runtimeState.health = health;
+  const knownRevision = lastServiceRevision ?? runtimeState.serviceRevision ?? runtimeState.workspace.revision;
+  if (response.revision < knownRevision) return;
+  if (!(await setLastServiceRevision(response.revision))) return;
+  const health = runtimeState.health ?? await getHealth(serviceUrl);
+  await commitWorkspace(response.workspace, serviceUrl, health, health ? response.revision : undefined);
 }
 
 async function handleExportWorkspace(projectIds: string[], format: "json" | "yaml"): Promise<ExportWorkspaceResponse> {
@@ -660,6 +737,7 @@ async function handleExportWorkspace(projectIds: string[], format: "json" | "yam
   const allowedRuleIds = new Set(scopedRuleSets.flatMap((rs) => rs.ruleIds));
   const scopedWorkspace: WorkspaceSnapshot = {
     version: workspace.version,
+    revision: workspace.revision,
     updatedAt: workspace.updatedAt,
     projects: scopedProjects,
     ruleSets: scopedRuleSets,
@@ -668,48 +746,16 @@ async function handleExportWorkspace(projectIds: string[], format: "json" | "yam
   return { format, content: serializeWorkspace(scopedWorkspace, format) };
 }
 
-/**
- * Try a service call, return health if succeeded, null if failed.
- */
-async function tryServiceCall(serviceUrl: string, fn: () => Promise<void>): Promise<ServiceHealthResponse | null> {
-  const health = await getHealth(serviceUrl);
-  if (!health) return null;
-  try {
-    await fn();
-    return health;
-  } catch {
-    return null;
-  }
-}
-
-async function pushToService(serviceUrl: string, payload: ImportWorkspacePayload): Promise<ServiceHealthResponse | null> {
-  return tryServiceCall(serviceUrl, async () => {
-    await serviceJson(`/import`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      serviceUrl,
-      body: JSON.stringify(payload),
-    });
-  });
-}
-
-async function pushWorkspaceReplace(serviceUrl: string, workspace: WorkspaceSnapshot): Promise<ServiceHealthResponse | null> {
-  return pushToService(serviceUrl, {
-    content: serializeWorkspace(workspace, "json"),
-    format: "json",
-    merge: false,
-  });
-}
 
 // ── Dashboard state ──────────────────────────────────────────────────────
 
 async function hydrateRuntimeStateFromLocal(): Promise<void> {
   if (localRuntimeHydrated) return;
   if (!localRuntimeHydration) {
-    localRuntimeHydration = Promise.all([readLocalWorkspace(), getServiceUrl()])
-      .then(([workspace, serviceUrl]) => {
+    localRuntimeHydration = Promise.all([readLocalWorkspace(), getServiceUrl(), getLastServiceRevision()])
+      .then(([workspace, serviceUrl, serviceRevision]) => {
         if (!localRuntimeHydrated) {
-          runtimeState = { ...runtimeState, serviceUrl, workspace };
+          runtimeState = { ...runtimeState, serviceUrl, workspace, serviceRevision };
           localRuntimeHydrated = true;
         }
       })
@@ -1040,16 +1086,108 @@ async function getServiceToken(): Promise<string | undefined> {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+class ServiceHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | undefined,
+    readonly currentRevision: number | undefined,
+    readonly workspace: WorkspaceSnapshot | undefined,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ServiceHttpError";
+  }
+}
+
 async function serviceJson<T>(path: string, init?: RequestInit & { serviceUrl?: string }): Promise<T> {
   const response = await serviceFetch(path, init);
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: response.statusText }));
+    const error = await response.json().catch(() => ({ message: response.statusText })) as {
+      code?: string;
+      currentRevision?: number;
+      message?: string;
+      workspace?: WorkspaceSnapshot;
+    };
     if (response.status === 401) {
       throw new Error("服务 token 校验失败，请在设置页重新粘贴 token。");
     }
-    throw new Error(error.message || `Service request failed with ${response.status}.`);
+    throw new ServiceHttpError(
+      response.status,
+      error.code,
+      error.currentRevision,
+      error.workspace,
+      error.message || `Service request failed with ${response.status}.`,
+    );
   }
   return (await response.json()) as T;
+}
+
+async function getLastServiceRevision(): Promise<number> {
+  if (lastServiceRevision !== undefined) return lastServiceRevision;
+  const stored = await chrome.storage.local.get(STORAGE_KEYS.serviceRevision);
+  const value = stored[STORAGE_KEYS.serviceRevision];
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    lastServiceRevision = value;
+    return value;
+  }
+  return runtimeState.workspace.revision;
+}
+
+async function setLastServiceRevision(revision: number): Promise<boolean> {
+  if (lastServiceRevision === undefined) lastServiceRevision = await getLastServiceRevision();
+  if (runtimeState.serviceRevision !== undefined && runtimeState.serviceRevision > lastServiceRevision) {
+    lastServiceRevision = runtimeState.serviceRevision;
+  }
+  if (revision < lastServiceRevision) return false;
+  if (lastServiceRevision === revision) return true;
+  lastServiceRevision = revision;
+  await chrome.storage.local.set({ [STORAGE_KEYS.serviceRevision]: revision });
+  return true;
+}
+
+async function pullServiceWorkspace(serviceUrl: string): Promise<WorkspaceSnapshot> {
+  const response = await serviceJson<ServiceWorkspaceResponse>("/workspace", { serviceUrl });
+  await setLastServiceRevision(response.revision);
+  return response.workspace;
+}
+
+async function postAppliedRevision(serviceUrl: string, revision: number): Promise<void> {
+  await serviceJson<{ appliedRevision: number }>("/applied", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    serviceUrl,
+    body: JSON.stringify({ revision }),
+  });
+}
+
+async function sendGuardedMutation<T extends MutationResponse>(
+  serviceUrl: string,
+  path: string,
+  method: string,
+  bodyFactory: (revision: number) => unknown,
+): Promise<T> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const revision = await getLastServiceRevision();
+    const body = bodyFactory(revision);
+    const headers: Record<string, string> = { "if-match": String(revision) };
+    const init: RequestInit & { serviceUrl?: string } = { method, headers, serviceUrl };
+    if (body !== undefined) {
+      headers["content-type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    try {
+      const result = await serviceJson<T>(path, init);
+      if (typeof result.revision === "number") await setLastServiceRevision(result.revision);
+      return result;
+    } catch (error) {
+      if (attempt === 0 && error instanceof ServiceHttpError && error.status === 409) {
+        await pullServiceWorkspace(serviceUrl);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error("Service mutation retry exhausted.");
 }
 
 async function serviceFetch(path: string, init?: RequestInit & { serviceUrl?: string }): Promise<Response> {

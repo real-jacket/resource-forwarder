@@ -10,6 +10,7 @@ const now = "2026-04-28T03:50:00.000Z";
 
 const workspace: WorkspaceSnapshot = {
   version: 1,
+  revision: 0,
   updatedAt: now,
   projects: [
     {

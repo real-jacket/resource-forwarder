@@ -80,6 +80,27 @@ Choose either approach:
 
 Open the target website and the extension Side Panel to inspect the projects, rule sets, and rules that match the current page.
 
+## Agent control CLI
+
+The `@resource-forwarder/forwarder-service` package installs the `rf` binary. It controls one local Companion workspace containing multiple agent-managed projects; it does not start dev servers or allocate ports.
+
+```bash
+pnpm --filter @resource-forwarder/forwarder-service build
+rf service status
+rf workspace get --json
+rf project up --name zebra/feat-x --site app.example.com --dev-port 8080 \
+  --asset 'https://cdn.example.com/assets/app.js => /assets/app.js' \
+  --switch-group zebra --enable
+rf project switch zebra/feat-x
+rf wait-applied --timeout 30s
+```
+
+The CLI reads the bearer token from `${RF_STORAGE_ROOT:-.resource-forwarder}/token` and targets `http://127.0.0.1:${PORT:-5178}`. `WorkspaceSnapshot.revision` is the persisted monotonic concurrency token; `version` remains the format version. Every mutation requires the current `revision` through `If-Match`/`ifRevision`. A stale write returns 409 and must be recomputed after a fresh read. `--force` is the explicit last-writer-wins override.
+
+`project up` validates locally, prints the generated DNR rule, validates with the service, then atomically replaces the complete agent-managed subtree. `project switch` changes only the target and enabled siblings carrying the same `switch-group:<name>`. Omitting a rule from a later `up` removes it. Agent-managed projects are immutable in ownership and read-only in the Options Page; generic CRUD and imports cannot modify them.
+
+`wait-applied` acknowledges only after the extension persisted the workspace and Chrome accepted both dynamic and session DNR updates. Its timeout message is `persisted but not browser-applied`. The ACK does not prove dev-server availability, CSP, CORS, or page runtime behavior; reload the page and verify the actual network response separately. See [`docs/agent-forwarder-control/SKILL.md`](docs/agent-forwarder-control/SKILL.md) for the complete command and recovery workflow.
+
 ## System architecture
 
 ```mermaid
@@ -256,7 +277,7 @@ The conversion maps:
 
 This prevents one project's asset rules from affecting unrelated pages. Only global projects with empty `siteHosts` or `*` skip the `initiatorDomains` restriction.
 
-Redirect targets must be browser-reachable HTTPS URLs.
+Redirect targets must be browser-reachable; `http://localhost` and `http://127.0.0.1` targets are allowed for local development.
 
 ## API forwarding: `api_forward`
 
@@ -418,7 +439,7 @@ pnpm --filter @resource-forwarder/extension-shell test
 - Forwarded request bodies are limited to approximately 2 MiB in the page bridge.
 - SSE `text/event-stream` and responses larger than approximately 4 MiB cannot be buffered through extension messaging.
 - JSON Merge Patch requires a valid JSON upstream response; parsing failures surface as proxy errors.
-- Asset replacement requires a browser-reachable HTTPS target.
+- Asset replacement requires a browser-reachable target; loopback HTTP targets are allowed for local development.
 
 ## Validation
 

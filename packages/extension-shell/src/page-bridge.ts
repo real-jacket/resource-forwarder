@@ -64,7 +64,7 @@ function randomRequestId(): string {
 }
 let state: SiteContextPayload = {
   serviceUrl: "",
-  workspace: { version: 1, updatedAt: new Date().toISOString(), projects: [], ruleSets: [], rules: [] },
+  workspace: { version: 1, revision: 0, updatedAt: new Date().toISOString(), projects: [], ruleSets: [], rules: [] },
   currentUrl: location.href,
   warnings: [],
 };
