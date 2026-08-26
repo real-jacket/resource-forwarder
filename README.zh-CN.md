@@ -80,26 +80,42 @@ pnpm dev
 
 随后打开目标网页和扩展 Side Panel，即可查看当前页面命中的站点、分组和生效规则。
 
-## Agent control CLI
+## Agent 规则控制（CLI + Skill）
 
-`@resource-forwarder/forwarder-service` 提供 `rf` 命令行工具。它控制一个 Companion 工作区中的多个 agent-managed 站点，不负责启动 dev server，也不分配端口。
+让 agent 编程式地配置插件的代理规则：**一个 companion 服务 + 多个 agent-managed 站点**，每个并行需求对应一个指向自己 dev 端口的站点。适用于并行开发多个需求（如多个 `zebra` 分支）时，自动建立/切换/销毁本地资源代理。只管规则，不启动 dev server、也不分配端口。
+
+### 一键安装
 
 ```bash
-pnpm --filter @resource-forwarder/forwarder-service build
+pnpm agent-control:install     # 构建 rf、链接到 PATH、把 skill 装进 Claude Code 和 Codex
+# 可选参数：--claude-only / --codex-only / --no-build / --uninstall
+```
+
+安装后 `rf` 在 PATH 上可用；skill 装到 `~/.claude/skills/agent-forwarder-control` 与 `~/.codex/skills/agent-forwarder-control`（重启 Claude Code / Codex 后生效）。`rf` 软链接指向你执行安装时所在的仓库；拉取更新后重新 `pnpm agent-control:install`（或 `pnpm build`）即可。
+
+### 用法一：直接用 `rf` CLI
+
+```bash
+pnpm dev:service               # 启动 companion 服务
 rf service status
-rf workspace get --json
-rf project up --name zebra/feat-x --site app.example.com --dev-port 8080 \
-  --asset 'https://cdn.example.com/assets/app.js => /assets/app.js' \
+rf project up --name zebra/feat-x --site 'https://app.example.com/*' --dev-port 8080 \
+  --asset 'https://cdn.example.com/static/app.*.js => /static/app.js' \
   --switch-group zebra --enable
+rf project list --json
 rf project switch zebra/feat-x
+rf project down zebra/feat-x
 rf wait-applied --timeout 30s
 ```
 
-CLI 从 `${RF_STORAGE_ROOT:-.resource-forwarder}/token` 读取 Bearer token，默认访问 `http://127.0.0.1:${PORT:-5178}`。`WorkspaceSnapshot.revision` 是持久化的单调并发版本；`version` 仍然只是格式版本。所有 mutation 默认必须通过 `If-Match`/`ifRevision` 携带当前 `revision`。过期写入返回 409，必须重新读取并重算；`--force` 是显式的 last-writer-wins 覆盖选项。
+> `--asset` 左侧必须是**完整 URL**（CLI 会 `new URL()` 解析出 host + path），裸路径会报 `Invalid URL`；右侧是 dev server 上的路径。
 
-`project up` 会先在本地 dry-run、打印 DNR 规则、调用服务校验，再原子替换完整 agent-managed subtree。`project switch` 只切换目标和同一 `switch-group:<name>` 中当前启用的兄弟。后续 `up` 省略的旧规则会被删除。agent-managed 站点在 Options Page 中只读，generic CRUD 与导入不会修改它们。
+### 用法二：通过 agent skill
 
-`wait-applied` 只有在扩展完成本地持久化且 Chrome 成功接受 dynamic/session 两组 DNR 更新后才算 ACK；超时会输出 `persisted but not browser-applied`。ACK 不代表 dev server、CSP、CORS 或页面运行时已经正确，请继续刷新页面并检查实际网络响应。完整命令与冲突恢复流程见 [`docs/agent-forwarder-control/SKILL.md`](docs/agent-forwarder-control/SKILL.md)。
+安装后，在 Claude Code 或 Codex 里用自然语言让 agent 配置规则即可（例如“给 zebra/feat-x 建一套把 cdn 上的 app.js 代理到本地 8080 的规则并启用”），agent 会按 skill 说明调用上面的 `rf` 命令。skill 全文见 [`skills/agent-forwarder-control/SKILL.md`](skills/agent-forwarder-control/SKILL.md)。
+
+### 一致性与恢复
+
+CLI 从 `${RF_STORAGE_ROOT:-.resource-forwarder}/token` 读取 Bearer token，默认访问 `http://127.0.0.1:${PORT:-5178}`（运行 `rf` 时用与服务相同的 `RF_STORAGE_ROOT`/`PORT`）。`WorkspaceSnapshot.revision` 是持久化的单调并发版本；`version` 仍然只是格式版本。所有 mutation 默认必须通过 `If-Match`/`ifRevision` 携带当前 `revision`：过期写入返回 409，CLI 会重读重算并重试一次；`--force` 是显式的 last-writer-wins 覆盖。`project up` 会先本地 dry-run、打印 DNR 规则、调用服务校验，再原子替换完整 agent-managed 子树（后续 `up` 省略的旧规则会被删除）；`project switch` 只切换同一 `switch-group:<name>` 内当前启用的兄弟。agent-managed 站点在 Options Page 中只读，generic CRUD 与导入不会修改它们。`wait-applied` 只有在扩展完成本地持久化且 Chrome 成功接受 dynamic/session 两组 DNR 更新后才算 ACK；超时会输出 `persisted but not browser-applied`。ACK 不代表 dev server、CSP、CORS 或页面运行时已经正确，请继续刷新页面并检查实际网络响应。
 
 ## 系统架构
 
