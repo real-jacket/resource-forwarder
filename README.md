@@ -80,6 +80,66 @@ Choose either approach:
 
 Open the target website and the extension Side Panel to inspect the projects, rule sets, and rules that match the current page.
 
+## Agent rule control (CLI + Skill)
+
+Let an agent configure the extension's proxy rules programmatically: **one companion service, many
+agent-managed projects**, each proxying production assets to its own dev-server port. Built for
+developing several requirements in parallel (e.g. multiple `zebra` branches) — create, switch, and
+tear down local resource proxies automatically. It manages rules only; it does not start dev servers
+or allocate ports.
+
+### One-click install
+
+```bash
+pnpm agent-control:install     # build rf, link it onto PATH, install the skill into Claude Code and Codex
+# optional: --claude-only / --codex-only / --no-build / --uninstall
+```
+
+`rf` becomes available on PATH; the skill is installed to `~/.claude/skills/agent-forwarder-control`
+and `~/.codex/skills/agent-forwarder-control` (restart Claude Code / Codex to load it). The `rf`
+symlink points at the checkout you installed from; re-run `pnpm agent-control:install` (or `pnpm build`)
+after pulling updates.
+
+### Usage A — the `rf` CLI directly
+
+```bash
+pnpm dev:service               # start the companion service
+rf service status
+rf project up --name zebra/feat-x --site 'https://app.example.com/*' --dev-port 8080 \
+  --asset 'https://cdn.example.com/static/app.*.js => /static/app.js' \
+  --switch-group zebra --enable
+rf project list --json
+rf project switch zebra/feat-x
+rf project down zebra/feat-x
+rf wait-applied --timeout 30s
+```
+
+> `--asset` left side must be a **full URL** (the CLI runs `new URL()` to extract host + path); a bare
+> path fails with `Invalid URL`. The right side is the path on your dev server.
+
+### Usage B — via the agent skill
+
+After install, just ask the agent in Claude Code or Codex in natural language (e.g. "set up rules
+proxying the cdn app.js to local 8080 for zebra/feat-x and enable it"); it will call the `rf` commands
+per the skill. Full skill text: [`skills/agent-forwarder-control/SKILL.md`](skills/agent-forwarder-control/SKILL.md).
+
+### Consistency and recovery
+
+The CLI reads the bearer token from `${RF_STORAGE_ROOT:-.resource-forwarder}/token` and targets
+`http://127.0.0.1:${PORT:-5178}` (run `rf` with the same `RF_STORAGE_ROOT`/`PORT` as the service).
+`WorkspaceSnapshot.revision` is the persisted monotonic concurrency token; `version` remains the
+format version. Every mutation requires the current `revision` through `If-Match`/`ifRevision`; a
+stale write returns 409 and the CLI re-reads and retries once. `--force` is the explicit
+last-writer-wins override. `project up` validates locally, prints the generated DNR rule, validates
+with the service, then atomically replaces the complete agent-managed subtree (rules omitted from a
+later `up` are removed). `project switch` changes only the target and enabled siblings carrying the
+same `switch-group:<name>`. Agent-managed projects are immutable in ownership and read-only in the
+Options Page; generic CRUD and imports cannot modify them. `wait-applied` acknowledges only after the
+extension persisted the workspace and Chrome accepted both dynamic and session DNR updates; its
+timeout message is `persisted but not browser-applied`. The ACK does not prove dev-server
+availability, CSP, CORS, or page runtime behavior — reload the page and verify the actual network
+response separately.
+
 ## System architecture
 
 ```mermaid
@@ -256,7 +316,7 @@ The conversion maps:
 
 This prevents one project's asset rules from affecting unrelated pages. Only global projects with empty `siteHosts` or `*` skip the `initiatorDomains` restriction.
 
-Redirect targets must be browser-reachable HTTPS URLs.
+Redirect targets must be browser-reachable; `http://localhost` and `http://127.0.0.1` targets are allowed for local development.
 
 ## API forwarding: `api_forward`
 
@@ -418,7 +478,7 @@ pnpm --filter @resource-forwarder/extension-shell test
 - Forwarded request bodies are limited to approximately 2 MiB in the page bridge.
 - SSE `text/event-stream` and responses larger than approximately 4 MiB cannot be buffered through extension messaging.
 - JSON Merge Patch requires a valid JSON upstream response; parsing failures surface as proxy errors.
-- Asset replacement requires a browser-reachable HTTPS target.
+- Asset replacement requires a browser-reachable target; loopback HTTP targets are allowed for local development.
 
 ## Validation
 

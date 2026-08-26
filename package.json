@@ -11,7 +11,8 @@
     "test": "pnpm -r test",
     "start": "pnpm --filter @resource-forwarder/forwarder-service start",
     "dev:service": "pnpm --filter @resource-forwarder/forwarder-service dev",
-    "dev:extension": "pnpm --filter @resource-forwarder/extension-shell dev"
+    "dev:extension": "pnpm --filter @resource-forwarder/extension-shell dev",
+    "agent-control:install": "bash scripts/install-agent-control.sh"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",

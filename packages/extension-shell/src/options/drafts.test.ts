@@ -36,6 +36,7 @@ const baseRuleSet: RuleSet = {
 
 const emptyWorkspace: WorkspaceSnapshot = {
   version: 1,
+  revision: 0,
   updatedAt: "2025-01-01T00:00:00.000Z",
   projects: [baseProject],
   ruleSets: [baseRuleSet],

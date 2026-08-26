@@ -24,6 +24,33 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - Single test by name in rule-core: `pnpm --filter @resource-forwarder/rule-core test -- -t "matches the highest priority API rule"`
 - Single file in forwarder-service: `pnpm --filter @resource-forwarder/forwarder-service test -- src/index.test.ts`
 
+## Agent bootstrap: install the agent-control capability
+
+When the user asks you to "install" / "set up" the **agent-control** capability (the ability to
+configure this extension's proxy rules programmatically via the `rf` CLI + skill), run this from the
+repo root — you do not need the skill pre-installed to do this:
+
+```bash
+pnpm install                 # only if node_modules is missing
+pnpm agent-control:install   # builds rf, puts it on PATH, installs the skill into ~/.claude/skills and ~/.codex/skills
+```
+
+Pass-through flags: `--claude-only`, `--codex-only`, `--no-build`, `--uninstall`
+(e.g. `pnpm agent-control:install --codex-only`).
+
+After it runs, report to the user:
+
+- `rf` is on PATH (a wrapper at `~/.local/bin/rf`; if that dir is not on PATH, tell the user to add it).
+- The `agent-forwarder-control` skill is installed for Claude Code and Codex — they must **restart**
+  Claude Code / Codex so a fresh session discovers it.
+- To verify: `pnpm dev:service` (start the service), then `rf service status` prints `{ok:true}`.
+  Paste `${RF_STORAGE_ROOT:-.resource-forwarder}/token` into the extension Settings page once.
+
+The `rf` wrapper points at the checkout you installed from; after merging this branch and removing a
+worktree, re-run `pnpm agent-control:install` from the active checkout. Once installed, follow
+`skills/agent-forwarder-control/SKILL.md` to create/switch/tear down agent-managed proxy projects;
+do not hand-edit user-owned rules.
+
 ## Workspace architecture
 
 This is a pnpm monorepo with 5 packages:

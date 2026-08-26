@@ -80,6 +80,43 @@ pnpm dev
 
 随后打开目标网页和扩展 Side Panel，即可查看当前页面命中的站点、分组和生效规则。
 
+## Agent 规则控制（CLI + Skill）
+
+让 agent 编程式地配置插件的代理规则：**一个 companion 服务 + 多个 agent-managed 站点**，每个并行需求对应一个指向自己 dev 端口的站点。适用于并行开发多个需求（如多个 `zebra` 分支）时，自动建立/切换/销毁本地资源代理。只管规则，不启动 dev server、也不分配端口。
+
+### 一键安装
+
+```bash
+pnpm agent-control:install     # 构建 rf、链接到 PATH、把 skill 装进 Claude Code 和 Codex
+# 可选参数：--claude-only / --codex-only / --no-build / --uninstall
+```
+
+安装后 `rf` 在 PATH 上可用；skill 装到 `~/.claude/skills/agent-forwarder-control` 与 `~/.codex/skills/agent-forwarder-control`（重启 Claude Code / Codex 后生效）。`rf` 软链接指向你执行安装时所在的仓库；拉取更新后重新 `pnpm agent-control:install`（或 `pnpm build`）即可。
+
+### 用法一：直接用 `rf` CLI
+
+```bash
+pnpm dev:service               # 启动 companion 服务
+rf service status
+rf project up --name zebra/feat-x --site 'https://app.example.com/*' --dev-port 8080 \
+  --asset 'https://cdn.example.com/static/app.*.js => /static/app.js' \
+  --switch-group zebra --enable
+rf project list --json
+rf project switch zebra/feat-x
+rf project down zebra/feat-x
+rf wait-applied --timeout 30s
+```
+
+> `--asset` 左侧必须是**完整 URL**（CLI 会 `new URL()` 解析出 host + path），裸路径会报 `Invalid URL`；右侧是 dev server 上的路径。
+
+### 用法二：通过 agent skill
+
+安装后，在 Claude Code 或 Codex 里用自然语言让 agent 配置规则即可（例如“给 zebra/feat-x 建一套把 cdn 上的 app.js 代理到本地 8080 的规则并启用”），agent 会按 skill 说明调用上面的 `rf` 命令。skill 全文见 [`skills/agent-forwarder-control/SKILL.md`](skills/agent-forwarder-control/SKILL.md)。
+
+### 一致性与恢复
+
+CLI 从 `${RF_STORAGE_ROOT:-.resource-forwarder}/token` 读取 Bearer token，默认访问 `http://127.0.0.1:${PORT:-5178}`（运行 `rf` 时用与服务相同的 `RF_STORAGE_ROOT`/`PORT`）。`WorkspaceSnapshot.revision` 是持久化的单调并发版本；`version` 仍然只是格式版本。所有 mutation 默认必须通过 `If-Match`/`ifRevision` 携带当前 `revision`：过期写入返回 409，CLI 会重读重算并重试一次；`--force` 是显式的 last-writer-wins 覆盖。`project up` 会先本地 dry-run、打印 DNR 规则、调用服务校验，再原子替换完整 agent-managed 子树（后续 `up` 省略的旧规则会被删除）；`project switch` 只切换同一 `switch-group:<name>` 内当前启用的兄弟。agent-managed 站点在 Options Page 中只读，generic CRUD 与导入不会修改它们。`wait-applied` 只有在扩展完成本地持久化且 Chrome 成功接受 dynamic/session 两组 DNR 更新后才算 ACK；超时会输出 `persisted but not browser-applied`。ACK 不代表 dev server、CSP、CORS 或页面运行时已经正确，请继续刷新页面并检查实际网络响应。
+
 ## 系统架构
 
 ```mermaid
@@ -256,7 +293,7 @@ flowchart LR
 
 这能避免某个站点的资源规则泄漏到无关页面。只有 `siteHosts` 为空或包含 `*` 的全局站点不会绑定 `initiatorDomains`。
 
-目标地址必须是浏览器能够访问的 HTTPS URL。
+目标地址必须是浏览器能够访问的地址；本地开发允许使用 `http://localhost` 和 `http://127.0.0.1`。
 
 ## API 转发 `api_forward`
 
@@ -418,7 +455,7 @@ pnpm --filter @resource-forwarder/extension-shell test
 - 页面侧可转发的请求体上限约为 2 MiB。
 - SSE `text/event-stream` 和超过约 4 MiB 的响应无法通过扩展消息完整缓冲。
 - JSON Merge Patch 要求上游响应是合法 JSON，否则返回代理错误。
-- 资源替换要求目标是浏览器可访问的 HTTPS 地址。
+- 资源替换要求目标是浏览器可访问的地址；本地开发允许使用 loopback HTTP 地址。
 
 ## 验证
 

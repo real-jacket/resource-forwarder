@@ -50,6 +50,7 @@ function binding(profile: ForwardProfile): RuleBinding {
 function workspace(item: RuleBinding): WorkspaceSnapshot {
   return {
     version: 1,
+    revision: 0,
     updatedAt: "2025-01-01T00:00:00.000Z",
     projects: [item.project!],
     ruleSets: [item.ruleSet!],

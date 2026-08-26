@@ -126,6 +126,57 @@ function createWorkspace(): WorkspaceSnapshot {
       ],
     };
 }
+interface AgentSubtreeFixture {
+  project: WorkspaceSnapshot["projects"][number];
+  ruleSets: WorkspaceSnapshot["ruleSets"];
+  rules: WorkspaceSnapshot["rules"];
+}
+
+function makeAgentSubtree(id: string, switchGroup: string, enabled = true): AgentSubtreeFixture {
+  const now = new Date().toISOString();
+  return {
+    project: {
+      id,
+      name: id,
+      enabled,
+      siteHosts: ["app.example.com"],
+      siteMatchPatterns: ["https://app.example.com/*"],
+      tags: ["agent-managed", `switch-group:${switchGroup}`],
+      createdAt: now,
+      updatedAt: now,
+    },
+    ruleSets: [{ id: `${id}-ruleset`, projectId: id, name: "Agent", enabled: true, ruleIds: [`${id}-rule`], createdAt: now, updatedAt: now }],
+    rules: [{
+      id: `${id}-rule`,
+      name: "Agent asset",
+      enabled: true,
+      kind: "asset_redirect" as const,
+      priority: 100,
+      match: { host: ["app.example.com"], pathGlob: "/assets/**", resourceType: ["script" as const], tabScope: { mode: "all" as const } },
+      target: { redirectUrl: "https://cdn.example.com/agent.js" },
+      tags: [],
+      createdAt: now,
+      updatedAt: now,
+    }],
+  };
+}
+
+async function seedAgentProjects(entries: Array<[string, string, boolean?]>): Promise<AgentSubtreeFixture[]> {
+  const current = await storage.readWorkspace();
+  const subtrees = entries.map(([id, group, enabled]) => makeAgentSubtree(id, group, enabled));
+  await storage.importWorkspace({
+    format: "json",
+    merge: false,
+    content: JSON.stringify({
+      ...current,
+      projects: [...current.projects, ...subtrees.map((subtree) => subtree.project)],
+      ruleSets: [...current.ruleSets, ...subtrees.flatMap((subtree) => subtree.ruleSets)],
+      rules: [...current.rules, ...subtrees.flatMap((subtree) => subtree.rules)],
+    }),
+  });
+  return subtrees;
+}
+
 
 describe("forwarder-service", () => {
   it("responds to health checks", async () => {
@@ -477,11 +528,13 @@ describe("forwarder-service", () => {
   });
 
   it("upserts a rule set via PUT /rule-sets/:id", async () => {
+    const revision = (await storage.readWorkspace()).revision;
     const now = new Date().toISOString();
     const response = await app.inject({
       method: "PUT",
       url: "/rule-sets/ruleset-tables",
       payload: {
+        ifRevision: revision,
         ruleSet: {
           id: "ruleset-tables",
           projectId: "project-1",
@@ -507,7 +560,7 @@ describe("forwarder-service", () => {
     const response = await app.inject({
       method: "PUT",
       url: `/rule-sets/${target.id}`,
-      payload: { ruleSet: { ...target, enabled: false } },
+      payload: { ruleSet: { ...target, enabled: false }, ifRevision: baseline.revision },
     });
 
     expect(response.statusCode).toBe(200);
@@ -539,6 +592,7 @@ describe("forwarder-service", () => {
   it("cascades rule deletion when DELETE /rule-sets/:id removes a rule set", async () => {
     const response = await app.inject({
       method: "DELETE",
+      headers: { "if-match": String((await storage.readWorkspace()).revision) },
       url: "/rule-sets/ruleset-1",
     });
 
@@ -552,6 +606,7 @@ describe("forwarder-service", () => {
   it("treats DELETE /rule-sets/:id for a missing id as a no-op", async () => {
     const response = await app.inject({
       method: "DELETE",
+      headers: { "if-match": String((await storage.readWorkspace()).revision) },
       url: "/rule-sets/does-not-exist",
     });
 
@@ -560,6 +615,294 @@ describe("forwarder-service", () => {
     expect(after.ruleSets).toHaveLength(1);
     expect(after.rules).toHaveLength(2);
   });
+  it("GET /workspace returns one snapshot with its revision", async () => {
+    const response = await app.inject({ method: "GET", url: "/workspace" });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.revision).toBe(body.workspace.revision);
+  });
+
+  it("replaces and shrinks an agent-managed subtree atomically", async () => {
+    const [agent] = await seedAgentProjects([["agent-one", "main"]]);
+    const baseline = await storage.readWorkspace();
+    const response = await app.inject({
+      method: "PUT",
+      url: "/projects/agent-one/subtree",
+      payload: { ...agent, ifRevision: baseline.revision },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().revision).toBe(baseline.revision + 1);
+
+    const afterUpsert = await storage.readWorkspace();
+    const shrink = {
+      ...agent,
+      ruleSets: [{ ...agent.ruleSets[0], ruleIds: [] }],
+      rules: [],
+    };
+    const shrunk = await app.inject({
+      method: "PUT",
+      url: "/projects/agent-one/subtree",
+      payload: { ...shrink, ifRevision: afterUpsert.revision },
+    });
+    expect(shrunk.statusCode).toBe(200);
+    const final = await storage.readWorkspace();
+    expect(final.rules.find((rule) => rule.id === "agent-one-rule")).toBeUndefined();
+    expect(final.ruleSets.find((ruleSet) => ruleSet.id === "agent-one-ruleset")?.ruleIds).toEqual([]);
+  });
+
+  it("rejects subtree path mismatches and cross-project ids", async () => {
+    const [agent] = await seedAgentProjects([["agent-two", "main"]]);
+    const baseline = await storage.readWorkspace();
+    const mismatch = await app.inject({
+      method: "PUT",
+      url: "/projects/wrong/subtree",
+      payload: { ...agent, ifRevision: baseline.revision },
+    });
+    expect(mismatch.statusCode).toBe(400);
+
+    const collision = await app.inject({
+      method: "PUT",
+      url: "/projects/agent-two/subtree",
+      payload: {
+        ...agent,
+        ruleSets: [{ ...agent.ruleSets[0], id: "ruleset-1" }],
+        ifRevision: baseline.revision,
+      },
+    });
+    expect(collision.statusCode).toBe(409);
+  });
+
+  it("requires guards, rejects stale writes, and supports explicit force", async () => {
+    const current = await storage.readWorkspace();
+    const project = current.projects[0];
+    const missing = await app.inject({
+      method: "PUT",
+      url: `/projects/${project.id}`,
+      payload: { project },
+    });
+    expect(missing.statusCode).toBe(428);
+
+    const first = await app.inject({
+      method: "PUT",
+      url: `/projects/${project.id}`,
+      payload: { project: { ...project, name: "Guarded" }, ifRevision: current.revision },
+    });
+    expect(first.statusCode).toBe(200);
+    const stale = await app.inject({
+      method: "PUT",
+      url: `/projects/${project.id}`,
+      payload: { project: { ...project, name: "Stale" }, ifRevision: current.revision },
+    });
+    expect(stale.statusCode).toBe(409);
+
+    const forced = await app.inject({
+      method: "PUT",
+      url: `/projects/${project.id}?force=true`,
+      payload: { project: { ...project, name: "Forced" } },
+    });
+    expect(forced.statusCode).toBe(200);
+  });
+
+  it("cascades dedicated project and rule deletes", async () => {
+    const [agent] = await seedAgentProjects([["agent-delete", "main"]]);
+    const projectRevision = (await storage.readWorkspace()).revision;
+    const deletedProject = await app.inject({
+      method: "DELETE",
+      url: "/projects/agent-delete",
+      headers: { "if-match": String(projectRevision) },
+    });
+    expect(deletedProject.statusCode).toBe(200);
+    let current = await storage.readWorkspace();
+    expect(current.projects.find((project) => project.id === agent.project.id)).toBeUndefined();
+    expect(current.ruleSets.find((ruleSet) => ruleSet.id === agent.ruleSets[0].id)).toBeUndefined();
+    expect(current.rules.find((rule) => rule.id === agent.rules[0].id)).toBeUndefined();
+
+    const [ruleProject] = await seedAgentProjects([["agent-rule-delete", "main"]]);
+    current = await storage.readWorkspace();
+    const deletedRule = await app.inject({
+      method: "DELETE",
+      url: `/rules/${ruleProject.rules[0].id}`,
+      headers: { "if-match": String(current.revision) },
+    });
+    expect(deletedRule.statusCode).toBe(200);
+    current = await storage.readWorkspace();
+    expect(current.rules.find((rule) => rule.id === ruleProject.rules[0].id)).toBeUndefined();
+    expect(current.ruleSets.find((ruleSet) => ruleSet.id === ruleProject.ruleSets[0].id)?.ruleIds).toEqual([]);
+  });
+
+  it("rejects generic writes to agent-managed projects, rules, and rule sets", async () => {
+    const [agent] = await seedAgentProjects([["agent-readonly", "main"]]);
+    const current = await storage.readWorkspace();
+    const projectPut = await app.inject({
+      method: "PUT",
+      url: "/projects/agent-readonly",
+      payload: { project: agent.project, ifRevision: current.revision },
+    });
+    expect(projectPut.statusCode).toBe(403);
+    const rulePut = await app.inject({
+      method: "PUT",
+      url: `/rules/${agent.rules[0].id}`,
+      payload: { rule: agent.rules[0], ruleSetId: agent.ruleSets[0].id, ifRevision: current.revision },
+    });
+    expect(rulePut.statusCode).toBe(403);
+    const ruleSetPut = await app.inject({
+      method: "PUT",
+      url: `/rule-sets/${agent.ruleSets[0].id}`,
+      payload: { ruleSet: agent.ruleSets[0], ifRevision: current.revision },
+    });
+    expect(ruleSetPut.statusCode).toBe(403);
+  });
+  it("rejects a generic project PUT that nests an agent-owned ruleset and rule IDs", async () => {
+    const [agent] = await seedAgentProjects([["agent-nested", "main"]]);
+    const current = await storage.readWorkspace();
+    const userProject = current.projects.find((project) => project.id === "project-1")!;
+    const response = await app.inject({
+      method: "PUT",
+      url: "/projects/project-1",
+      payload: { project: userProject, ruleSets: [agent.ruleSets[0]], ifRevision: current.revision },
+    });
+
+    expect([403, 409]).toContain(response.statusCode);
+    const unchanged = await storage.readWorkspace();
+    expect(unchanged.ruleSets.find((ruleSet) => ruleSet.id === agent.ruleSets[0].id)?.projectId).toBe(agent.project.id);
+  });
+
+  it("rejects an import whose ruleset projectId points into an agent subtree", async () => {
+    const [agent] = await seedAgentProjects([["agent-import-reference", "main"]]);
+    const current = await storage.readWorkspace();
+    const imported = createWorkspace();
+    imported.ruleSets = [{ ...agent.ruleSets[0], ruleIds: [] }];
+    imported.rules = [];
+    const response = await app.inject({
+      method: "POST",
+      url: "/import",
+      payload: { content: JSON.stringify(imported), format: "json", merge: true, ifRevision: current.revision },
+    });
+
+    expect([403, 409]).toContain(response.statusCode);
+    expect((await storage.readWorkspace()).ruleSets.find((ruleSet) => ruleSet.id === agent.ruleSets[0].id)?.projectId).toBe(agent.project.id);
+  });
+
+  it("rejects generic recreation of a deleted agent project ID", async () => {
+    const [agent] = await seedAgentProjects([["agent-tombstone", "main"]]);
+    let current = await storage.readWorkspace();
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/projects/${agent.project.id}`,
+      headers: { "if-match": String(current.revision) },
+    });
+    expect(deleted.statusCode).toBe(200);
+    current = await storage.readWorkspace();
+    expect(current.agentReservations?.projectIds).toContain(agent.project.id);
+
+    const recreated = await app.inject({
+      method: "PUT",
+      url: `/projects/${agent.project.id}`,
+      payload: {
+        project: { ...agent.project, tags: [], name: "recreated-user" },
+        ifRevision: current.revision,
+      },
+    });
+    expect([403, 409]).toContain(recreated.statusCode);
+  });
+  it("allows owner reclaim after subtree shrink but blocks generic reserved rule reuse", async () => {
+    const [agent] = await seedAgentProjects([["agent-reclaim", "main"]]);
+    let current = await storage.readWorkspace();
+    const shrink = await app.inject({
+      method: "PUT",
+      url: `/projects/${agent.project.id}/subtree`,
+      payload: {
+        ...agent,
+        ruleSets: [{ ...agent.ruleSets[0], ruleIds: [] }],
+        rules: [],
+        ifRevision: current.revision,
+      },
+    });
+    expect(shrink.statusCode).toBe(200);
+    current = await storage.readWorkspace();
+    expect(current.agentReservations?.ruleOwners?.[agent.rules[0].id]).toBe(agent.project.id);
+
+    const genericReuse = await app.inject({
+      method: "PUT",
+      url: `/rules/${agent.rules[0].id}`,
+      payload: { rule: agent.rules[0], ifRevision: current.revision },
+    });
+    expect([403, 409]).toContain(genericReuse.statusCode);
+
+    const restored = await app.inject({
+      method: "PUT",
+      url: `/projects/${agent.project.id}/subtree`,
+      payload: { ...agent, ifRevision: current.revision },
+    });
+    expect(restored.statusCode).toBe(200);
+    expect((await storage.readWorkspace()).rules.find((rule) => rule.id === agent.rules[0].id)).toBeDefined();
+  });
+
+  it("preserves agent-managed subtrees for merge and replace imports", async () => {
+    const [agent] = await seedAgentProjects([["agent-import", "main"]]);
+    let current = await storage.readWorkspace();
+    const replace = await app.inject({
+      method: "POST",
+      url: "/import",
+      payload: { content: JSON.stringify(createWorkspace()), format: "json", merge: false, ifRevision: current.revision },
+    });
+    expect(replace.statusCode).toBe(200);
+    current = await storage.readWorkspace();
+    expect(current.projects.find((project) => project.id === agent.project.id)).toBeDefined();
+
+    const merge = await app.inject({
+      method: "POST",
+      url: "/import",
+      payload: { content: JSON.stringify(createWorkspace()), format: "json", merge: true, ifRevision: current.revision },
+    });
+    expect(merge.statusCode).toBe(200);
+    current = await storage.readWorkspace();
+    expect(current.projects.find((project) => project.id === agent.project.id)).toBeDefined();
+  });
+
+  it("switches only the target switch group and rejects stale switches", async () => {
+    const [first, second, other] = await seedAgentProjects([
+      ["agent-switch-a", "main", true],
+      ["agent-switch-b", "main", false],
+      ["agent-switch-other", "other", true],
+    ]);
+    const current = await storage.readWorkspace();
+    const switched = await app.inject({
+      method: "POST",
+      url: "/projects/switch",
+      payload: { projectId: second.project.id, switchGroup: "main", enabled: true, ifRevision: current.revision },
+    });
+    expect(switched.statusCode).toBe(200);
+    const after = await storage.readWorkspace();
+    expect(after.projects.find((project) => project.id === first.project.id)?.enabled).toBe(false);
+    expect(after.projects.find((project) => project.id === second.project.id)?.enabled).toBe(true);
+    expect(after.projects.find((project) => project.id === other.project.id)?.enabled).toBe(true);
+
+    const stale = await app.inject({
+      method: "POST",
+      url: "/projects/switch",
+      payload: { projectId: first.project.id, enabled: true, ifRevision: current.revision },
+    });
+    expect(stale.statusCode).toBe(409);
+    expect((await storage.readWorkspace()).projects.find((project) => project.id === second.project.id)?.enabled).toBe(true);
+  });
+
+  it("persists monotonic applied ACKs without advancing workspace revision", async () => {
+    const current = await storage.readWorkspace();
+    const applied = await app.inject({
+      method: "POST",
+      url: "/applied",
+      payload: { revision: current.revision },
+    });
+    expect(applied.statusCode).toBe(200);
+    expect(applied.json().appliedRevision).toBe(current.revision);
+    const older = await app.inject({ method: "POST", url: "/applied", payload: { revision: 0 } });
+    expect(older.statusCode).toBe(200);
+    expect(older.json().appliedRevision).toBe(current.revision);
+    expect((await app.inject({ method: "GET", url: "/applied" })).json().appliedRevision).toBe(current.revision);
+    expect((await storage.readWorkspace()).revision).toBe(current.revision);
+  });
+
 
   it("rejects /import payloads with the wrong format enum value", async () => {
     const response = await app.inject({
@@ -1002,6 +1345,15 @@ describe("forwarder-service", () => {
           headers: {},
           resourceType: "fetch",
         },
+      });
+      expect(response.statusCode).toBe(401);
+    });
+    it("requires a bearer token on /applied", async () => {
+      const response = await secured.inject({
+        method: "POST",
+        url: "/applied",
+        headers: { host: "127.0.0.1:5178" },
+        payload: { revision: 0 },
       });
       expect(response.statusCode).toBe(401);
     });

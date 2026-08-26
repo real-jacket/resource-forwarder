@@ -5,6 +5,7 @@ import type {
   LogsResponse,
   MatchRequestPayload,
   MatchResponse,
+  RevisionGuard,
   RuleSet,
   RuntimeState,
   ServiceHealthResponse,
@@ -41,7 +42,7 @@ export type RuntimeRequest =
   | { type: "delete-project"; projectId: string }
   | { type: "upsert-rule"; payload: UpsertRulePayload }
   | { type: "delete-rule"; ruleId: string }
-  | { type: "upsert-rule-set"; payload: { ruleSet: RuleSet } }
+  | { type: "upsert-rule-set"; payload: RevisionGuard & { ruleSet: RuleSet } }
   | { type: "delete-rule-set"; ruleSetId: string }
   | { type: "get-logs"; limit?: number; projectId?: string }
   | { type: "diagnose-match"; payload: MatchRequestPayload }

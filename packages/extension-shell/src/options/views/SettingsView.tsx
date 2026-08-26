@@ -1,5 +1,5 @@
 import React from "react";
-import { matchesProjectSite } from "@resource-forwarder/rule-core";
+import { isAgentManagedProject, matchesProjectSite } from "@resource-forwarder/rule-core";
 import type { Project } from "@resource-forwarder/shared-types";
 import type { DashboardState } from "../../shared/messages.js";
 import type { AppView } from "../types.js";
@@ -380,14 +380,16 @@ function SiteRow({
   actions: SettingsViewProps["actions"];
   onToggleSelect: () => void;
 }) {
+  const readOnly = isAgentManagedProject(project);
   return (
     <div className={`site-list-item${isChecked ? " is-selected" : ""}${!project.enabled ? " is-disabled" : ""}`}>
       <label className="site-list-checkbox">
-        <input type="checkbox" checked={isChecked} onChange={onToggleSelect} />
+        <input type="checkbox" checked={isChecked} onChange={onToggleSelect} disabled={readOnly} />
       </label>
       <div className="site-list-info">
         <div className="site-list-name-row">
           <span className="site-list-name">{project.name}</span>
+          {readOnly && <span className="site-list-badge disabled">agent-managed（只读）</span>}
           {project.envLabel && <span className="site-list-badge env">{project.envLabel}</span>}
           {isDuplicate && (
             <span className="site-list-badge duplicate" title="存在同名同域名的站点">
@@ -419,12 +421,12 @@ function SiteRow({
             <path d="M3 9h18M9 21V9" />
           </svg>
         </button>
-        <button className="btn-icon" title="编辑" onClick={() => actions.openProjectModal(project)}>
+        <button className="btn-icon" title="编辑" onClick={() => actions.openProjectModal(project)} disabled={readOnly}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15">
             <path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5z" />
           </svg>
         </button>
-        <button className="btn-icon" title="复制" onClick={() => void actions.duplicateProject(project)} disabled={busy}>
+        <button className="btn-icon" title="复制" onClick={() => void actions.duplicateProject(project)} disabled={busy || readOnly}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15">
             <rect x="9" y="9" width="13" height="13" rx="2" />
             <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
@@ -434,7 +436,7 @@ function SiteRow({
           className={`btn-icon${project.enabled ? "" : " is-off"}`}
           title={project.enabled ? "停用" : "启用"}
           onClick={() => void actions.toggleProject(project)}
-          disabled={busy}
+          disabled={busy || readOnly}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15">
             <path d="M18.36 6.64A9 9 0 1 1 5.64 6.64" />
@@ -445,7 +447,7 @@ function SiteRow({
           className="btn-icon btn-icon-danger"
           title="删除"
           onClick={() => void actions.deleteProject(project)}
-          disabled={busy}
+          disabled={busy || readOnly}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15">
             <polyline points="3 6 5 6 21 6" />

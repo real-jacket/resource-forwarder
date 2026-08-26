@@ -2,11 +2,14 @@ import { mkdir, readFile, readdir, writeFile, appendFile, rename } from "node:fs
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type {
+  AppliedRevisionResponse,
   ExportWorkspaceResponse,
   HitRecord,
   ImportWorkspacePayload,
+  ProjectSubtree,
   RuleSet,
   SupportedExportFormat,
+  SwitchProjectsPayload,
   UpsertProjectPayload,
   UpsertRulePayload,
   WorkspaceSnapshot,
@@ -16,20 +19,56 @@ import {
   applyUpsertRule,
   applyUpsertRuleSet,
   createEmptyWorkspace,
+  isAgentManagedProject,
   mergeWorkspaces,
   parseWorkspace,
   planDeleteRuleSet,
+  replaceProjectSubtree,
+  reserveAgentManagedIds,
   serializeWorkspace,
+  switchProjectGroup,
 } from "@resource-forwarder/rule-core";
 import { SecretsManager } from "./secrets.js";
 
+export class RevisionRequiredError extends Error {
+  readonly statusCode = 428;
+  readonly code = "REVISION_REQUIRED";
+
+  constructor(readonly currentRevision: number) {
+    super("A revision guard is required for this mutation.");
+    this.name = "RevisionRequiredError";
+  }
+}
+
+export class RevisionConflictError extends Error {
+  readonly statusCode = 409;
+  readonly code = "REVISION_CONFLICT";
+
+  constructor(readonly currentRevision: number, readonly workspace: WorkspaceSnapshot) {
+    super(`Revision ${currentRevision} is current; the requested revision is stale.`);
+    this.name = "RevisionConflictError";
+  }
+}
+
+export class InvalidAppliedRevisionError extends Error {
+  readonly statusCode = 409;
+  readonly code = "INVALID_APPLIED_REVISION";
+
+  constructor(readonly currentRevision: number, readonly requestedRevision: number) {
+    super(`Applied revision ${requestedRevision} is not persisted at revision ${currentRevision}.`);
+    this.name = "InvalidAppliedRevisionError";
+  }
+}
+
 export class WorkspaceStorage {
   private readonly workspaceFile: string;
+  private readonly appliedRevisionFile: string;
   private readonly logsDir: string;
   private readonly secrets: SecretsManager;
 
   constructor(readonly rootDir: string) {
     this.workspaceFile = join(rootDir, "workspace.json");
+    this.appliedRevisionFile = join(rootDir, "applied-revision.json");
     this.logsDir = join(rootDir, "logs");
     this.secrets = new SecretsManager(rootDir);
   }
@@ -48,54 +87,58 @@ export class WorkspaceStorage {
     try {
       await readFile(this.workspaceFile, "utf8");
     } catch {
-      // First-time setup: write an empty snapshot directly. This cannot deadlock
-      // on the writeChain because init() runs before any handler is registered.
       await this.atomicWriteWorkspace(createEmptyWorkspace());
+    }
+
+    try {
+      await readFile(this.appliedRevisionFile, "utf8");
+    } catch {
+      await this.atomicWriteAppliedRevision(0);
     }
   }
 
   async readWorkspace(): Promise<WorkspaceSnapshot> {
     await this.init();
-    return this.readWorkspaceSafely();
+    return this.serialize(() => this.readWorkspaceSafely());
   }
 
-  /**
-   * Read + parse with crash-recovery semantics. If workspace.json was somehow
-   * truncated (process killed mid-write before tmp+rename landed in 0.x, a
-   * corrupted backup restored over the top, manual edit gone wrong) we MUST
-   * NOT 5xx every subsequent request — that turns a recoverable file issue
-   * into a service outage. Instead, snapshot the bad file aside for forensics,
-   * write a fresh empty workspace, and continue serving.
-   */
+  async readAppliedRevision(): Promise<number> {
+    await this.init();
+    return this.serialize(async () => {
+      const workspace = await this.readWorkspaceSafely();
+      return this.readAppliedRevisionSafely(workspace.revision);
+    });
+  }
+
   private async readWorkspaceSafely(): Promise<WorkspaceSnapshot> {
     let raw: string;
     try {
       raw = await readFile(this.workspaceFile, "utf8");
     } catch (error) {
-      // ENOENT after init() is unexpected (init creates the file) but recover
-      // gracefully anyway — the next mutation will recreate it.
       if (isNodeError(error) && error.code !== "ENOENT") throw error;
       return createEmptyWorkspace();
     }
 
     try {
       const parsed = parseWorkspace(raw, "json");
-      // Hydrate `secret:<id>` refs back to cleartext for in-process callers.
-      // The proxy + matcher always see the real Authorization values; the
-      // redaction is purely a disk-format concern.
-      return await this.secrets.hydrateWorkspace(parsed);
+      const hydrated = await this.secrets.hydrateWorkspace(parsed);
+      let persistedRevision: unknown;
+      try {
+        persistedRevision = (JSON.parse(raw) as { revision?: unknown }).revision;
+      } catch {
+        persistedRevision = undefined;
+      }
+      if (persistedRevision !== parsed.revision) await this.atomicWriteWorkspace(hydrated);
+      return hydrated;
     } catch (parseError) {
       const quarantineFile = `${this.workspaceFile}.corrupt.${Date.now()}`;
       try {
         await writeFile(quarantineFile, raw, "utf8");
       } catch {
-        // If we can't even write the quarantine file the disk is hopeless —
-        // there's nothing useful to do but still return a usable snapshot.
+        // Preserve the usable in-memory fallback even if quarantine fails.
       }
       const fresh = createEmptyWorkspace();
       await this.atomicWriteWorkspace(fresh);
-      // Surface this loudly so an operator notices in the service log; the
-      // route handlers still see a valid workspace and won't 5xx.
       // eslint-disable-next-line no-console
       console.error(
         `[forwarder-service] workspace.json was unparseable; quarantined to ${quarantineFile} and reset to empty.`,
@@ -105,22 +148,73 @@ export class WorkspaceStorage {
     }
   }
 
-  async writeWorkspace(workspace: WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
+  async applyMutation(
+    ifRevision: number | undefined,
+    force: boolean,
+    mutator: (workspace: WorkspaceSnapshot) => WorkspaceSnapshot | Promise<WorkspaceSnapshot>,
+  ): Promise<WorkspaceSnapshot> {
     await this.init();
-    const normalized: WorkspaceSnapshot = {
-      ...workspace,
-      updatedAt: new Date().toISOString(),
-    };
-    // Two concurrent route handlers (e.g. PUT /projects + POST /import) hit the
-    // same file. Without serialization they read the same baseline and one
-    // commit silently disappears. Funneling through writeChain guarantees
-    // last-write-wins reflects only sequential state transitions.
     return this.serialize(async () => {
-      await this.atomicWriteWorkspace(normalized);
-      return normalized;
+      const current = await this.readWorkspaceSafely();
+      this.assertRevisionGuard(current, ifRevision, force);
+      const mutated = await mutator(current);
+      const next: WorkspaceSnapshot = {
+        ...mutated,
+        version: 1,
+        revision: current.revision + 1,
+        updatedAt: new Date().toISOString(),
+      };
+      await this.atomicWriteWorkspace(next);
+      return next;
     });
   }
 
+  async replaceProjectSubtree(
+    projectId: string,
+    subtree: ProjectSubtree,
+    ifRevision: number | undefined,
+    force: boolean,
+  ): Promise<WorkspaceSnapshot> {
+    if (subtree.project.id !== projectId) throw new Error("Project id mismatch.");
+    return this.applyMutation(ifRevision, force, (workspace) => replaceProjectSubtree(workspace, subtree));
+  }
+
+  async switchProjects(
+    payload: SwitchProjectsPayload,
+    ifRevision: number | undefined,
+    force: boolean,
+  ): Promise<WorkspaceSnapshot> {
+    return this.applyMutation(ifRevision, force, (workspace) => switchProjectGroup(workspace, payload.projectId, payload.enabled));
+  }
+
+  async deleteProject(projectId: string, ifRevision: number | undefined, force: boolean): Promise<WorkspaceSnapshot> {
+    return this.applyMutation(ifRevision, force, (workspace) => deleteProjectInWorkspace(workspace, projectId));
+  }
+
+  async deleteRule(ruleId: string, ifRevision: number | undefined, force: boolean): Promise<WorkspaceSnapshot> {
+    return this.applyMutation(ifRevision, force, (workspace) => deleteRuleInWorkspace(workspace, ruleId));
+  }
+
+  async recordAppliedRevision(revision: number): Promise<AppliedRevisionResponse> {
+    await this.init();
+    return this.serialize(async () => {
+      const workspace = await this.readWorkspaceSafely();
+      if (!Number.isInteger(revision) || revision < 0 || revision > workspace.revision) {
+        throw new InvalidAppliedRevisionError(workspace.revision, revision);
+      }
+      const current = await this.readAppliedRevisionSafely(workspace.revision);
+      const appliedRevision = Math.max(current, revision);
+      if (appliedRevision !== current) await this.atomicWriteAppliedRevision(appliedRevision);
+      return { appliedRevision };
+    });
+  }
+
+  async writeWorkspace(workspace: WorkspaceSnapshot, ifRevision?: number, force = false): Promise<WorkspaceSnapshot> {
+    return this.applyMutation(ifRevision, force, () => workspace);
+  }
+
+  // Legacy direct storage helpers remain for internal callers and tests. HTTP
+  // mutation routes use applyMutation so they cannot bypass CAS.
   async upsertProject(payload: UpsertProjectPayload): Promise<WorkspaceSnapshot> {
     return this.mutateWorkspace((workspace) => applyUpsertProject(workspace, payload));
   }
@@ -139,11 +233,9 @@ export class WorkspaceStorage {
 
   async importWorkspace(payload: ImportWorkspacePayload): Promise<WorkspaceSnapshot> {
     const imported = parseWorkspace(payload.content, payload.format);
-    if (!payload.merge) {
-      return this.writeWorkspace(imported);
-    }
-
-    return this.mutateWorkspace((workspace) => mergeWorkspaces(workspace, imported));
+    const force = payload.ifRevision === undefined;
+    if (!payload.merge) return this.writeWorkspace(imported, payload.ifRevision, force);
+    return this.applyMutation(payload.ifRevision, force, (workspace) => mergeWorkspaces(workspace, imported));
   }
 
   async appendHits(records: Array<Omit<HitRecord, "id" | "occurredAt">>): Promise<HitRecord[]> {
@@ -153,8 +245,6 @@ export class WorkspaceStorage {
       id: randomUUID(),
       occurredAt: new Date().toISOString(),
     }));
-    // Group by daily file so we minimise filesystem syscalls when the queue
-    // straddles midnight (rare, but cheap to guard against).
     const grouped = new Map<string, HitRecord[]>();
     for (const entry of enriched) {
       const key = entry.occurredAt.slice(0, 10);
@@ -176,6 +266,7 @@ export class WorkspaceStorage {
     const allowedRuleIds = new Set(scopedRuleSets.flatMap((ruleSet) => ruleSet.ruleIds));
     const scopedWorkspace: WorkspaceSnapshot = {
       version: workspace.version,
+      revision: workspace.revision,
       updatedAt: workspace.updatedAt,
       projects: workspace.projects.filter((project) => project.id === projectId),
       ruleSets: scopedRuleSets,
@@ -195,8 +286,6 @@ export class WorkspaceStorage {
 
   async listLogs(limit = 100, projectId?: string): Promise<HitRecord[]> {
     await this.init();
-    // Clamp to a hard upper bound so a malicious or accidental ?limit=10000000
-    // can't force the service to slurp every JSONL file into memory.
     const effectiveLimit = Math.max(0, Math.min(limit, MAX_LOGS_PAGE_SIZE));
     if (effectiveLimit === 0) return [];
 
@@ -206,8 +295,6 @@ export class WorkspaceStorage {
     for (const name of names) {
       const raw = await readFile(join(this.logsDir, name), "utf8");
       const entries: HitRecord[] = [];
-      // Iterate from the tail so we can early-exit before parsing the whole
-      // day. JSONL is append-only so newest records sit at the bottom.
       const lines = raw.split("\n");
       for (let i = lines.length - 1; i >= 0; i -= 1) {
         const line = lines[i];
@@ -229,24 +316,36 @@ export class WorkspaceStorage {
   }
 
   private async mutateWorkspace(mutator: (workspace: WorkspaceSnapshot) => WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
-    await this.init();
-    return this.serialize(async () => {
-      // Read inside the serialize block so we observe the result of any
-      // previously serialized write — otherwise two concurrent mutateWorkspace
-      // calls can both read the same baseline and the second would clobber
-      // the first. readWorkspaceSafely also handles a corrupted file by
-      // resetting to empty, which is what we want for a fresh mutate cycle.
-      const current = await this.readWorkspaceSafely();
-      const next: WorkspaceSnapshot = {
-        ...mutator(current),
-        updatedAt: new Date().toISOString(),
-      };
-      await this.atomicWriteWorkspace(next);
-      return next;
-    });
+    return this.applyMutation(undefined, true, mutator);
   }
 
-  // ── Internal serialization & atomic IO ────────────────────────────────
+  private assertRevisionGuard(workspace: WorkspaceSnapshot, ifRevision: number | undefined, force: boolean): void {
+    if (force) return;
+    if (typeof ifRevision !== "number" || !Number.isInteger(ifRevision) || ifRevision < 0) {
+      throw new RevisionRequiredError(workspace.revision);
+    }
+    if (ifRevision !== workspace.revision) {
+      throw new RevisionConflictError(workspace.revision, workspace);
+    }
+  }
+
+  private async readAppliedRevisionSafely(currentRevision: number): Promise<number> {
+    let raw: string;
+    try {
+      raw = await readFile(this.appliedRevisionFile, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return 0;
+      throw error;
+    }
+    try {
+      const parsed = JSON.parse(raw) as { appliedRevision?: unknown };
+      const revision = parsed.appliedRevision;
+      if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 0) return 0;
+      return Math.min(revision, currentRevision);
+    } catch {
+      return 0;
+    }
+  }
 
   private initPromise: Promise<void> | undefined;
   private writeChain: Promise<unknown> = Promise.resolve();
@@ -257,20 +356,51 @@ export class WorkspaceStorage {
     return next;
   }
 
-  /**
-   * Persist the workspace snapshot via tmp + rename so a crash or process kill
-   * mid-write cannot leave behind a half-written workspace.json. POSIX rename
-   * is atomic on the same filesystem, which all sensible storage layouts are.
-   */
   private async atomicWriteWorkspace(workspace: WorkspaceSnapshot): Promise<void> {
-    // Move sensitive header values out to secrets.json before serialising.
-    // This must happen INSIDE atomicWriteWorkspace so the redaction always
-    // matches the bytes we land on disk — no caller can accidentally bypass it.
     const redacted = await this.secrets.redactWorkspace(workspace);
     const tmp = `${this.workspaceFile}.${process.pid}.tmp`;
     await writeFile(tmp, serializeWorkspace(redacted, "json"), "utf8");
     await rename(tmp, this.workspaceFile);
   }
+
+  private async atomicWriteAppliedRevision(revision: number): Promise<void> {
+    const tmp = `${this.appliedRevisionFile}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify({ appliedRevision: revision }, null, 2), "utf8");
+    await rename(tmp, this.appliedRevisionFile);
+  }
+}
+function deleteProjectInWorkspace(workspace: WorkspaceSnapshot, projectId: string): WorkspaceSnapshot {
+  const project = workspace.projects.find((candidate) => candidate.id === projectId);
+  const ruleSetIds = new Set(workspace.ruleSets.filter((ruleSet) => ruleSet.projectId === projectId).map((ruleSet) => ruleSet.id));
+  const ruleIds = new Set(
+    workspace.ruleSets.filter((ruleSet) => ruleSetIds.has(ruleSet.id)).flatMap((ruleSet) => ruleSet.ruleIds),
+  );
+  const next: WorkspaceSnapshot = {
+    ...workspace,
+    projects: workspace.projects.filter((candidate) => candidate.id !== projectId),
+    ruleSets: workspace.ruleSets.filter((ruleSet) => !ruleSetIds.has(ruleSet.id)),
+    rules: workspace.rules.filter((rule) => !ruleIds.has(rule.id)),
+  };
+  return project && isAgentManagedProject(project)
+    ? reserveAgentManagedIds(next, [projectId], [...ruleSetIds], [...ruleIds], projectId)
+    : next;
+}
+
+function deleteRuleInWorkspace(workspace: WorkspaceSnapshot, ruleId: string): WorkspaceSnapshot {
+  const agentOwnerId = workspace.ruleSets.find((ruleSet) => {
+    if (!ruleSet.ruleIds.includes(ruleId)) return false;
+    const project = workspace.projects.find((candidate) => candidate.id === ruleSet.projectId);
+    return Boolean(project && isAgentManagedProject(project));
+  })?.projectId;
+  const next: WorkspaceSnapshot = {
+    ...workspace,
+    ruleSets: workspace.ruleSets.map((ruleSet) => ({
+      ...ruleSet,
+      ruleIds: ruleSet.ruleIds.filter((id) => id !== ruleId),
+    })),
+    rules: workspace.rules.filter((rule) => rule.id !== ruleId),
+  };
+  return agentOwnerId ? reserveAgentManagedIds(next, [], [], [ruleId], agentOwnerId) : next;
 }
 
 const MAX_LOGS_PAGE_SIZE = 1000;

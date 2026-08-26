@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "rf": "dist/rf.js"
+  },
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
@@ -16,6 +19,7 @@
     "@resource-forwarder/forward-core": "workspace:*",
     "@resource-forwarder/rule-core": "workspace:*",
     "@resource-forwarder/shared-types": "workspace:*",
+    "yaml": "^2.7.0",
     "fastify": "^5.2.1",
     "pino": "^10.3.1"
   },

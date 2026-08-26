@@ -18,12 +18,14 @@ const TEXT_ENCODABLE_TYPES = new Set([
 export function createEmptyWorkspace(): WorkspaceSnapshot {
   return {
     version: 1,
+    revision: 0,
     updatedAt: new Date().toISOString(),
     projects: [],
     ruleSets: [],
     rules: [],
   };
 }
+
 
 export function detectFormat(content: string): SupportedExportFormat {
   const trimmed = content.trim();
@@ -68,6 +70,7 @@ export function assertWorkspace(value: unknown): WorkspaceSnapshot {
 
   return {
     version: typeof candidate.version === "number" ? candidate.version : 1,
+    revision: Number.isInteger(candidate.revision) && candidate.revision >= 0 ? candidate.revision : 0,
     updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : new Date().toISOString(),
     projects: candidate.projects.map((project) => {
       const tags = Array.isArray(project.tags) ? project.tags : [];
@@ -96,6 +99,21 @@ export function assertWorkspace(value: unknown): WorkspaceSnapshot {
         pathGlob: rule.match?.pathGlob || "**",
       },
     })),
+    ...(candidate.agentReservations
+      ? {
+          agentReservations: {
+            projectIds: Array.isArray(candidate.agentReservations.projectIds) ? candidate.agentReservations.projectIds : [],
+            ruleSetIds: Array.isArray(candidate.agentReservations.ruleSetIds) ? candidate.agentReservations.ruleSetIds : [],
+            ruleIds: Array.isArray(candidate.agentReservations.ruleIds) ? candidate.agentReservations.ruleIds : [],
+            ...(candidate.agentReservations.ruleSetOwners && typeof candidate.agentReservations.ruleSetOwners === "object"
+              ? { ruleSetOwners: candidate.agentReservations.ruleSetOwners }
+              : {}),
+            ...(candidate.agentReservations.ruleOwners && typeof candidate.agentReservations.ruleOwners === "object"
+              ? { ruleOwners: candidate.agentReservations.ruleOwners }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -165,6 +183,7 @@ export function trimWorkspaceForUrl(
 
   return {
     version: workspace.version,
+    revision: workspace.revision,
     updatedAt: workspace.updatedAt,
     projects: workspace.projects.filter((project) => allowedProjectIds.has(project.id)),
     ruleSets: allowedRuleSets,

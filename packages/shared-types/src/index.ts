@@ -171,13 +171,58 @@ export interface Rule {
   updatedAt: string;
 }
 
+export interface AgentIdReservations {
+  projectIds: string[];
+  ruleSetIds: string[];
+  ruleIds: string[];
+  ruleSetOwners?: Record<string, string>;
+  ruleOwners?: Record<string, string>;
+}
+
 export interface WorkspaceSnapshot {
   version: number;
+  revision: number;
   updatedAt: string;
   projects: Project[];
   ruleSets: RuleSet[];
   rules: Rule[];
+  agentReservations?: AgentIdReservations;
 }
+
+export interface RevisionGuard {
+  /** JSON equivalent of the HTTP `If-Match` revision guard. */
+  ifRevision?: number;
+}
+
+export interface ProjectSubtree {
+  project: Project;
+  ruleSets: RuleSet[];
+  rules: Rule[];
+}
+
+export interface SubtreePayload extends ProjectSubtree, RevisionGuard {}
+
+export interface SwitchProjectsPayload extends RevisionGuard {
+  projectId: string;
+  switchGroup?: string;
+  enabled: boolean;
+}
+
+export interface AppliedRevisionPayload {
+  revision: number;
+}
+
+export interface AppliedRevisionResponse {
+  appliedRevision: number;
+}
+export interface MutationResponse {
+  workspace: WorkspaceSnapshot;
+  revision: number;
+  warnings: string[];
+}
+
+export type WorkspaceMutationResponse = MutationResponse;
+
 
 export interface RuleBinding {
   project?: Project;
@@ -241,17 +286,17 @@ export interface ForwardResponsePayload {
   matchedRuleId?: string;
 }
 
-export interface UpsertProjectPayload {
+export interface UpsertProjectPayload extends RevisionGuard {
   project: Project;
   ruleSets?: RuleSet[];
 }
 
-export interface UpsertRulePayload {
+export interface UpsertRulePayload extends RevisionGuard {
   rule: Rule;
   ruleSetId?: string;
 }
 
-export interface ImportWorkspacePayload {
+export interface ImportWorkspacePayload extends RevisionGuard {
   format?: SupportedExportFormat;
   content: string;
   merge?: boolean;
@@ -277,11 +322,13 @@ export interface ProjectsResponse {
   projects: Project[];
   ruleSets: RuleSet[];
   updatedAt: string;
+  revision: number;
 }
 
 export interface RulesResponse {
   rules: Rule[];
   updatedAt: string;
+  revision: number;
 }
 
 export interface LogsResponse {
@@ -290,6 +337,7 @@ export interface LogsResponse {
 
 export interface ServiceWorkspaceResponse {
   workspace: WorkspaceSnapshot;
+  revision: number;
 }
 
 export interface SiteContextPayload {
@@ -304,6 +352,7 @@ export interface RuntimeState {
   serviceUrl: string;
   health: ServiceHealthResponse | null;
   workspace: WorkspaceSnapshot;
+  serviceRevision?: number;
 }
 
 // --- AI-facing analysis endpoints (/match, /rules/validate, /schema) ---

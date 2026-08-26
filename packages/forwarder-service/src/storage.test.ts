@@ -137,4 +137,92 @@ describe("WorkspaceStorage", () => {
     const restored = await storage.readWorkspace();
     expect(restored.rules[0]?.target.forwardProfile?.headers?.Authorization).toBe("Bearer super-secret-value");
   });
+  it("initializes revision at zero and migrates a legacy workspace", async () => {
+    await writeFile(join(tempRoot, "workspace.json"), JSON.stringify({
+      version: 1,
+      updatedAt: ts,
+      projects: [],
+      ruleSets: [],
+      rules: [],
+    }), "utf8");
+
+    const migrated = await storage.readWorkspace();
+    expect(migrated.revision).toBe(0);
+    expect(migrated.version).toBe(1);
+    const persisted = JSON.parse(await readFile(join(tempRoot, "workspace.json"))) as { revision: number };
+    expect(persisted.revision).toBe(0);
+  });
+
+  it("increments revision exactly once for each serialized mutation", async () => {
+    const first = await storage.applyMutation(0, false, (workspace) => ({
+      ...workspace,
+      projects: [{ id: "p1", name: "One", enabled: true, siteHosts: [], tags: [], createdAt: ts, updatedAt: ts }],
+    }));
+    const second = await storage.applyMutation(first.revision, false, (workspace) => ({
+      ...workspace,
+      projects: [...workspace.projects, { id: "p2", name: "Two", enabled: true, siteHosts: [], tags: [], createdAt: ts, updatedAt: ts }],
+    }));
+
+    expect(first.revision).toBe(1);
+    expect(second.revision).toBe(2);
+    expect((await storage.readWorkspace()).revision).toBe(2);
+  });
+
+  it("rejects missing ifRevision unless force is true", async () => {
+    await expect(storage.applyMutation(undefined, false, (workspace) => workspace)).rejects.toMatchObject({ statusCode: 428 });
+
+    const forced = await storage.applyMutation(undefined, true, (workspace) => workspace);
+    expect(forced.revision).toBe(1);
+  });
+
+  it("rejects stale ifRevision without writing and returns currentRevision", async () => {
+    const current = await storage.applyMutation(0, false, (workspace) => ({ ...workspace, updatedAt: ts }));
+
+    await expect(storage.applyMutation(0, false, (workspace) => ({
+      ...workspace,
+      projects: [{ id: "stale", name: "Stale", enabled: true, siteHosts: [], tags: [], createdAt: ts, updatedAt: ts }],
+    }))).rejects.toMatchObject({ statusCode: 409, currentRevision: current.revision });
+
+    const unchanged = await storage.readWorkspace();
+    expect(unchanged.revision).toBe(1);
+    expect(unchanged.projects).toEqual([]);
+  });
+
+  it("serializes concurrent CAS mutations without lost updates", async () => {
+    const results = await Promise.allSettled([
+      storage.applyMutation(0, false, (workspace) => ({
+        ...workspace,
+        projects: [{ id: "a", name: "A", enabled: true, siteHosts: [], tags: [], createdAt: ts, updatedAt: ts }],
+      })),
+      storage.applyMutation(0, false, (workspace) => ({
+        ...workspace,
+        projects: [{ id: "b", name: "B", enabled: true, siteHosts: [], tags: [], createdAt: ts, updatedAt: ts }],
+      })),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const final = await storage.readWorkspace();
+    expect(final.revision).toBe(1);
+    expect(final.projects).toHaveLength(1);
+  });
+
+  it("persists and reloads applied revision without advancing workspace revision", async () => {
+    const written = await storage.applyMutation(0, false, (workspace) => workspace);
+    expect((await storage.recordAppliedRevision(written.revision)).appliedRevision).toBe(1);
+    expect(await storage.readAppliedRevision()).toBe(1);
+
+    const reloaded = new WorkspaceStorage(tempRoot);
+    expect(await reloaded.readAppliedRevision()).toBe(1);
+    expect((await reloaded.recordAppliedRevision(0)).appliedRevision).toBe(1);
+    expect((await reloaded.readWorkspace()).revision).toBe(1);
+  });
+
+  it("rejects ACKs above the current revision and keeps reads ACK-only", async () => {
+    expect((await storage.readWorkspace()).revision).toBe(0);
+    expect((await storage.recordAppliedRevision(0)).appliedRevision).toBe(0);
+    expect((await storage.readWorkspace()).revision).toBe(0);
+
+    await expect(storage.recordAppliedRevision(1)).rejects.toMatchObject({ statusCode: 409 });
+    expect((await storage.readWorkspace()).revision).toBe(0);
+  });
 });
