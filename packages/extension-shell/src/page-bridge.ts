@@ -672,7 +672,7 @@ function buildContext(
     url: url.toString(),
     pageUrl: state.currentUrl,
     method,
-    host: url.host,
+    host: url.hostname,
     pathname: url.pathname,
     query: collectQueryValues(url.searchParams),
     tabId: state.tabId,
