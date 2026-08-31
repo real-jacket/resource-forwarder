@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Rule, WorkspaceSnapshot } from "@resource-forwarder/shared-types";
-import { WINDOW_SOURCE } from "./shared/constants.js";
+import { SERVICE_AUTH_REQUIRED_SENTINEL, WINDOW_SOURCE } from "./shared/constants.js";
 
 interface FakeBridgePort {
   onmessage: ((event: MessageEvent) => void) | null;
@@ -154,6 +154,16 @@ function sendProxyResponse(port: FakeBridgePort, id: string, body = "ok"): void 
   } as MessageEvent);
 }
 
+function sendProxyError(port: FakeBridgePort, id: string, error: string): void {
+  port.onmessage?.({
+    data: {
+      source: WINDOW_SOURCE,
+      type: "proxy-error",
+      payload: { id, error },
+    },
+  } as MessageEvent);
+}
+
 describe("page bridge patch lifecycle", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -175,6 +185,24 @@ describe("page bridge patch lifecycle", () => {
 
     expect(window.fetch).not.toBe(globals.nativeFetch);
     expect(globals.xhrPrototype.open).not.toBe(globals.nativeOpen);
+  });
+
+  it("falls back to native fetch when the local service rejects its token", async () => {
+    const globals = installPageGlobals();
+    const port = await connectBridge(globals);
+    sendConfig(port, workspace([apiRule]));
+
+    const responsePromise = window.fetch("https://example.com/api/users");
+    await Promise.resolve();
+    await Promise.resolve();
+    const request = vi.mocked(port.postMessage).mock.calls
+      .map(([message]) => message as { type?: string; payload?: { id: string } })
+      .find((message) => message.type === "proxy-request");
+    sendProxyError(port, request!.payload!.id, SERVICE_AUTH_REQUIRED_SENTINEL);
+
+    const response = await responsePromise;
+    expect(await response.text()).toBe("native");
+    expect(globals.nativeFetch).toHaveBeenCalledTimes(1);
   });
 
   it("restores native methods after leaving scope", async () => {

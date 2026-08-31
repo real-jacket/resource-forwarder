@@ -24,7 +24,10 @@ while [ $# -gt 0 ]; do
     --claude-only) DO_CODEX=0 ;;
     --codex-only) DO_CLAUDE=0 ;;
     --uninstall) DO_UNINSTALL=1 ;;
-    --bin-dir) BIN_DIR="$2"; shift ;;
+    --bin-dir)
+      [ $# -ge 2 ] || { echo "--bin-dir requires a directory" >&2; exit 2; }
+      BIN_DIR="$2"; shift
+      ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
@@ -34,7 +37,7 @@ log() { printf '\033[1;34m[agent-control]\033[0m %s\n' "$*"; }
 
 install_skill() {
   local dest_root="$1" label="$2"
-  [ -d "$dest_root" ] || { log "skip $label (no $dest_root)"; return; }
+  mkdir -p "$dest_root"
   rm -rf "${dest_root:?}/$SKILL_NAME"
   cp -R "$SKILL_SRC" "$dest_root/$SKILL_NAME"
   log "installed skill → $dest_root/$SKILL_NAME"
@@ -42,8 +45,9 @@ install_skill() {
 
 if [ "$DO_UNINSTALL" = 1 ]; then
   rm -f "$BIN_DIR/rf"
-  rm -rf "$HOME/.claude/skills/$SKILL_NAME" "$HOME/.codex/skills/$SKILL_NAME"
-  log "uninstalled rf link and skill from Claude/Codex"
+  [ "$DO_CLAUDE" = 1 ] && rm -rf "$HOME/.claude/skills/$SKILL_NAME"
+  [ "$DO_CODEX" = 1 ] && rm -rf "$HOME/.codex/skills/$SKILL_NAME"
+  log "uninstalled rf wrapper and selected Claude/Codex skill targets"
   exit 0
 fi
 
@@ -59,10 +63,13 @@ fi
 mkdir -p "$BIN_DIR"
 cat > "$BIN_DIR/rf" <<EOF
 #!/bin/sh
+if [ -z "\${RF_STORAGE_ROOT:-}" ]; then
+  export RF_STORAGE_ROOT="$REPO_ROOT/packages/forwarder-service/.resource-forwarder"
+fi
 exec node "$RF_ENTRY" "\$@"
 EOF
 chmod +x "$BIN_DIR/rf"
-log "installed rf wrapper → $BIN_DIR/rf  (execs $RF_ENTRY)"
+log "installed rf wrapper → $BIN_DIR/rf  (execs $RF_ENTRY; defaults RF_STORAGE_ROOT to $REPO_ROOT/packages/forwarder-service/.resource-forwarder)"
 case ":$PATH:" in
   *":$BIN_DIR:"*) : ;;
   *) log "WARNING: $BIN_DIR is not on PATH — add it to your shell profile." ;;
@@ -73,6 +80,6 @@ esac
 
 log "done. Next:"
 log "  1) start the service:  pnpm dev:service   (from $REPO_ROOT)"
-log "  2) paste \${RF_STORAGE_ROOT:-.resource-forwarder}/token into the extension Settings page"
+log "  2) open the token file path printed by the service and paste its contents into extension Settings"
 log "  3) verify CLI:         rf service status"
 log "  4) restart Claude Code / Codex so the '$SKILL_NAME' skill is loaded"

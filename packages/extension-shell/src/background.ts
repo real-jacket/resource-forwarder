@@ -38,8 +38,8 @@ import {
   type PendingDeletions,
 } from "@resource-forwarder/rule-core";
 import { needsPageBridge } from "./page-bridge-policy.js";
-import type { DashboardState, RuntimeRequest } from "./shared/messages.js";
-import { DEFAULT_SERVICE_URL, SERVICE_OFFLINE_SENTINEL, STORAGE_KEYS } from "./shared/constants.js";
+import type { DashboardState, RefreshSiteContextAck, RuntimeRequest } from "./shared/messages.js";
+import { DEFAULT_SERVICE_URL, SERVICE_AUTH_REQUIRED_SENTINEL, SERVICE_OFFLINE_SENTINEL, STORAGE_KEYS } from "./shared/constants.js";
 import { buildDynamicRuleUpdatePlan, buildScopedDnrRuleGroups } from "./dnr.js";
 import { normalizeProxyRequestError } from "./shared/service-errors.js";
 import { buildCookieHeader, shouldAttachBrowserCookies } from "./cookie-forwarding.js";
@@ -99,7 +99,7 @@ chrome.runtime.onStartup.addListener(() => {
   void onWorkerWake("startup");
 });
 
-void chrome.alarms.create(RECONCILE_ALARM, { periodInMinutes: 1 });
+void chrome.alarms.create(RECONCILE_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === RECONCILE_ALARM) {
     void onWorkerWake("alarm");
@@ -360,10 +360,10 @@ async function clearPendingPushOps(completed: string[]): Promise<void> {
 }
 
 /**
- * Persist workspace, update runtime state, apply both DNR buckets, then notify
- * tabs. A service revision is ACKed only when local persistence succeeded and
- * applyDynamicRules resolved; offline/local-only snapshots and either DNR
- * failure never produce a browser-applied ACK.
+ * Persist workspace, update runtime state, apply both DNR buckets, then refresh
+ * tabs. A service revision is ACKed only when local persistence, DNR, and every
+ * reachable content-script refresh completed; offline/local-only snapshots or
+ * any required apply failure never produce a browser-applied ACK.
  */
 async function commitWorkspace(
   workspace: WorkspaceSnapshot,
@@ -408,6 +408,13 @@ async function commitWorkspace(
     throw error;
   }
 
+  try {
+    await notifyTabsToRefresh();
+  } catch (error) {
+    runtimeWarnings.push(`页面规则刷新失败：${error instanceof Error ? error.message : String(error)}`);
+    throw error;
+  }
+
   if (health && ackRevision !== undefined) {
     try {
       await postAppliedRevision(serviceUrl, ackRevision);
@@ -415,7 +422,6 @@ async function commitWorkspace(
       runtimeWarnings.push(`浏览器应用 ACK 发送失败：${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  await notifyTabsToRefresh();
   return { ...runtimeState, warnings: runtimeWarnings };
 }
 
@@ -908,6 +914,9 @@ async function proxyRequest(requestId: string, payload: ForwardRequestPayload) {
       signal: controller.signal,
     });
 
+    if (response.status === 401) {
+      throw new Error(SERVICE_AUTH_REQUIRED_SENTINEL);
+    }
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: response.statusText }));
       throw new Error(error.message || `Forward request failed with ${response.status}.`);
@@ -1350,7 +1359,32 @@ async function notifyTabsToRefresh(): Promise<void> {
   await Promise.all(
     tabs
       .filter((tab) => typeof tab.id === "number" && typeof tab.url === "string" && /^https?:/.test(tab.url))
-      .map((tab) => chrome.tabs.sendMessage(tab.id!, { type: "refresh-site-context" }).catch(() => undefined)),
+      .map(async (tab) => {
+        let frames: chrome.webNavigation.GetAllFrameResultDetails[] | null;
+        try {
+          frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id! });
+        } catch {
+          // The tab disappeared while it was being enumerated.
+          return;
+        }
+        await Promise.all((frames ?? []).map(async (frame) => {
+          let ack: RefreshSiteContextAck | undefined;
+          try {
+            ack = await chrome.tabs.sendMessage(
+              tab.id!,
+              { type: "refresh-site-context" },
+              { frameId: frame.frameId },
+            ) as RefreshSiteContextAck | undefined;
+          } catch {
+            // Frames opened before the extension loaded (or already unloading)
+            // may have no receiver. Their next document load pulls latest config.
+            return;
+          }
+          if (!ack?.ok) {
+            throw new Error(ack?.error ?? `Tab ${tab.id} frame ${frame.frameId} did not acknowledge its rule refresh.`);
+          }
+        }));
+      }),
   );
 }
 

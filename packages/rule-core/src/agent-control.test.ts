@@ -111,12 +111,15 @@ describe("agent control", () => {
   });
 
   it("switches only enabled siblings in the same group", () => {
-    const next = switchProjectGroup(workspace(), "p2", true);
+    const current = workspace();
+    current.projects.push(project("user-main", ["switch-group:main"]));
+    const next = switchProjectGroup(current, "p2", true);
 
     expect(next.projects.find((item) => item.id === "p1")?.enabled).toBe(false);
     expect(next.projects.find((item) => item.id === "p2")?.enabled).toBe(true);
     expect(next.projects.find((item) => item.id === "p3")?.enabled).toBe(true);
     expect(next.projects.find((item) => item.id === "user")?.enabled).toBe(true);
+    expect(next.projects.find((item) => item.id === "user-main")?.enabled).toBe(true);
   });
 
   it("treats a project with no switch group as an independent toggle", () => {

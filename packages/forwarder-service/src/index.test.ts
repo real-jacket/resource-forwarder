@@ -703,31 +703,107 @@ describe("forwarder-service", () => {
     expect(forced.statusCode).toBe(200);
   });
 
-  it("cascades dedicated project and rule deletes", async () => {
+  it("cascades dedicated agent subtree deletes", async () => {
     const [agent] = await seedAgentProjects([["agent-delete", "main"]]);
     const projectRevision = (await storage.readWorkspace()).revision;
     const deletedProject = await app.inject({
       method: "DELETE",
-      url: "/projects/agent-delete",
+      url: "/projects/agent-delete/subtree",
       headers: { "if-match": String(projectRevision) },
     });
     expect(deletedProject.statusCode).toBe(200);
-    let current = await storage.readWorkspace();
+    const current = await storage.readWorkspace();
     expect(current.projects.find((project) => project.id === agent.project.id)).toBeUndefined();
     expect(current.ruleSets.find((ruleSet) => ruleSet.id === agent.ruleSets[0].id)).toBeUndefined();
     expect(current.rules.find((rule) => rule.id === agent.rules[0].id)).toBeUndefined();
+    expect(current.agentReservations?.projectIds).toContain(agent.project.id);
+    expect(current.agentReservations?.ruleSetOwners?.[agent.ruleSets[0].id]).toBe(agent.project.id);
+    expect(current.agentReservations?.ruleOwners?.[agent.rules[0].id]).toBe(agent.project.id);
+  });
 
-    const [ruleProject] = await seedAgentProjects([["agent-rule-delete", "main"]]);
-    current = await storage.readWorkspace();
+  it("requires agent ownership and CAS for dedicated subtree deletes", async () => {
+    const [agent] = await seedAgentProjects([["agent-delete-guard", "main"]]);
+    const current = await storage.readWorkspace();
+
+    const missingGuard = await app.inject({
+      method: "DELETE",
+      url: `/projects/${agent.project.id}/subtree`,
+    });
+    expect(missingGuard.statusCode).toBe(428);
+
+    const userOwned = await app.inject({
+      method: "DELETE",
+      url: "/projects/project-1/subtree",
+      headers: { "if-match": String(current.revision) },
+    });
+    expect(userOwned.statusCode).toBe(403);
+
+    const stale = await app.inject({
+      method: "DELETE",
+      url: `/projects/${agent.project.id}/subtree`,
+      headers: { "if-match": String(current.revision - 1) },
+    });
+    expect(stale.statusCode).toBe(409);
+
+    const forced = await app.inject({
+      method: "DELETE",
+      url: `/projects/${agent.project.id}/subtree?force=true`,
+    });
+    expect(forced.statusCode).toBe(200);
+  });
+
+  it("rejects generic deletes of agent-managed projects, rules, and rule sets", async () => {
+    const [agent] = await seedAgentProjects([["agent-delete-readonly", "main"]]);
+    const current = await storage.readWorkspace();
+
+    const projectDelete = await app.inject({
+      method: "DELETE",
+      url: `/projects/${agent.project.id}`,
+      headers: { "if-match": String(current.revision) },
+    });
+    const ruleDelete = await app.inject({
+      method: "DELETE",
+      url: `/rules/${agent.rules[0].id}`,
+      headers: { "if-match": String(current.revision) },
+    });
+    const ruleSetDelete = await app.inject({
+      method: "DELETE",
+      url: `/rule-sets/${agent.ruleSets[0].id}`,
+      headers: { "if-match": String(current.revision) },
+    });
+
+    expect(projectDelete.statusCode).toBe(403);
+    expect(ruleDelete.statusCode).toBe(403);
+    expect(ruleSetDelete.statusCode).toBe(403);
+    const unchanged = await storage.readWorkspace();
+    expect(unchanged.revision).toBe(current.revision);
+    expect(unchanged.projects.find((project) => project.id === agent.project.id)).toBeDefined();
+    expect(unchanged.ruleSets.find((ruleSet) => ruleSet.id === agent.ruleSets[0].id)).toBeDefined();
+    expect(unchanged.rules.find((rule) => rule.id === agent.rules[0].id)).toBeDefined();
+  });
+
+  it("keeps generic user-owned rule and project deletes cascading", async () => {
+    let current = await storage.readWorkspace();
     const deletedRule = await app.inject({
       method: "DELETE",
-      url: `/rules/${ruleProject.rules[0].id}`,
+      url: "/rules/rule-api",
       headers: { "if-match": String(current.revision) },
     });
     expect(deletedRule.statusCode).toBe(200);
     current = await storage.readWorkspace();
-    expect(current.rules.find((rule) => rule.id === ruleProject.rules[0].id)).toBeUndefined();
-    expect(current.ruleSets.find((ruleSet) => ruleSet.id === ruleProject.ruleSets[0].id)?.ruleIds).toEqual([]);
+    expect(current.rules.find((rule) => rule.id === "rule-api")).toBeUndefined();
+    expect(current.ruleSets[0]?.ruleIds).not.toContain("rule-api");
+
+    const deletedProject = await app.inject({
+      method: "DELETE",
+      url: "/projects/project-1",
+      headers: { "if-match": String(current.revision) },
+    });
+    expect(deletedProject.statusCode).toBe(200);
+    current = await storage.readWorkspace();
+    expect(current.projects).toHaveLength(0);
+    expect(current.ruleSets).toHaveLength(0);
+    expect(current.rules).toHaveLength(0);
   });
 
   it("rejects generic writes to agent-managed projects, rules, and rule sets", async () => {
@@ -751,6 +827,21 @@ describe("forwarder-service", () => {
       payload: { ruleSet: agent.ruleSets[0], ifRevision: current.revision },
     });
     expect(ruleSetPut.statusCode).toBe(403);
+  });
+  it("rejects a generic rule PUT whose target rule set does not exist", async () => {
+    const current = await storage.readWorkspace();
+    const orphan = { ...current.rules[0], id: "orphan-rule", name: "Orphan" };
+    const response = await app.inject({
+      method: "PUT",
+      url: `/rules/${orphan.id}`,
+      payload: { rule: orphan, ruleSetId: "missing-rule-set", ifRevision: current.revision },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json().code).toBe("RULE_SET_NOT_FOUND");
+    const unchanged = await storage.readWorkspace();
+    expect(unchanged.revision).toBe(current.revision);
+    expect(unchanged.rules.find((rule) => rule.id === orphan.id)).toBeUndefined();
   });
   it("rejects a generic project PUT that nests an agent-owned ruleset and rule IDs", async () => {
     const [agent] = await seedAgentProjects([["agent-nested", "main"]]);
@@ -788,7 +879,7 @@ describe("forwarder-service", () => {
     let current = await storage.readWorkspace();
     const deleted = await app.inject({
       method: "DELETE",
-      url: `/projects/${agent.project.id}`,
+      url: `/projects/${agent.project.id}/subtree`,
       headers: { "if-match": String(current.revision) },
     });
     expect(deleted.statusCode).toBe(200);

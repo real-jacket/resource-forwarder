@@ -57,6 +57,10 @@ export interface RuntimeEnvelope {
   payload?: unknown;
 }
 
+export type RefreshSiteContextAck =
+  | { ok: true }
+  | { ok: false; error: string };
+
 export async function runtimeRequest<T>(request: RuntimeRequest): Promise<T> {
   const response = (await chrome.runtime.sendMessage(request)) as { __error?: string } | T;
   if (response && typeof response === "object" && "__error" in response && typeof response.__error === "string") {

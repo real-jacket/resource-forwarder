@@ -41,10 +41,14 @@ Pass-through flags: `--claude-only`, `--codex-only`, `--no-build`, `--uninstall`
 After it runs, report to the user:
 
 - `rf` is on PATH (a wrapper at `~/.local/bin/rf`; if that dir is not on PATH, tell the user to add it).
+  The wrapper defaults `RF_STORAGE_ROOT` to this checkout's standard companion storage at
+  `packages/forwarder-service/.resource-forwarder`, so it works from another repository; an explicit
+  `RF_STORAGE_ROOT` still overrides it.
 - The `agent-forwarder-control` skill is installed for Claude Code and Codex — they must **restart**
   Claude Code / Codex so a fresh session discovers it.
-- To verify: `pnpm dev:service` (start the service), then `rf service status` prints `{ok:true}`.
-  Paste `${RF_STORAGE_ROOT:-.resource-forwarder}/token` into the extension Settings page once.
+- To verify: `pnpm dev:service` (start the service), then from another directory run `rf --help` and
+  `rf service status --json`; the latter prints `{ok:true}`.
+  Open the token file path printed by the service and paste its contents into the extension Settings page once.
 
 The `rf` wrapper points at the checkout you installed from; after merging this branch and removing a
 worktree, re-run `pnpm agent-control:install` from the active checkout. Once installed, follow
@@ -89,7 +93,9 @@ Dependency direction is intentionally one-way:
 
 ## Persistence and state boundaries
 
-- Local service storage root defaults to `./.resource-forwarder` (overridable via `RF_STORAGE_ROOT`).
+- Local service storage root defaults to `./.resource-forwarder` under the service process cwd
+  (normally `packages/forwarder-service/.resource-forwarder` via the root pnpm scripts; overridable
+  with `RF_STORAGE_ROOT`).
 - Workspace snapshot is stored as JSON at `.resource-forwarder/workspace.json`.
 - Hit logs are appended as daily JSONL files under `.resource-forwarder/logs/`.
 - Extension stores service URL and managed DNR rule IDs in `chrome.storage.local`.

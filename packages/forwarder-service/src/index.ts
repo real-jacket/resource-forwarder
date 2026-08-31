@@ -37,7 +37,6 @@ import {
   collectWorkspaceWarnings,
   getSwitchGroup,
   isAgentManagedProject,
-  planDeleteRuleSet,
   matchesHeaders,
   matchesHost,
   matchesMethod,
@@ -51,9 +50,13 @@ import {
   mergeUserOwnedSlice,
   parseWorkspace,
   pickMatchingRule,
+  planDeleteProject,
+  planDeleteRule,
+  planDeleteRuleSet,
   resolveForwardProfile,
   resolveRuleBinding,
   resolveRuleTargetValue,
+  reserveAgentManagedIds,
   workspaceWithoutAgentManaged,
   validateProjectSubtree,
 } from "@resource-forwarder/rule-core";
@@ -201,6 +204,26 @@ class AgentManagedMutationError extends Error {
   }
 }
 
+class AgentManagedProjectRequiredError extends Error {
+  readonly statusCode = 403;
+  readonly code = "AGENT_MANAGED_REQUIRED";
+
+  constructor() {
+    super("This route only accepts agent-managed projects.");
+    this.name = "AgentManagedProjectRequiredError";
+  }
+}
+
+class RuleSetNotFoundError extends Error {
+  readonly statusCode = 404;
+  readonly code = "RULE_SET_NOT_FOUND";
+
+  constructor(ruleSetId: string) {
+    super(`Rule set not found: ${ruleSetId}`);
+    this.name = "RuleSetNotFoundError";
+  }
+}
+
 function mutationResponse(workspace: WorkspaceSnapshot): MutationResponse {
   return {
     workspace,
@@ -293,12 +316,13 @@ function assertGenericRuleWriteAllowed(workspace: WorkspaceSnapshot, payload: Up
   const targetRuleSet = payload.ruleSetId
     ? workspace.ruleSets.find((ruleSet) => ruleSet.id === payload.ruleSetId)
     : undefined;
-  const targetProject = targetRuleSet
-    ? workspace.projects.find((project) => project.id === targetRuleSet.projectId)
-    : undefined;
   if (isReservedRuleId(workspace, payload.rule.id) || (existing?.project && isAgentManagedProject(existing.project))) {
     throw new AgentManagedMutationError();
   }
+  if (payload.ruleSetId && !targetRuleSet) throw new RuleSetNotFoundError(payload.ruleSetId);
+  const targetProject = targetRuleSet
+    ? workspace.projects.find((project) => project.id === targetRuleSet.projectId)
+    : undefined;
   if (targetProject && isAgentManagedProject(targetProject)) throw new AgentManagedMutationError();
   if (targetRuleSet && isReservedRuleSetId(workspace, targetRuleSet.id)) throw new AgentManagedMutationError();
 }
@@ -511,14 +535,48 @@ function registerRoutes(
   );
 
   app.delete<{ Params: { id: string }; Querystring: MutationQuery }>(
+    "/projects/:id/subtree",
+    { schema: { params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] }, querystring: mutationQuerySchema } },
+    async (request, reply) => {
+      try {
+        const next = await storage.applyMutation(
+          readRevisionGuard({}, request.headers["if-match"]),
+          forceRequested(request.query),
+          (current) => {
+            const project = current.projects.find((candidate) => candidate.id === request.params.id);
+            if (!project || !isAgentManagedProject(project)) throw new AgentManagedProjectRequiredError();
+            const { workspace, deletions } = planDeleteProject(current, request.params.id);
+            return reserveAgentManagedIds(
+              workspace,
+              deletions.projectIds,
+              deletions.ruleSetIds,
+              deletions.ruleIds,
+              request.params.id,
+            );
+          },
+        );
+        return mutationResponse(next);
+      } catch (error) {
+        sendMutationError(reply, error);
+      }
+    },
+  );
+
+  app.delete<{ Params: { id: string }; Querystring: MutationQuery }>(
     "/projects/:id",
     { schema: { params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] }, querystring: mutationQuerySchema } },
     async (request, reply) => {
       try {
-        const next = await storage.deleteProject(
-          request.params.id,
+        const next = await storage.applyMutation(
           readRevisionGuard({}, request.headers["if-match"]),
           forceRequested(request.query),
+          (current) => {
+            const project = current.projects.find((candidate) => candidate.id === request.params.id);
+            if ((project && isAgentManagedProject(project)) || isReservedProjectId(current, request.params.id)) {
+              throw new AgentManagedMutationError();
+            }
+            return planDeleteProject(current, request.params.id).workspace;
+          },
         );
         return mutationResponse(next);
       } catch (error) {
@@ -576,10 +634,18 @@ function registerRoutes(
     { schema: { params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] }, querystring: mutationQuerySchema } },
     async (request, reply) => {
       try {
-        const next = await storage.deleteRule(
-          request.params.id,
+        const next = await storage.applyMutation(
           readRevisionGuard({}, request.headers["if-match"]),
           forceRequested(request.query),
+          (current) => {
+            const agentOwned = current.ruleSets.some((ruleSet) => {
+              if (!ruleSet.ruleIds.includes(request.params.id)) return false;
+              const project = current.projects.find((candidate) => candidate.id === ruleSet.projectId);
+              return Boolean(project && isAgentManagedProject(project));
+            });
+            if (agentOwned || isReservedRuleId(current, request.params.id)) throw new AgentManagedMutationError();
+            return planDeleteRule(current, request.params.id).workspace;
+          },
         );
         return mutationResponse(next);
       } catch (error) {
@@ -624,16 +690,19 @@ function registerRoutes(
     { schema: { params: { type: "object", properties: { id: { type: "string", maxLength: 200 } }, required: ["id"] }, querystring: mutationQuerySchema } },
     async (request, reply) => {
       try {
-        const workspace = await storage.readWorkspace();
-        const target = workspace.ruleSets.find((ruleSet) => ruleSet.id === request.params.id);
-        if (target) {
-          const project = workspace.projects.find((candidate) => candidate.id === target.projectId);
-          if (project && isAgentManagedProject(project)) throw new AgentManagedMutationError();
-        }
         const next = await storage.applyMutation(
           readRevisionGuard({}, request.headers["if-match"]),
           forceRequested(request.query),
-          (current) => planDeleteRuleSet(current, request.params.id).workspace,
+          (current) => {
+            const target = current.ruleSets.find((ruleSet) => ruleSet.id === request.params.id);
+            const project = target
+              ? current.projects.find((candidate) => candidate.id === target.projectId)
+              : undefined;
+            if ((project && isAgentManagedProject(project)) || isReservedRuleSetId(current, request.params.id)) {
+              throw new AgentManagedMutationError();
+            }
+            return planDeleteRuleSet(current, request.params.id).workspace;
+          },
         );
         return mutationResponse(next);
       } catch (error) {

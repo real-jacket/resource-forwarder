@@ -168,7 +168,7 @@ function ServiceCard({
             <label className="form-label">
               Companion token
               <span style={{ color: "var(--muted)", fontWeight: "normal", marginLeft: 8 }}>
-                {service.tokenSaved ? "已保存（粘贴新值会覆盖）" : "首次启动 service 后从 ~/.resource-forwarder/token 复制"}
+                {service.tokenSaved ? "已保存（粘贴新值会覆盖）" : "从 service 启动日志显示的 token 文件复制"}
               </span>
             </label>
             <input
