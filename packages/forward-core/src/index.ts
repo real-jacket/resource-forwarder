@@ -40,7 +40,7 @@ export function createRequestContext(payload: {
     url: url.toString(),
     pageUrl: payload.pageUrl,
     method: payload.method,
-    host: url.host,
+    host: url.hostname,
     pathname: url.pathname,
     query: collectQueryValues(url.searchParams),
     tabId: payload.tabId,

@@ -187,6 +187,23 @@ describe("page bridge patch lifecycle", () => {
     expect(globals.xhrPrototype.open).not.toBe(globals.nativeOpen);
   });
 
+  it("matches canonical hosts when requests use a custom port", async () => {
+    const globals = installPageGlobals();
+    const port = await connectBridge(globals);
+    sendConfig(port, workspace([apiRule]));
+
+    const responsePromise = window.fetch("https://example.com:8443/api/users");
+    await Promise.resolve();
+    await Promise.resolve();
+    const request = vi.mocked(port.postMessage).mock.calls
+      .map(([message]) => message as { type?: string; payload?: { id: string; request: { matchedRuleId?: string } } })
+      .find((message) => message.type === "proxy-request");
+
+    expect(request?.payload?.request.matchedRuleId).toBe(apiRule.id);
+    sendProxyResponse(port, request!.payload!.id);
+    await responsePromise;
+  });
+
   it("falls back to native fetch when the local service rejects its token", async () => {
     const globals = installPageGlobals();
     const port = await connectBridge(globals);

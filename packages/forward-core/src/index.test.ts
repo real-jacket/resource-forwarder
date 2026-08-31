@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ForwardProfile, ForwardRequestPayload, RuleBinding } from "@resource-forwarder/shared-types";
-import { executeForward } from "./index.js";
+import { createRequestContext, executeForward } from "./index.js";
 
 const payload: ForwardRequestPayload = {
   url: "https://app.example.com/api/users",
@@ -28,6 +28,13 @@ function binding(profile: ForwardProfile): RuleBinding {
 }
 
 describe("executeForward", () => {
+  it("normalizes request hosts without custom ports", () => {
+    expect(createRequestContext({
+      url: "http://127.0.0.1:9080/api/users",
+      method: "GET",
+    }).host).toBe("127.0.0.1");
+  });
+
   it("serves inline JSON without an upstream fetch", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     const result = await executeForward(
