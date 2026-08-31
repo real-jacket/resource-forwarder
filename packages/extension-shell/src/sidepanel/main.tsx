@@ -4,7 +4,7 @@ import { matchesProjectSite, matchesRuleSetSite, sortRules } from "@resource-for
 import type { Project, Rule, RuleSet } from "@resource-forwarder/shared-types";
 import { joinCsv } from "../shared/helpers.js";
 import type { GetDashboardStateResponse, UpsertMutationResponse } from "../shared/messages.js";
-import { collectExecutableRuleIds } from "./rule-execution.js";
+import { collectExecutableRuleIds, describeRuleRoutes } from "./rule-execution.js";
 import { runtimeRequest } from "../shared/messages.js";
 import {
   buildOptionsNavigationUrl,
@@ -366,10 +366,7 @@ function App() {
 
       {/* Matched sites */}
       <div className="sp-section">
-        <div className="sp-section-title">当前页面匹配链路</div>
-        <div className="sp-scope-note">
-          当前页面已通过站点与分组范围；下面只展示还需按请求路径等条件继续匹配的规则。
-        </div>
+        <div className="sp-section-title">匹配配置</div>
         {visibleProjects.length === 0 ? (
           <div className="sp-empty">
             当前页面未匹配到任何站点或分组，请在规则页添加站点 / 分组匹配 URL。
@@ -446,7 +443,7 @@ function App() {
                             <span className="sp-rule-set-name">{ruleSet.name}</span>
                             {patterns && (
                               <span className="sp-rule-set-patterns" title={patterns}>
-                                {patterns}
+                                页面：{patterns}
                               </span>
                             )}
                             <span className="sp-rule-set-meta">
@@ -466,7 +463,7 @@ function App() {
 
       {/* Active rules */}
       <div className="sp-section">
-        <div className="sp-section-title">当前页面可生效规则</div>
+        <div className="sp-section-title">生效规则</div>
         {ruleGroups.length === 0 ? (
           <div className="sp-empty">
             {matchedProjects.length > 0 ? "匹配到站点但暂无规则。" : "先匹配站点后显示规则。"}
@@ -515,6 +512,7 @@ function App() {
                   {!collapsedRuleGroupIds.has(ruleSet.id) && <div className="sp-rule-list">
                     {rules.map((rule) => {
                       const visuallyOff = !executableRuleIds.has(rule.id);
+                      const routes = describeRuleRoutes(rule, project, ruleSet, currentUrl);
                       return (
                         <div
                           className={`sp-rule-item${visuallyOff ? " is-off" : ""}`}
@@ -536,8 +534,21 @@ function App() {
                                 {formatKind(rule.kind)}
                               </span>
                             </div>
-                            <div className="sp-rule-path">页面范围已通过 · 请求路径：{rule.match.pathGlob}</div>
-                            <div className="sp-rule-target">执行目标基址：{formatRuleTarget(rule, project, ruleSet)}</div>
+                            <div className="sp-rule-routes">
+                              {routes.map((route) => (
+                                <div className="sp-rule-route" key={`${route.source}-${route.target}`}>
+                                  <div className="sp-rule-address source">
+                                    <span>源</span>
+                                    <code title={route.source}>{route.source}</code>
+                                  </div>
+                                  <div className="sp-rule-route-arrow" aria-hidden="true">↓</div>
+                                  <div className="sp-rule-address target">
+                                    <span>目标</span>
+                                    <code title={route.target}>{route.target}</code>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         </div>
                       );
@@ -569,16 +580,6 @@ function formatEffectiveScope(project: Project, ruleSet: RuleSet): string {
     : project.siteMatchPatterns?.length
       ? project.siteMatchPatterns
       : project.siteHosts).join(", ") || "全部页面";
-}
-
-function formatRuleTarget(rule: Rule, project: Project, ruleSet: RuleSet): string {
-  if (rule.kind === "asset_redirect") {
-    return rule.target.redirectUrl || "未填写 HTTPS 地址";
-  }
-  const target = rule.target.forwardProfile?.targetBaseUrl;
-  if (target) return target;
-  const fallback = ruleSet.baseUrl || project.baseUrl;
-  return fallback ? `${fallback}（继承基址）` : "未填写目标地址";
 }
 
 const rootElement = document.getElementById("app");

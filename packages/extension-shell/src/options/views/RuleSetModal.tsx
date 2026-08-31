@@ -65,18 +65,6 @@ export function RuleSetModal({ draft, setDraft, onClose, onSave, busy }: RuleSet
           </div>
 
           <div className="form-group">
-            <label className="form-label" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <input
-                type="checkbox"
-                checked={draft.enabled}
-                onChange={(e) => setDraft((v) => ({ ...v, enabled: e.target.checked }))}
-                style={{ width: "auto", minHeight: "auto", margin: 0 }}
-              />
-              启用此分组
-            </label>
-          </div>
-
-          <div className="form-group">
             <label className="form-label">备注</label>
             <textarea
               className="form-textarea"
