@@ -1,7 +1,7 @@
 import { prepareMatcher, type MatcherCache } from "@resource-forwarder/rule-core";
 import { needsPageBridge } from "./page-bridge-policy.js";
 import type { ForwardRequestPayload, ForwardResponsePayload, SiteContextPayload, WorkspaceSnapshot } from "@resource-forwarder/shared-types";
-import { FORWARD_BODY_LIMIT_BYTES, PAYLOAD_TOO_LARGE_SENTINEL, SERVICE_OFFLINE_SENTINEL, STREAMING_UNSUPPORTED_SENTINEL, WINDOW_SOURCE } from "./shared/constants.js";
+import { FORWARD_BODY_LIMIT_BYTES, PAYLOAD_TOO_LARGE_SENTINEL, SERVICE_AUTH_REQUIRED_SENTINEL, SERVICE_OFFLINE_SENTINEL, STREAMING_UNSUPPORTED_SENTINEL, WINDOW_SOURCE } from "./shared/constants.js";
 import { getWindowPostMessageTargetOrigin } from "./shared/window-messaging.js";
 
 interface ProxyPending {
@@ -216,10 +216,7 @@ function installFetchPatch(): void {
       const forwarded = await dispatchProxyRequest(requestId, payload, signal);
       return createBrowserResponse(forwarded);
     } catch (error) {
-      if (
-        allowNativeFallback &&
-        (isServiceOfflineError(error) || isPayloadTooLargeError(error) || isStreamingUnsupportedError(error))
-      ) {
+      if (allowNativeFallback && isNativeFallbackError(error)) {
         return nativeFetch.call(window, input, init);
       }
       throw error;
@@ -909,6 +906,10 @@ function isServiceOfflineError(error: unknown): boolean {
   return error instanceof Error && error.message === SERVICE_OFFLINE_SENTINEL;
 }
 
+function isServiceAuthRequiredError(error: unknown): boolean {
+  return error instanceof Error && error.message === SERVICE_AUTH_REQUIRED_SENTINEL;
+}
+
 function isPayloadTooLargeError(error: unknown): boolean {
   return error instanceof Error && error.message === PAYLOAD_TOO_LARGE_SENTINEL;
 }
@@ -918,7 +919,7 @@ function isStreamingUnsupportedError(error: unknown): boolean {
 }
 
 function isNativeFallbackError(error: unknown): boolean {
-  return isServiceOfflineError(error) || isPayloadTooLargeError(error) || isStreamingUnsupportedError(error);
+  return isServiceOfflineError(error) || isServiceAuthRequiredError(error) || isPayloadTooLargeError(error) || isStreamingUnsupportedError(error);
 }
 
 /**

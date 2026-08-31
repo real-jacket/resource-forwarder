@@ -138,7 +138,7 @@ export function switchProjectGroup(
     ...workspace,
     projects: workspace.projects.map((project) => {
       if (project.id === targetProjectId) return { ...project, enabled, updatedAt: now };
-      if (enabled && switchGroup && project.enabled && getSwitchGroup(project) === switchGroup) {
+      if (enabled && switchGroup && project.enabled && isAgentManagedProject(project) && getSwitchGroup(project) === switchGroup) {
         return { ...project, enabled: false, updatedAt: now };
       }
       return project;

@@ -1,6 +1,7 @@
 import type { ForwardRequestPayload, SiteContextPayload } from "@resource-forwarder/shared-types";
 import { needsPageBridge } from "./page-bridge-policy.js";
 import { WINDOW_SOURCE } from "./shared/constants.js";
+import type { RefreshSiteContextAck } from "./shared/messages.js";
 import { getWindowPostMessageTargetOrigin } from "./shared/window-messaging.js";
 
 // content-script runs in the isolated world; background injects page-bridge.js
@@ -18,10 +19,12 @@ window.addEventListener("message", handleHandshakeMessage);
 
 void refreshSiteContext();
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "refresh-site-context") {
-    void refreshSiteContext();
+    void refreshSiteContext().then(sendResponse);
+    return true;
   }
+  return undefined;
 });
 
 function handleHandshakeMessage(event: MessageEvent): void {
@@ -56,7 +59,7 @@ function handleHandshakeMessage(event: MessageEvent): void {
   }
 }
 
-async function refreshSiteContext(): Promise<void> {
+async function refreshSiteContext(): Promise<RefreshSiteContextAck> {
   const version = ++refreshVersion;
   try {
     const response = (await chrome.runtime.sendMessage({
@@ -66,11 +69,13 @@ async function refreshSiteContext(): Promise<void> {
     })) as SiteContextPayload | { __error?: string };
 
     if (version !== refreshVersion) {
-      return;
+      // A newer refresh already owns the config; acknowledging this superseded
+      // request is safe because the newer request reads the same latest runtime.
+      return { ok: true };
     }
     if ("__error" in response) {
       if (response.__error) throw new Error(response.__error);
-      return;
+      return { ok: true };
     }
 
     const payload = response as SiteContextPayload;
@@ -78,20 +83,23 @@ async function refreshSiteContext(): Promise<void> {
     bridgeExpected = needsPageBridge(payload.workspace);
     if (!bridgeExpected && !port) {
       removePendingConfig();
-      return;
+      return { ok: true };
     }
     sendToBridge({ type: "config", payload });
+    return { ok: true };
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load site context.";
     if (version !== refreshVersion || !port) {
-      return;
+      return { ok: false, error: message };
     }
     sendToBridge({
       type: "proxy-error",
       payload: {
         id: "site-context",
-        error: error instanceof Error ? error.message : "Failed to load site context.",
+        error: message,
       },
     });
+    return { ok: false, error: message };
   }
 }
 

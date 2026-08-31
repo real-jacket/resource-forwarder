@@ -57,10 +57,11 @@ Ordinary forwarding, response patches, and inline JSON mocks do not require the 
 [forwarder-service] auth token file: <storage_root>/token
 ```
 
-The default storage root is `.resource-forwarder` under the directory where the service was started. When `pnpm dev` is run from the repository root, the path is normally:
+The default storage root is `.resource-forwarder` under the service process cwd. The root pnpm
+scripts execute the service package with its package directory as cwd, so the normal path is:
 
 ```text
-<repository>/.resource-forwarder/token
+<repository>/packages/forwarder-service/.resource-forwarder/token
 ```
 
 Copy the complete file contents, then open:
@@ -83,7 +84,7 @@ Open the target website and the extension Side Panel to inspect the projects, ru
 ## Agent rule control (CLI + Skill)
 
 Let an agent configure the extension's proxy rules programmatically: **one companion service, many
-agent-managed projects**, each proxying production assets to its own dev-server port. Built for
+agent-managed projects**, each proxying production assets and/or APIs to its own dev-server port. Built for
 developing several requirements in parallel (e.g. multiple `zebra` branches) — create, switch, and
 tear down local resource proxies automatically. It manages rules only; it does not start dev servers
 or allocate ports.
@@ -97,25 +98,36 @@ pnpm agent-control:install     # build rf, link it onto PATH, install the skill 
 
 `rf` becomes available on PATH; the skill is installed to `~/.claude/skills/agent-forwarder-control`
 and `~/.codex/skills/agent-forwarder-control` (restart Claude Code / Codex to load it). The `rf`
-symlink points at the checkout you installed from; re-run `pnpm agent-control:install` (or `pnpm build`)
-after pulling updates.
+wrapper points at the checkout you installed from and defaults `RF_STORAGE_ROOT` to its standard
+`packages/forwarder-service/.resource-forwarder`; explicit environment variables still override it. Re-run
+`pnpm agent-control:install` (or `pnpm build`) after pulling updates.
 
 ### Usage A — the `rf` CLI directly
 
 ```bash
 pnpm dev:service               # start the companion service
+rf --help
 rf service status
+rf schema get --json
 rf project up --name zebra/feat-x --site 'https://app.example.com/*' --dev-port 8080 \
   --asset 'https://cdn.example.com/static/app.*.js => /static/app.js' \
-  --switch-group zebra --enable
+  --rule ./api-forward.yaml --switch-group zebra --enable --json
 rf project list --json
 rf project switch zebra/feat-x
 rf project down zebra/feat-x
-rf wait-applied --timeout 30s
+rf wait-applied --revision <revision-from-mutation> --timeout 75s
+rf rule match --url 'https://app.example.com/api/users' --page-url 'https://app.example.com/' --json
+rf logs --project <project-id> --json
 ```
 
 > `--asset` left side must be a **full URL** (the CLI runs `new URL()` to extract host + path); a bare
 > path fails with `Invalid URL`. The right side is the path on your dev server.
+
+Repeatable `--rule <json|yaml>` adds any complete Resource Forwarder Rule to the same atomic
+agent-managed subtree, including `api_forward`, query/request/response header rewrites, JSON Merge
+Patch, inline/file mocks, latency/status overrides, and browser/local execution selection. Use
+`rf schema get --json` for the live contract; the rule file's logical ID is safely namespaced under
+the project.
 
 ### Usage B — via the agent skill
 
@@ -125,17 +137,19 @@ per the skill. Full skill text: [`skills/agent-forwarder-control/SKILL.md`](skil
 
 ### Consistency and recovery
 
-The CLI reads the bearer token from `${RF_STORAGE_ROOT:-.resource-forwarder}/token` and targets
-`http://127.0.0.1:${PORT:-5178}` (run `rf` with the same `RF_STORAGE_ROOT`/`PORT` as the service).
+The installed CLI wrapper reads the bearer token from the installed checkout's
+`packages/forwarder-service/.resource-forwarder/token` by default and targets `http://127.0.0.1:${PORT:-5178}` (an explicit
+`RF_STORAGE_ROOT` overrides the wrapper default; use the same root/port as the service).
 `WorkspaceSnapshot.revision` is the persisted monotonic concurrency token; `version` remains the
 format version. Every mutation requires the current `revision` through `If-Match`/`ifRevision`; a
 stale write returns 409 and the CLI re-reads and retries once. `--force` is the explicit
 last-writer-wins override. `project up` validates locally, prints the generated DNR rule, validates
 with the service, then atomically replaces the complete agent-managed subtree (rules omitted from a
-later `up` are removed). `project switch` changes only the target and enabled siblings carrying the
-same `switch-group:<name>`. Agent-managed projects are immutable in ownership and read-only in the
+later `up` are removed). `project switch` changes only the target and enabled agent-managed siblings
+carrying the same `switch-group:<name>`; user-owned projects are never toggled. Agent-managed projects are immutable in ownership and read-only in the
 Options Page; generic CRUD and imports cannot modify them. `wait-applied` acknowledges only after the
-extension persisted the workspace and Chrome accepted both dynamic and session DNR updates; its
+extension persisted the workspace, refreshed live page configs, and Chrome accepted both dynamic
+and session DNR updates; its
 timeout message is `persisted but not browser-applied`. The ACK does not prove dev-server
 availability, CSP, CORS, or page runtime behavior — reload the page and verify the actual network
 response separately.

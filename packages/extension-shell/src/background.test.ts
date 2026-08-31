@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceSnapshot } from "@resource-forwarder/shared-types";
-import { STORAGE_KEYS } from "./shared/constants.js";
+import { SERVICE_AUTH_REQUIRED_SENTINEL, STORAGE_KEYS } from "./shared/constants.js";
 
 type Listener = (...args: unknown[]) => unknown;
 
@@ -41,7 +41,17 @@ function installChromeMock(workspace: WorkspaceSnapshot) {
   const noop = vi.fn(async () => undefined);
   const openSidePanel = vi.fn(async () => undefined);
   const executeScript = vi.fn(async () => []);
-  const sendMessage = vi.fn(async () => undefined);
+  const sendMessage = vi.fn(async (
+    _tabId?: number,
+    _message?: unknown,
+    _options?: chrome.tabs.MessageSendOptions,
+  ) => ({ ok: true }));
+  const getAllFrames = vi.fn(async ({ tabId }: { tabId: number }) => [{
+    tabId,
+    frameId: 0,
+    parentFrameId: -1,
+    url: "https://example.com/",
+  }]);
   const updateDynamicRules = vi.fn(async () => undefined);
   const updateSessionRules = vi.fn(async (_update: { removeRuleIds?: number[]; addRules?: chrome.declarativeNetRequest.Rule[] }) => undefined);
 
@@ -67,6 +77,7 @@ function installChromeMock(workspace: WorkspaceSnapshot) {
     webNavigation: {
       onHistoryStateUpdated: createEvent(historyListeners),
       onReferenceFragmentUpdated: createEvent(fragmentListeners),
+      getAllFrames,
     },
     storage: {
       local: createStorageArea(localStorage),
@@ -85,6 +96,7 @@ function installChromeMock(workspace: WorkspaceSnapshot) {
     openSidePanel,
     executeScript,
     sendMessage,
+    getAllFrames,
     updateDynamicRules,
     updateSessionRules,
     navigateHistory(details: { tabId: number; frameId: number; url: string }) {
@@ -221,6 +233,18 @@ describe("background sidepanel loading", () => {
     expect(chromeMock.openSidePanel).toHaveBeenCalledWith({ tabId: 42 });
   });
 
+  it("uses Chrome's supported 30-second minimum reconcile alarm", async () => {
+    installChromeMock(workspace);
+    vi.stubGlobal("fetch", vi.fn());
+
+    await loadBackgroundWorker();
+
+    expect(chrome.alarms.create).toHaveBeenCalledWith(
+      "resource-forwarder:reconcile",
+      { periodInMinutes: 0.5 },
+    );
+  });
+
   it("returns local sidepanel state without waiting for the companion", async () => {
     const chromeMock = installChromeMock(workspace);
     const fetchMock = vi.fn(async () => {
@@ -233,6 +257,42 @@ describe("background sidepanel loading", () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(result).toMatchObject({ workspace, logs: [], currentTab: { host: "example.com" } });
+  });
+
+  it("maps a local forward 401 to the auth-required sentinel", async () => {
+    const localWorkspace: WorkspaceSnapshot = {
+      ...apiWorkspace,
+      rules: [{
+        ...apiWorkspace.rules[0]!,
+        target: { forwardProfile: { targetBaseUrl: "http://127.0.0.1:3000", executionMode: "local" } },
+      }],
+    };
+    const chromeMock = installChromeMock(localWorkspace);
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (path === "/workspace") return new Response(JSON.stringify({ workspace: localWorkspace, revision: 0 }), { status: 200 });
+      if (path === "/applied") return new Response(JSON.stringify({ appliedRevision: 0 }), { status: 200 });
+      if (path === "/forward") return new Response(JSON.stringify({ message: "Unauthorized" }), { status: 401 });
+      throw new Error(path);
+    }));
+    await loadBackgroundWorker();
+    await chromeMock.send({ type: "get-sidepanel-state" });
+
+    const result = await chromeMock.send({
+      type: "proxy-request",
+      requestId: "request-401",
+      payload: {
+        url: "https://example.com/api/users",
+        pageUrl: "https://example.com/",
+        method: "GET",
+        headers: {},
+        resourceType: "fetch",
+        matchedRuleId: "api",
+      },
+    });
+
+    expect(result).toEqual({ __error: SERVICE_AUTH_REQUIRED_SENTINEL });
   });
 
   it("injects the page bridge into the sender frame only once", async () => {
@@ -436,6 +496,52 @@ describe("background sidepanel loading", () => {
     ]);
 
     expect(calls).toEqual(["/health", "/workspace", "/applied"]);
+  });
+
+  it("waits for API content-script refresh completion before ACKing the service revision", async () => {
+    const chromeMock = installChromeMock(workspace);
+    vi.mocked(chrome.tabs.query).mockResolvedValue([{ id: 1, url: "https://example.com/" }] as chrome.tabs.Tab[]);
+    chromeMock.getAllFrames.mockResolvedValue([
+      { tabId: 1, frameId: 0, parentFrameId: -1, url: "https://example.com/" },
+      { tabId: 1, frameId: 7, parentFrameId: 0, url: "https://example.com/frame" },
+    ]);
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<{ ok: true }>((resolve) => {
+      releaseRefresh = () => resolve({ ok: true });
+    });
+    chromeMock.sendMessage.mockImplementation(async (_tabId, _message, options?: chrome.tabs.MessageSendOptions) =>
+      options?.frameId === 7 ? refreshGate : { ok: true });
+    const calls: string[] = [];
+    const serviceWorkspace = { ...apiWorkspace, revision: 8 };
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const path = new URL(input.toString()).pathname;
+      calls.push(path);
+      const body = path === "/health"
+        ? { ok: true }
+        : path === "/workspace"
+          ? { workspace: serviceWorkspace, revision: 8 }
+          : { appliedRevision: 8 };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    await loadBackgroundWorker();
+
+    const sync = chromeMock.send({ type: "sync-workspace" });
+    await vi.waitFor(() => expect(chromeMock.sendMessage).toHaveBeenCalledTimes(2));
+    expect(chromeMock.sendMessage).toHaveBeenCalledWith(
+      1,
+      { type: "refresh-site-context" },
+      { frameId: 0 },
+    );
+    expect(chromeMock.sendMessage).toHaveBeenCalledWith(
+      1,
+      { type: "refresh-site-context" },
+      { frameId: 7 },
+    );
+
+    expect(calls).not.toContain("/applied");
+    releaseRefresh();
+    await sync;
+    expect(calls.at(-1)).toBe("/applied");
   });
   it.each(["dynamic", "session"] as const)("does not ACK when the %s DNR bucket rejects", async (bucket) => {
     const chromeMock = installChromeMock(workspace);

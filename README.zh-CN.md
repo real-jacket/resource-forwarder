@@ -57,10 +57,11 @@ pnpm dev
 [forwarder-service] auth token file: <storage_root>/token
 ```
 
-默认存储目录是当前启动目录下的 `.resource-forwarder`，因此在仓库根目录执行 `pnpm dev` 时通常为：
+默认存储目录是 service 进程 cwd 下的 `.resource-forwarder`。根目录 pnpm 脚本会以 service 包目录
+作为 cwd 启动，因此通常为：
 
 ```text
-<repository>/.resource-forwarder/token
+<repository>/packages/forwarder-service/.resource-forwarder/token
 ```
 
 复制文件中的完整内容，然后进入扩展：
@@ -82,7 +83,7 @@ pnpm dev
 
 ## Agent 规则控制（CLI + Skill）
 
-让 agent 编程式地配置插件的代理规则：**一个 companion 服务 + 多个 agent-managed 站点**，每个并行需求对应一个指向自己 dev 端口的站点。适用于并行开发多个需求（如多个 `zebra` 分支）时，自动建立/切换/销毁本地资源代理。只管规则，不启动 dev server、也不分配端口。
+让 agent 编程式地配置插件的代理规则：**一个 companion 服务 + 多个 agent-managed 站点**，每个并行需求对应一个指向自己 dev 端口的资源/API 代理站点。适用于并行开发多个需求（如多个 `zebra` 分支）时，自动建立/切换/销毁本地代理。只管规则，不启动 dev server、也不分配端口。
 
 ### 一键安装
 
@@ -91,23 +92,32 @@ pnpm agent-control:install     # 构建 rf、链接到 PATH、把 skill 装进 C
 # 可选参数：--claude-only / --codex-only / --no-build / --uninstall
 ```
 
-安装后 `rf` 在 PATH 上可用；skill 装到 `~/.claude/skills/agent-forwarder-control` 与 `~/.codex/skills/agent-forwarder-control`（重启 Claude Code / Codex 后生效）。`rf` 软链接指向你执行安装时所在的仓库；拉取更新后重新 `pnpm agent-control:install`（或 `pnpm build`）即可。
+安装后 `rf` 在 PATH 上可用；skill 装到 `~/.claude/skills/agent-forwarder-control` 与 `~/.codex/skills/agent-forwarder-control`（重启 Claude Code / Codex 后生效）。`rf` wrapper 指向执行安装时的仓库，并默认把 `RF_STORAGE_ROOT` 固定到该 checkout 的 `packages/forwarder-service/.resource-forwarder`；显式环境变量仍可覆盖。拉取更新后重新 `pnpm agent-control:install`（或 `pnpm build`）即可。
 
 ### 用法一：直接用 `rf` CLI
 
 ```bash
 pnpm dev:service               # 启动 companion 服务
+rf --help
 rf service status
+rf schema get --json
 rf project up --name zebra/feat-x --site 'https://app.example.com/*' --dev-port 8080 \
   --asset 'https://cdn.example.com/static/app.*.js => /static/app.js' \
-  --switch-group zebra --enable
+  --rule ./api-forward.yaml --switch-group zebra --enable --json
 rf project list --json
 rf project switch zebra/feat-x
 rf project down zebra/feat-x
-rf wait-applied --timeout 30s
+rf wait-applied --revision <mutation-返回的-revision> --timeout 75s
+rf rule match --url 'https://app.example.com/api/users' --page-url 'https://app.example.com/' --json
+rf logs --project <project-id> --json
 ```
 
 > `--asset` 左侧必须是**完整 URL**（CLI 会 `new URL()` 解析出 host + path），裸路径会报 `Invalid URL`；右侧是 dev server 上的路径。
+
+可重复的 `--rule <json|yaml>` 会把任意完整 Resource Forwarder Rule 原子加入同一个
+agent-managed 子树，覆盖 `api_forward`、query/请求头/响应头改写、JSON Merge Patch、内联/文件
+Mock、延迟/状态码和 browser/local 执行选择。用 `rf schema get --json` 获取实时契约；文件里的逻辑
+Rule ID 会自动命名空间化，避免跨项目冲突。
 
 ### 用法二：通过 agent skill
 
@@ -115,7 +125,7 @@ rf wait-applied --timeout 30s
 
 ### 一致性与恢复
 
-CLI 从 `${RF_STORAGE_ROOT:-.resource-forwarder}/token` 读取 Bearer token，默认访问 `http://127.0.0.1:${PORT:-5178}`（运行 `rf` 时用与服务相同的 `RF_STORAGE_ROOT`/`PORT`）。`WorkspaceSnapshot.revision` 是持久化的单调并发版本；`version` 仍然只是格式版本。所有 mutation 默认必须通过 `If-Match`/`ifRevision` 携带当前 `revision`：过期写入返回 409，CLI 会重读重算并重试一次；`--force` 是显式的 last-writer-wins 覆盖。`project up` 会先本地 dry-run、打印 DNR 规则、调用服务校验，再原子替换完整 agent-managed 子树（后续 `up` 省略的旧规则会被删除）；`project switch` 只切换同一 `switch-group:<name>` 内当前启用的兄弟。agent-managed 站点在 Options Page 中只读，generic CRUD 与导入不会修改它们。`wait-applied` 只有在扩展完成本地持久化且 Chrome 成功接受 dynamic/session 两组 DNR 更新后才算 ACK；超时会输出 `persisted but not browser-applied`。ACK 不代表 dev server、CSP、CORS 或页面运行时已经正确，请继续刷新页面并检查实际网络响应。
+安装后的 CLI wrapper 默认从安装 checkout 的 `packages/forwarder-service/.resource-forwarder/token` 读取 Bearer token，并访问 `http://127.0.0.1:${PORT:-5178}`；显式 `RF_STORAGE_ROOT` 可覆盖，但必须与服务一致。`WorkspaceSnapshot.revision` 是持久化的单调并发版本；`version` 仍然只是格式版本。所有 mutation 默认必须通过 `If-Match`/`ifRevision` 携带当前 `revision`：过期写入返回 409，CLI 会重读重算并重试一次；`--force` 是显式的 last-writer-wins 覆盖。`project up` 会先本地 dry-run、打印 DNR 规则、调用服务校验，再原子替换完整 agent-managed 子树（后续 `up` 省略的旧规则会被删除）；`project switch` 只切换同一 `switch-group:<name>` 内当前启用的 agent-managed 兄弟。agent-managed 站点在 Options Page 中只读，generic CRUD 与导入不会修改它们。`wait-applied` 只有在扩展完成本地持久化、刷新页面配置且 Chrome 成功接受 dynamic/session 两组 DNR 更新后才算 ACK；超时会输出 `persisted but not browser-applied`。ACK 不代表 dev server、CSP、CORS 或页面运行时已经正确，请继续刷新页面并检查实际网络响应。
 
 ## 系统架构
 
