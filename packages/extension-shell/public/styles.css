@@ -140,7 +140,6 @@ summary {
   background: var(--surface);
   border-right: 1px solid var(--border);
   overflow: hidden;
-  transition: width 200ms ease;
 }
 
 .sidebar-logo {
@@ -3196,14 +3195,6 @@ details[open] .import-preview-warnings-summary::before {
   flex-shrink: 0;
 }
 
-.about-hero::after {
-  content: "";
-  position: absolute;
-  inset: 0 0 auto;
-  height: 3px;
-  background: var(--primary);
-}
-
 .about-hero-main {
   display: flex;
   align-items: center;
@@ -3649,7 +3640,6 @@ details[open] .import-preview-warnings-summary::before {
 .guide-tip {
   background: color-mix(in srgb, var(--primary-soft) 58%, var(--surface));
   border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border));
-  border-left: 3px solid var(--primary);
   border-radius: var(--radius-lg);
   padding: 11px 14px;
   margin: 12px 0;
@@ -3665,7 +3655,6 @@ details[open] .import-preview-warnings-summary::before {
 .guide-warn {
   background: var(--warning-soft);
   border: 1px solid var(--warning-border);
-  border-left: 3px solid var(--warning);
   border-radius: var(--radius-lg);
   padding: 11px 14px;
   margin: 12px 0;
@@ -4906,7 +4895,6 @@ details[open] .import-preview-warnings-summary::before {
   gap: 4px;
   padding: 8px 9px 8px 12px;
   border: 1px solid var(--border);
-  border-left: 3px solid var(--border-strong);
   border-radius: var(--radius-md);
   background: var(--surface-soft);
 }
