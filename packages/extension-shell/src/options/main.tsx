@@ -13,6 +13,7 @@ import {
   sortRules,
 } from "@resource-forwarder/rule-core";
 import type {
+  CompanionSyncStrategy,
   Project,
   Rule,
   RuleSet,
@@ -596,16 +597,21 @@ function App() {
   }
 
   async function syncCompanion(): Promise<void> {
+    const strategy = dashboard?.syncStrategy ?? "merge";
     setBusy(true);
     try {
-      const state = await runtimeRequest<SyncWorkspaceResponse>({ type: "sync-workspace" });
+      const state = await runtimeRequest<SyncWorkspaceResponse>({ type: "sync-workspace", strategy });
       hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
       setStatus(
-        state.health
-          ? "规则已同步。"
-          : state.companionEnabled === false
-            ? "已断开 Companion，正在使用本地规则。"
-            : "未连接到本地服务，请先在设置里检查服务地址。",
+        state.companionEnabled === false
+          ? "已断开 Companion，正在使用本地规则。"
+          : !state.health
+            ? "未连接到本地服务，请先在设置里检查服务地址。"
+            : strategy === "pull"
+              ? "已用 Companion 覆盖本地规则。"
+              : strategy === "push"
+                ? "已用本地规则覆盖 Companion。"
+                : "已合并本地与 Companion 规则。",
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "同步失败。");
@@ -624,6 +630,22 @@ function App() {
       setStatus(error instanceof Error ? error.message : "切换 Companion 连接失败。");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function setSyncStrategy(strategy: CompanionSyncStrategy): Promise<void> {
+    try {
+      const state = await runtimeRequest<SyncWorkspaceResponse>({ type: "set-sync-strategy", strategy });
+      hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      setStatus(
+        strategy === "pull"
+          ? "同步策略已设为覆盖本地。"
+          : strategy === "push"
+            ? "同步策略已设为覆盖 Companion。"
+            : "同步策略已设为合并。",
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "保存同步策略失败。");
     }
   }
 
@@ -1646,6 +1668,8 @@ function App() {
                 saveToken: saveServiceToken,
                 companionEnabled: dashboard?.companionEnabled !== false,
                 setCompanionEnabled,
+                syncStrategy: dashboard?.syncStrategy ?? "merge",
+                setSyncStrategy,
               }}
               filters={{
                 status: siteStatusFilter,

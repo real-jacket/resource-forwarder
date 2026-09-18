@@ -1,4 +1,5 @@
 import type {
+  CompanionSyncStrategy,
   ExportWorkspaceResponse,
   ForwardRequestPayload,
   HitRecord,
@@ -59,6 +60,7 @@ let runtimeState: RuntimeState = {
   health: null,
   workspace: createEmptyWorkspace(),
   companionEnabled: true,
+  syncStrategy: "merge",
 };
 let runtimeWarnings: string[] = [];
 let lastServiceRevision: number | undefined;
@@ -194,7 +196,7 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
     case "get-sidepanel-state":
       return getSidepanelState(message.tabId);
     case "sync-workspace":
-      return syncWorkspace();
+      return syncWorkspace(message.strategy);
     case "set-service-url":
       await chrome.storage.local.set({ [STORAGE_KEYS.serviceUrl]: message.serviceUrl });
       runtimeState.serviceUrl = message.serviceUrl;
@@ -207,7 +209,17 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
     case "set-companion-enabled":
       await chrome.storage.local.set({ [STORAGE_KEYS.companionEnabled]: message.enabled });
       runtimeState = { ...runtimeState, companionEnabled: message.enabled };
-      return syncWorkspace();
+      try {
+        return await syncWorkspace(message.enabled ? await getSyncStrategy() : undefined);
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : String(error);
+        runtimeWarnings = [messageText];
+        return { ...runtimeState, warnings: runtimeWarnings };
+      }
+    case "set-sync-strategy":
+      await chrome.storage.local.set({ [STORAGE_KEYS.syncStrategy]: message.strategy });
+      runtimeState = { ...runtimeState, syncStrategy: message.strategy };
+      return { ...runtimeState, warnings: runtimeWarnings };
     case "upsert-project":
       return handleUpsertProject(message.payload);
     case "delete-project":
@@ -435,7 +447,10 @@ async function commitWorkspace(
 
 // ── Sync: local-first, then try remote service ───────────────────────────
 
-function syncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
+function syncWorkspace(strategy?: CompanionSyncStrategy): Promise<RuntimeState & { warnings: string[] }> {
+  if (strategy) {
+    return performSyncWorkspace(strategy);
+  }
   if (!syncWorkspacePromise) {
     syncWorkspacePromise = performSyncWorkspace().finally(() => {
       syncWorkspacePromise = undefined;
@@ -444,10 +459,11 @@ function syncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
   return syncWorkspacePromise;
 }
 
-async function performSyncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
+async function performSyncWorkspace(strategy?: CompanionSyncStrategy): Promise<RuntimeState & { warnings: string[] }> {
   const serviceUrl = await getServiceUrl();
   const companionEnabled = await getCompanionEnabled();
-  runtimeState = { ...runtimeState, serviceUrl, companionEnabled };
+  const syncStrategy = await getSyncStrategy();
+  runtimeState = { ...runtimeState, serviceUrl, companionEnabled, syncStrategy };
 
   const localWorkspace = await readLocalWorkspace();
   if (!companionEnabled) {
@@ -504,6 +520,14 @@ async function performSyncWorkspace(): Promise<RuntimeState & { warnings: string
     }
   }
 
+  return finishConnectedSync(serviceUrl, health, strategy);
+}
+
+async function finishConnectedSync(
+  serviceUrl: string,
+  health: ServiceHealthResponse,
+  strategy: CompanionSyncStrategy | undefined,
+): Promise<RuntimeState & { warnings: string[] }> {
   // A concurrent local mutation (for example toggling a group) may have
   // landed after this sync sampled dirty ops. Replacing with the companion
   // snapshot would revert that edit.
@@ -512,11 +536,31 @@ async function performSyncWorkspace(): Promise<RuntimeState & { warnings: string
     return commitWorkspace(await readLocalWorkspace(), serviceUrl, health);
   }
 
-  try {
+  const local = await readLocalWorkspace();
+  if (strategy === "pull") {
     const workspace = await pullServiceWorkspace(serviceUrl);
     return commitWorkspace(workspace, serviceUrl, health, workspace.revision);
+  }
+  if (strategy === "push" || strategy === "merge") {
+    const response = await sendGuardedMutation<MutationResponse>(serviceUrl, "/import", "POST", (revision) => ({
+      content: serializeWorkspace(userOwnedSlice(local), "json"),
+      format: "json",
+      merge: strategy === "merge",
+      ifRevision: revision,
+    } satisfies ImportWorkspacePayload));
+    return commitWorkspace(response.workspace, serviceUrl, health, response.revision);
+  }
+
+  try {
+    const workspace = await pullServiceWorkspace(serviceUrl);
+    return commitWorkspace(
+      reconcileAgentManagedSubtrees(local, workspace),
+      serviceUrl,
+      health,
+      workspace.revision,
+    );
   } catch {
-    return commitWorkspace(reconcileAgentManagedSubtrees(localWorkspace, localWorkspace), serviceUrl, health);
+    return commitWorkspace(reconcileAgentManagedSubtrees(local, local), serviceUrl, health);
   }
 }
 
@@ -834,8 +878,14 @@ async function handleExportWorkspace(projectIds: string[], format: "json" | "yam
 async function hydrateRuntimeStateFromLocal(): Promise<void> {
   if (localRuntimeHydrated) return;
   if (!localRuntimeHydration) {
-    localRuntimeHydration = Promise.all([readLocalWorkspace(), getServiceUrl(), getLastServiceRevision(), getCompanionEnabled()])
-      .then(([workspace, serviceUrl, serviceRevision, companionEnabled]) => {
+    localRuntimeHydration = Promise.all([
+      readLocalWorkspace(),
+      getServiceUrl(),
+      getLastServiceRevision(),
+      getCompanionEnabled(),
+      getSyncStrategy(),
+    ])
+      .then(([workspace, serviceUrl, serviceRevision, companionEnabled, syncStrategy]) => {
         if (!localRuntimeHydrated) {
           runtimeState = {
             ...runtimeState,
@@ -843,6 +893,7 @@ async function hydrateRuntimeStateFromLocal(): Promise<void> {
             workspace,
             serviceRevision,
             companionEnabled,
+            syncStrategy,
             health: companionEnabled ? runtimeState.health : null,
           };
           localRuntimeHydrated = true;
@@ -871,10 +922,11 @@ async function getSidepanelState(tabId?: number): Promise<DashboardState> {
 }
 
 async function getDashboardState(tabId?: number): Promise<DashboardState> {
-  const companionEnabled = await getCompanionEnabled();
+  const [companionEnabled, syncStrategy] = await Promise.all([getCompanionEnabled(), getSyncStrategy()]);
   runtimeState = {
     ...runtimeState,
     companionEnabled,
+    syncStrategy,
     health: companionEnabled ? runtimeState.health : null,
   };
   if (runtimeState.workspace.rules.length === 0) {
@@ -1184,6 +1236,12 @@ async function getServiceUrl(): Promise<string> {
 async function getCompanionEnabled(): Promise<boolean> {
   const stored = await chrome.storage.local.get(STORAGE_KEYS.companionEnabled);
   return stored[STORAGE_KEYS.companionEnabled] !== false;
+}
+
+async function getSyncStrategy(): Promise<CompanionSyncStrategy> {
+  const stored = await chrome.storage.local.get(STORAGE_KEYS.syncStrategy);
+  const value = stored[STORAGE_KEYS.syncStrategy];
+  return value === "pull" || value === "push" || value === "merge" ? value : "merge";
 }
 
 async function getServiceToken(): Promise<string | undefined> {

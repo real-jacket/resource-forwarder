@@ -1,6 +1,6 @@
 import React from "react";
 import { isAgentManagedProject, matchesProjectSite } from "@resource-forwarder/rule-core";
-import type { Project } from "@resource-forwarder/shared-types";
+import type { CompanionSyncStrategy, Project } from "@resource-forwarder/shared-types";
 import type { DashboardState } from "../../shared/messages.js";
 import type { AppView } from "../types.js";
 import { formatProjectScopeSummary, formatTimestamp, localizeWarning } from "../formatters.js";
@@ -42,6 +42,8 @@ export interface SettingsViewProps {
     /** False when the user has explicitly disconnected Companion. */
     companionEnabled: boolean;
     setCompanionEnabled: (enabled: boolean) => void | Promise<void>;
+    syncStrategy: CompanionSyncStrategy;
+    setSyncStrategy: (strategy: CompanionSyncStrategy) => void | Promise<void>;
   };
 
   /** Filter & search bar over the site list. */
@@ -107,6 +109,28 @@ export function SettingsView(props: SettingsViewProps) {
     </>
   );
 }
+
+const SYNC_STRATEGY_OPTIONS: Array<{
+  value: CompanionSyncStrategy;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "merge",
+    label: "合并",
+    description: "两边用户规则按 ID 合并，同一条以本地为准；agent 规则仍以 Companion 为准。",
+  },
+  {
+    value: "push",
+    label: "覆盖 Companion",
+    description: "用浏览器里的用户规则替换 Companion 上的用户规则。agent 规则不受影响。",
+  },
+  {
+    value: "pull",
+    label: "覆盖本地",
+    description: "用 Companion 上的规则完全替换浏览器里的规则。本地未同步的改动会丢失。",
+  },
+];
 
 // ── Subcomponents ────────────────────────────────────────────────────
 
@@ -209,6 +233,34 @@ function ServiceCard({
             保存 token
           </button>
         </div>
+
+        <fieldset className="sync-strategy">
+          <legend className="form-label">规则同步策略</legend>
+          <p className="sync-strategy-hint">
+            「立即同步」和重新连接时使用。后台只会刷新 agent 规则，不会用 Companion 覆盖你的本地规则。
+          </p>
+          <div className="sync-strategy-grid">
+            {SYNC_STRATEGY_OPTIONS.map((option) => (
+              <label
+                key={option.value}
+                className={`sync-strategy-option${service.syncStrategy === option.value ? " is-selected" : ""}`}
+              >
+                <input
+                  type="radio"
+                  name="companion-sync-strategy"
+                  value={option.value}
+                  checked={service.syncStrategy === option.value}
+                  disabled={busy}
+                  onChange={() => void service.setSyncStrategy(option.value)}
+                />
+                <span className="sync-strategy-option-copy">
+                  <strong>{option.label}</strong>
+                  <span>{option.description}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
 
         <div className={`service-status-bar ${statusTone}`}>
           <span className="service-status-dot" />

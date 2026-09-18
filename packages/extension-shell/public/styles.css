@@ -2854,6 +2854,73 @@ details[open] .import-preview-warnings-summary::before {
   color: var(--warning-text);
 }
 
+.sync-strategy {
+  margin: 4px 0 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.sync-strategy .form-label {
+  padding: 0;
+}
+.sync-strategy-hint {
+  margin: 4px 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.sync-strategy-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.sync-strategy-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+  cursor: pointer;
+}
+.sync-strategy-option input {
+  margin-top: 3px;
+  accent-color: var(--primary);
+  flex-shrink: 0;
+}
+.sync-strategy-option-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.sync-strategy-option-copy strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.sync-strategy-option-copy span {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.sync-strategy-option.is-selected,
+.sync-strategy-option:has(input:checked) {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.sync-strategy-option:has(input:focus-visible) {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+@media (max-width: 720px) {
+  .sync-strategy-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .settings-card {
   background: var(--surface);
   border: 1px solid var(--border);

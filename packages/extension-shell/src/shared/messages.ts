@@ -1,4 +1,5 @@
 import type {
+  CompanionSyncStrategy,
   ExportWorkspaceResponse,
   ForwardRequestPayload,
   ImportWorkspacePayload,
@@ -37,10 +38,11 @@ export interface DashboardState extends RuntimeState {
 export type RuntimeRequest =
   | { type: "get-dashboard-state"; tabId?: number }
   | { type: "get-sidepanel-state"; tabId?: number }
-  | { type: "sync-workspace" }
+  | { type: "sync-workspace"; strategy?: CompanionSyncStrategy }
   | { type: "set-service-url"; serviceUrl: string }
   | { type: "set-service-token"; token: string }
   | { type: "set-companion-enabled"; enabled: boolean }
+  | { type: "set-sync-strategy"; strategy: CompanionSyncStrategy }
   | { type: "upsert-project"; payload: UpsertProjectPayload }
   | { type: "delete-project"; projectId: string }
   | { type: "upsert-rule"; payload: UpsertRulePayload }

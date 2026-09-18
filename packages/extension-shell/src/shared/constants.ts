@@ -3,6 +3,7 @@ export const STORAGE_KEYS = {
   serviceUrl: "resource-forwarder:service-url",
   serviceToken: "resource-forwarder:service-token",
   companionEnabled: "resource-forwarder:companion-enabled",
+  syncStrategy: "resource-forwarder:sync-strategy",
   managedRuleIds: "resource-forwarder:managed-dnr-rule-ids",
   workspace: "resource-forwarder:workspace",
   serviceRevision: "resource-forwarder:service-revision",
