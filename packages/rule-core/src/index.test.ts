@@ -175,6 +175,68 @@ describe("rule-core", () => {
     expect(rules[0]?.condition.initiatorDomains).toEqual(["app.example.com"]);
   });
 
+  it("gives a more page-specific group's asset rule a higher DNR priority to break equal-priority ties", () => {
+    const base = {
+      enabled: true,
+      kind: "asset_redirect" as const,
+      priority: 100,
+      match: { host: ["site.example.com"], pathGlob: "/entry.js", resourceType: ["script" as const], tabScope: { mode: "all" as const } },
+      tags: [],
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-01T00:00:00.000Z",
+    };
+    const ws: WorkspaceSnapshot = {
+      version: 1,
+      revision: 0,
+      updatedAt: "2024-01-01T00:00:00.000Z",
+      projects: [{ id: "p", name: "P", enabled: true, siteHosts: ["site.example.com"], siteMatchPatterns: ["https://site.example.com/files/*"], tags: [], createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-01T00:00:00.000Z" }],
+      ruleSets: [
+        { id: "broad", projectId: "p", name: "broad", enabled: true, ruleIds: ["r-broad"], siteMatchPatterns: ["https://site.example.com/files/*"], createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-01T00:00:00.000Z" },
+        { id: "exact", projectId: "p", name: "exact", enabled: true, ruleIds: ["r-exact"], siteMatchPatterns: ["https://site.example.com/files/abc123def456"], createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-01T00:00:00.000Z" },
+      ],
+      rules: [
+        { ...base, id: "r-broad", name: "broad entry", target: { redirectUrl: "http://localhost:8080/entry.js" } },
+        { ...base, id: "r-exact", name: "exact entry", target: { redirectUrl: "http://localhost:8082/entry.js" } },
+      ],
+    };
+
+    const rules = toDynamicNetRequestRules(ws);
+    const broad = rules.find((r) => r.action.redirect.url === "http://localhost:8080/entry.js");
+    const exact = rules.find((r) => r.action.redirect.url === "http://localhost:8082/entry.js");
+    expect(exact!.priority).toBeGreaterThan(broad!.priority);
+  });
+
+  it("keeps a user's explicit higher priority dominant over the page-scope boost", () => {
+    const base = {
+      enabled: true,
+      kind: "asset_redirect" as const,
+      match: { host: ["site.example.com"], pathGlob: "/entry.js", resourceType: ["script" as const], tabScope: { mode: "all" as const } },
+      tags: [],
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-01T00:00:00.000Z",
+    };
+    const ws: WorkspaceSnapshot = {
+      version: 1,
+      revision: 0,
+      updatedAt: "2024-01-01T00:00:00.000Z",
+      projects: [{ id: "p", name: "P", enabled: true, siteHosts: ["site.example.com"], siteMatchPatterns: ["https://site.example.com/files/*"], tags: [], createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-01T00:00:00.000Z" }],
+      ruleSets: [
+        // Broad scope but the user pinned a HIGHER explicit priority.
+        { id: "broad", projectId: "p", name: "broad", enabled: true, ruleIds: ["r-broad"], siteMatchPatterns: ["https://site.example.com/files/*"], createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-01T00:00:00.000Z" },
+        { id: "exact", projectId: "p", name: "exact", enabled: true, ruleIds: ["r-exact"], siteMatchPatterns: ["https://site.example.com/files/abc123def456"], createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-01T00:00:00.000Z" },
+      ],
+      rules: [
+        { ...base, id: "r-broad", priority: 200, name: "broad entry", target: { redirectUrl: "http://localhost:8080/entry.js" } },
+        { ...base, id: "r-exact", priority: 100, name: "exact entry", target: { redirectUrl: "http://localhost:8082/entry.js" } },
+      ],
+    };
+
+    const rules = toDynamicNetRequestRules(ws);
+    const broad = rules.find((r) => r.action.redirect.url === "http://localhost:8080/entry.js");
+    const exact = rules.find((r) => r.action.redirect.url === "http://localhost:8082/entry.js");
+    expect(broad!.priority).toBeGreaterThan(exact!.priority);
+  });
+
   it("creates regexFilter + regexSubstitution for wildcard redirectUrl", () => {
     const rule: Rule = {
       ...assetRule,

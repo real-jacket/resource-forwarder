@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceSnapshot } from "@resource-forwarder/shared-types";
-import { collectExecutableRuleIds, describeRuleRoutes } from "./rule-execution.js";
+import { collectExecutableRuleIds, collectShadowedRuleIds, describeRuleRoutes } from "./rule-execution.js";
 
 const now = "2026-08-15T00:00:00.000Z";
 
@@ -69,6 +69,67 @@ describe("collectExecutableRuleIds", () => {
       id: "other-ruleset",
     });
     expect(collectExecutableRuleIds(value, "https://example.com/page", 1)).toEqual(new Set());
+  });
+});
+
+describe("collectShadowedRuleIds", () => {
+  // Mirrors the real scenario: a group is copied (our copy feature), so a
+  // second rule set on the same page carries a byte-for-byte duplicate asset
+  // rule at the same priority. Both are page-active, but only one redirect can
+  // apply — the copy must be reported as shadowed.
+  function twoDuplicateGroups(): WorkspaceSnapshot {
+    const assetMatch = {
+      host: ["co-dev-office-18.shimorelease.com"],
+      pathGlob: "/shimo-assets/sheet/entry.*.js",
+      resourceType: ["script" as const],
+      tabScope: { mode: "all" as const },
+    };
+    const baseRule = {
+      name: "entryjs",
+      enabled: true,
+      kind: "asset_redirect" as const,
+      priority: 100,
+      match: assetMatch,
+      target: { redirectUrl: "http://localhost:8080/entry.js" },
+      tags: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    return {
+      version: 1,
+      revision: 0,
+      updatedAt: now,
+      projects: [{
+        id: "project",
+        name: "co-dev-office-18",
+        enabled: true,
+        siteHosts: ["co-dev-office-18.shimorelease.com"],
+        siteMatchPatterns: ["https://co-dev-office-18.shimorelease.com/sdk/demo/shimo-files/*"],
+        tags: [],
+        createdAt: now,
+        updatedAt: now,
+      }],
+      ruleSets: [
+        { id: "sheet", projectId: "project", name: "sheet", enabled: true, ruleIds: ["entry-orig"], siteMatchPatterns: ["https://co-dev-office-18.shimorelease.com/sdk/demo/shimo-files/*"], createdAt: now, updatedAt: now },
+        { id: "sheet-copy", projectId: "project", name: "sheet-2e82", enabled: true, ruleIds: ["entry-copy"], siteMatchPatterns: ["https://co-dev-office-18.shimorelease.com/sdk/demo/shimo-files/2e8259efe5674995"], createdAt: "2026-08-16T00:00:00.000Z", updatedAt: now },
+      ],
+      rules: [
+        { ...baseRule, id: "entry-orig" },
+        { ...baseRule, id: "entry-copy", createdAt: "2026-08-16T00:00:00.000Z" },
+      ],
+    };
+  }
+
+  it("shadows the broader-scoped duplicate and keeps the exact-scope one effective", () => {
+    const url = "https://co-dev-office-18.shimorelease.com/sdk/demo/shimo-files/2e8259efe5674995";
+    const value = twoDuplicateGroups();
+
+    // Sanity: both duplicates are page-active (enabled + in-scope).
+    expect(collectExecutableRuleIds(value, url, 1)).toEqual(new Set(["entry-orig", "entry-copy"]));
+    // "sheet" scopes the whole `/shimo-files/*`; the copied "sheet-2e82" group
+    // scopes the exact URL — the exact one is the effective winner, so the
+    // broader original is the redundant (shadowed) one.
+    expect(collectShadowedRuleIds(value, url, 1)).toEqual(new Set(["entry-orig"]));
   });
 });
 

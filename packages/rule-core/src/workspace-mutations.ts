@@ -166,6 +166,34 @@ export function applyUpsertRuleSet(
   return { ...workspace, ruleSets, updatedAt: new Date().toISOString() };
 }
 
+/**
+ * Apply a batch of new/updated entities to the workspace in a single pass.
+ *
+ * Used by copy flows (duplicate a rule set or a whole project) so the new
+ * rule set(s) and the rules they reference land together as one local mutation
+ * and one service push — instead of a rule-set upsert followed by N racing
+ * per-rule upserts, which could partially fail under CAS and leave an empty
+ * group behind.
+ */
+export function applyWorkspacePatch(
+  workspace: WorkspaceSnapshot,
+  patch: { projects?: Project[]; ruleSets?: RuleSet[]; rules?: Rule[] },
+): WorkspaceSnapshot {
+  let projects = workspace.projects;
+  for (const project of patch.projects ?? []) {
+    projects = upsertById(projects, stampUpdated(project));
+  }
+  let ruleSets = workspace.ruleSets;
+  for (const ruleSet of patch.ruleSets ?? []) {
+    ruleSets = upsertById(ruleSets, stampUpdated(ruleSet));
+  }
+  let rules = workspace.rules;
+  for (const rule of patch.rules ?? []) {
+    rules = upsertById(rules, stampUpdated(rule));
+  }
+  return { ...workspace, projects, ruleSets, rules, updatedAt: new Date().toISOString() };
+}
+
 export function mergeWorkspaces(
   current: WorkspaceSnapshot,
   imported: WorkspaceSnapshot,

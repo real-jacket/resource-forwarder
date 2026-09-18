@@ -2,6 +2,7 @@ export const DEFAULT_SERVICE_URL = "http://127.0.0.1:5178";
 export const STORAGE_KEYS = {
   serviceUrl: "resource-forwarder:service-url",
   serviceToken: "resource-forwarder:service-token",
+  companionEnabled: "resource-forwarder:companion-enabled",
   managedRuleIds: "resource-forwarder:managed-dnr-rule-ids",
   workspace: "resource-forwarder:workspace",
   serviceRevision: "resource-forwarder:service-revision",

@@ -667,6 +667,42 @@ describe("background sidepanel loading", () => {
     expect((stored[STORAGE_KEYS.workspace] as WorkspaceSnapshot).revision).toBe(2);
     expect(appliedBodies).not.toContain(1);
   });
+  it("copies a rule set and its rules in a single service push", async () => {
+    const chromeMock = installChromeMock(apiWorkspace);
+    const importBodies: WorkspaceSnapshot[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (path === "/import") {
+        const body = JSON.parse(String(init?.body)) as { content: string };
+        importBodies.push(JSON.parse(body.content) as WorkspaceSnapshot);
+        return new Response(JSON.stringify({ workspace: { ...apiWorkspace, revision: 1 }, revision: 1, warnings: [] }), { status: 200 });
+      }
+      if (path === "/workspace") return new Response(JSON.stringify({ workspace: { ...apiWorkspace, revision: 1 }, revision: 1 }), { status: 200 });
+      if (path === "/applied") return new Response(JSON.stringify({ appliedRevision: 1 }), { status: 200 });
+      throw new Error(path);
+    }));
+    await loadBackgroundWorker();
+
+    await chromeMock.send({
+      type: "apply-workspace-patch",
+      payload: {
+        ruleSets: [{ ...apiWorkspace.ruleSets[0]!, id: "ruleset-copy", name: "Rules 副本", ruleIds: ["api-copy"] }],
+        rules: [{ ...apiWorkspace.rules[0]!, id: "api-copy" }],
+      },
+    });
+    await vi.waitFor(() => expect(importBodies).toHaveLength(1));
+
+    const stored = (await chrome.storage.local.get(STORAGE_KEYS.workspace))[STORAGE_KEYS.workspace] as WorkspaceSnapshot;
+    const copied = stored.ruleSets.find((rs) => rs.id === "ruleset-copy");
+    expect(copied?.ruleIds).toEqual(["api-copy"]);
+    expect(stored.rules.find((r) => r.id === "api-copy")).toBeDefined();
+    // Exactly one push carried both the group and its rule — no per-rule CAS race.
+    expect(importBodies).toHaveLength(1);
+    expect(importBodies[0]!.ruleSets.find((rs) => rs.id === "ruleset-copy")?.ruleIds).toEqual(["api-copy"]);
+    expect(importBodies[0]!.rules.find((r) => r.id === "api-copy")).toBeDefined();
+  });
+
   it("external agent upsert wins over a clean local state", async () => {
     const chromeMock = installChromeMock(agentWorkspace);
     const serviceWorkspace = {
@@ -803,8 +839,10 @@ describe("background sidepanel loading", () => {
     releaseImport();
     await syncPromise;
     const dirty = await chrome.storage.local.get(STORAGE_KEYS.workspaceDirty);
+    const stored = await chrome.storage.local.get(STORAGE_KEYS.workspace);
 
     expect(dirty[STORAGE_KEYS.workspaceDirty]).toEqual([expect.any(String)]);
+    expect((stored[STORAGE_KEYS.workspace] as WorkspaceSnapshot).projects.some((project) => project.id === "local-race")).toBe(true);
   });
   it("rejects crafted agent references before local import or DNR", async () => {
     const chromeMock = installChromeMock(agentWorkspace);
@@ -857,5 +895,96 @@ describe("background sidepanel loading", () => {
     await vi.waitFor(() => expect(outbound).toBeDefined());
 
     expect(outbound?.agentReservations).toBeUndefined();
+  });
+});
+
+describe("companion disconnect", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps local rule-set toggles and never contacts companion while disconnected", async () => {
+    const chromeMock = installChromeMock(apiWorkspace);
+    const fetchMock = vi.fn(async () => {
+      throw new Error("disconnected companion must not be contacted");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await chrome.storage.local.set({ [STORAGE_KEYS.companionEnabled]: false });
+    await loadBackgroundWorker();
+
+    const toggled = await chromeMock.send({
+      type: "upsert-rule-set",
+      payload: { ruleSet: { ...apiWorkspace.ruleSets[0]!, enabled: false } },
+    }) as { workspace: WorkspaceSnapshot; companionEnabled?: boolean; health: unknown };
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(toggled.companionEnabled).toBe(false);
+    expect(toggled.health).toBeNull();
+    expect(toggled.workspace.ruleSets[0]?.enabled).toBe(false);
+
+    await chromeMock.send({ type: "sync-workspace" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    const stored = (await chrome.storage.local.get(STORAGE_KEYS.workspace))[STORAGE_KEYS.workspace] as WorkspaceSnapshot;
+    expect(stored.ruleSets[0]?.enabled).toBe(false);
+    expect(stored.ruleSets[0]?.name).toBe("Rules");
+  });
+
+  it("does not pull companion workspace after the user disconnects", async () => {
+    const chromeMock = installChromeMock(apiWorkspace);
+    const serviceWorkspace = {
+      ...apiWorkspace,
+      revision: 9,
+      ruleSets: [{ ...apiWorkspace.ruleSets[0]!, enabled: false, name: "Service Group" }],
+    };
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (path === "/workspace") return new Response(JSON.stringify({ workspace: serviceWorkspace, revision: 9 }), { status: 200 });
+      if (path === "/applied") return new Response(JSON.stringify({ appliedRevision: 9 }), { status: 200 });
+      throw new Error(path);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await loadBackgroundWorker();
+    await chromeMock.send({ type: "sync-workspace" });
+    expect(fetchMock).toHaveBeenCalled();
+    fetchMock.mockClear();
+
+    const disconnected = await chromeMock.send({ type: "set-companion-enabled", enabled: false }) as {
+      companionEnabled?: boolean;
+      health: unknown;
+    };
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(disconnected.companionEnabled).toBe(false);
+    expect(disconnected.health).toBeNull();
+
+    await chromeMock.send({ type: "sync-workspace" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reconnects and contacts companion after companion is enabled", async () => {
+    const chromeMock = installChromeMock(apiWorkspace);
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (path === "/workspace") {
+        return new Response(JSON.stringify({ workspace: { ...apiWorkspace, revision: 2 }, revision: 2 }), { status: 200 });
+      }
+      if (path === "/applied") return new Response(JSON.stringify({ appliedRevision: 2 }), { status: 200 });
+      throw new Error(path);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await chrome.storage.local.set({ [STORAGE_KEYS.companionEnabled]: false });
+    await loadBackgroundWorker();
+    await chromeMock.send({ type: "sync-workspace" });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const reconnected = await chromeMock.send({ type: "set-companion-enabled", enabled: true }) as {
+      companionEnabled?: boolean;
+      health: { ok: boolean } | null;
+    };
+    expect(fetchMock).toHaveBeenCalled();
+    expect(reconnected.companionEnabled).toBe(true);
+    expect(reconnected.health?.ok).toBe(true);
   });
 });

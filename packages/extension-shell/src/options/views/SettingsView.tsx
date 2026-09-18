@@ -39,6 +39,9 @@ export interface SettingsViewProps {
     /** Whether a token is already persisted in chrome.storage.local. */
     tokenSaved: boolean;
     saveToken: () => void | Promise<void>;
+    /** False when the user has explicitly disconnected Companion. */
+    companionEnabled: boolean;
+    setCompanionEnabled: (enabled: boolean) => void | Promise<void>;
   };
 
   /** Filter & search bar over the site list. */
@@ -83,7 +86,7 @@ export function SettingsView(props: SettingsViewProps) {
     <>
       <div className="page-header">
         <div className="page-title">设置</div>
-        <div className="page-subtitle">管理站点，并配置需要本地文件等能力时使用的可选 Companion</div>
+        <div className="page-subtitle">管理站点，并可随时断开可选 Companion，避免它覆盖本地规则</div>
       </div>
 
       <div className="settings-page">
@@ -138,11 +141,18 @@ function ServiceCard({
   busy: boolean;
 }) {
   const [showToken, setShowToken] = React.useState(false);
+  const companionEnabled = service.companionEnabled;
+  const statusTone = !companionEnabled ? "disconnected" : dashboard?.health ? "online" : "offline";
+  const statusText = !companionEnabled
+    ? "已断开 Companion · 本地规则独立运行，启动 Companion 也不会覆盖"
+    : dashboard?.health
+      ? `Companion 在线 · 端口 ${service.port}`
+      : "Companion 未连接 · 浏览器模式仍可用，仅本地文件和受限 Header 能力不可用";
   return (
     <div className="settings-card">
       <div className="settings-card-header">
         <div className="settings-card-title">通用设置</div>
-        <div className="settings-card-desc">仅本地文件、受限 Header 或强制本地执行规则需要配置</div>
+        <div className="settings-card-desc">仅本地文件、受限 Header 或强制本地执行规则需要配置。断开后地址和 token 会保留，可随时再连接。</div>
       </div>
       <div className="settings-card-body">
         <div className="settings-field-row">
@@ -158,9 +168,11 @@ function ServiceCard({
           <button className="btn btn-primary" onClick={() => void service.save()} disabled={busy}>
             保存
           </button>
-          <button className="btn btn-default" onClick={() => void service.refresh()} disabled={busy}>
-            立即同步
-          </button>
+          {companionEnabled && (
+            <button className="btn btn-default" onClick={() => void service.refresh()} disabled={busy}>
+              立即同步
+            </button>
+          )}
         </div>
 
         <div className="settings-field-row">
@@ -198,11 +210,28 @@ function ServiceCard({
           </button>
         </div>
 
-        <div className={`service-status-bar ${dashboard?.health ? "online" : "offline"}`}>
+        <div className={`service-status-bar ${statusTone}`}>
           <span className="service-status-dot" />
-          <span className="service-status-text">
-            {dashboard?.health ? `Companion 在线 · 端口 ${service.port}` : "Companion 未连接 · 浏览器模式仍可用，仅本地文件和受限 Header 能力不可用"}
-          </span>
+          <span className="service-status-text">{statusText}</span>
+          {companionEnabled ? (
+            <button
+              className="btn btn-default btn-sm"
+              type="button"
+              disabled={busy}
+              onClick={() => void service.setCompanionEnabled(false)}
+            >
+              断开 Companion
+            </button>
+          ) : (
+            <button
+              className="btn btn-primary btn-sm"
+              type="button"
+              disabled={busy}
+              onClick={() => void service.setCompanionEnabled(true)}
+            >
+              连接 Companion
+            </button>
+          )}
         </div>
       </div>
     </div>

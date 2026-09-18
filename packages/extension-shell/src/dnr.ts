@@ -88,6 +88,9 @@ export function buildScopedDnrRuleGroups(
         },
       },
       binding.project?.siteHosts,
+      binding.ruleSet?.siteMatchPatterns?.length
+        ? binding.ruleSet.siteMatchPatterns
+        : binding.project?.siteMatchPatterns,
     );
     const canStayDynamic =
       canExpressPageScopeWithInitiatorDomains(binding.project, binding.ruleSet) &&

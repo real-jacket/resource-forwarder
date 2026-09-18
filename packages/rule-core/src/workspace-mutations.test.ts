@@ -5,6 +5,7 @@ import {
   applyUpsertProject,
   applyUpsertRule,
   applyUpsertRuleSet,
+  applyWorkspacePatch,
   emptyPendingDeletions,
   isPendingDeletionsEmpty,
   mergePendingDeletions,
@@ -257,6 +258,60 @@ describe("workspace-mutations", () => {
       const merged = mergeWorkspaces(a, b);
       expect(merged.projects.find((p) => p.id === "p1")?.name).toBe("Imported");
       expect(merged.projects.find((p) => p.id === "p2")).toBeDefined();
+    });
+  });
+
+  describe("applyWorkspacePatch", () => {
+    it("adds a copied rule set together with the rules it references in one pass", () => {
+      const patch = {
+        ruleSets: [
+          { id: "rs1-copy", projectId: "p2", name: "Default 副本", enabled: true, ruleIds: ["r1-copy", "r2-copy"], createdAt: ts, updatedAt: ts },
+        ],
+        rules: [
+          { ...baseWorkspace().rules[0], id: "r1-copy" },
+          { ...baseWorkspace().rules[1], id: "r2-copy" },
+        ],
+      };
+
+      const next = applyWorkspacePatch(baseWorkspace(), patch);
+
+      const copied = next.ruleSets.find((rs) => rs.id === "rs1-copy");
+      expect(copied?.ruleIds).toEqual(["r1-copy", "r2-copy"]);
+      // The referenced rules must exist so the group is not empty.
+      expect(next.rules.find((r) => r.id === "r1-copy")).toBeDefined();
+      expect(next.rules.find((r) => r.id === "r2-copy")).toBeDefined();
+      // Existing entities are preserved.
+      expect(next.ruleSets.map((rs) => rs.id)).toContain("rs1");
+      expect(next.rules).toHaveLength(5);
+    });
+
+    it("adds a copied project with its rule sets and rules", () => {
+      const patch = {
+        projects: [
+          { id: "p1-copy", name: "App 副本", enabled: true, siteHosts: ["a.example.com"], tags: [], createdAt: ts, updatedAt: ts },
+        ],
+        ruleSets: [
+          { id: "rs1-copy", projectId: "p1-copy", name: "Default", enabled: true, ruleIds: ["r1-copy"], createdAt: ts, updatedAt: ts },
+        ],
+        rules: [{ ...baseWorkspace().rules[0], id: "r1-copy" }],
+      };
+
+      const next = applyWorkspacePatch(baseWorkspace(), patch);
+
+      expect(next.projects.map((p) => p.id)).toContain("p1-copy");
+      expect(next.ruleSets.find((rs) => rs.id === "rs1-copy")?.ruleIds).toEqual(["r1-copy"]);
+      expect(next.rules.find((r) => r.id === "r1-copy")).toBeDefined();
+    });
+
+    it("replaces an entity that already exists by id", () => {
+      const patch = {
+        ruleSets: [
+          { id: "rs1", projectId: "p1", name: "Renamed", enabled: true, ruleIds: ["r1", "r2"], createdAt: ts, updatedAt: ts },
+        ],
+      };
+      const next = applyWorkspacePatch(baseWorkspace(), patch);
+      expect(next.ruleSets.filter((rs) => rs.id === "rs1")).toHaveLength(1);
+      expect(next.ruleSets.find((rs) => rs.id === "rs1")?.name).toBe("Renamed");
     });
   });
 

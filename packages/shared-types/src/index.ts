@@ -353,6 +353,12 @@ export interface RuntimeState {
   health: ServiceHealthResponse | null;
   workspace: WorkspaceSnapshot;
   serviceRevision?: number;
+  /**
+   * Whether the optional local Companion is allowed to connect.
+   * `false` means the user explicitly disconnected: never probe, pull, or
+   * overwrite local rules. Missing/undefined is treated as enabled.
+   */
+  companionEnabled?: boolean;
 }
 
 // --- AI-facing analysis endpoints (/match, /rules/validate, /schema) ---
