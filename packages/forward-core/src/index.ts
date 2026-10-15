@@ -1,4 +1,4 @@
-import type {import type {
+import type {
     ForwardProfile,
     ForwardRequestPayload,
     ForwardResponsePayload,
