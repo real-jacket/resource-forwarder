@@ -1,4 +1,5 @@
 import type {
+  CompanionSyncStrategy,
   ExportWorkspaceResponse,
   ForwardRequestPayload,
   HitRecord,
@@ -19,6 +20,7 @@ import {
   applyUpsertProject,
   applyUpsertRule,
   applyUpsertRuleSet,
+  applyWorkspacePatch,
   assertWorkspace,
   collectWorkspaceWarnings,
   createEmptyWorkspace,
@@ -38,7 +40,7 @@ import {
   type PendingDeletions,
 } from "@resource-forwarder/rule-core";
 import { needsPageBridge } from "./page-bridge-policy.js";
-import type { DashboardState, RefreshSiteContextAck, RuntimeRequest } from "./shared/messages.js";
+import type { DashboardState, RefreshSiteContextAck, RuntimeRequest, WorkspacePatchPayload } from "./shared/messages.js";
 import { DEFAULT_SERVICE_URL, SERVICE_AUTH_REQUIRED_SENTINEL, SERVICE_OFFLINE_SENTINEL, STORAGE_KEYS } from "./shared/constants.js";
 import { buildDynamicRuleUpdatePlan, buildScopedDnrRuleGroups } from "./dnr.js";
 import { normalizeProxyRequestError } from "./shared/service-errors.js";
@@ -57,6 +59,8 @@ let runtimeState: RuntimeState = {
   serviceUrl: DEFAULT_SERVICE_URL,
   health: null,
   workspace: createEmptyWorkspace(),
+  companionEnabled: true,
+  syncStrategy: "merge",
 };
 let runtimeWarnings: string[] = [];
 let lastServiceRevision: number | undefined;
@@ -192,7 +196,7 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
     case "get-sidepanel-state":
       return getSidepanelState(message.tabId);
     case "sync-workspace":
-      return syncWorkspace();
+      return syncWorkspace(message.strategy);
     case "set-service-url":
       await chrome.storage.local.set({ [STORAGE_KEYS.serviceUrl]: message.serviceUrl });
       runtimeState.serviceUrl = message.serviceUrl;
@@ -202,6 +206,20 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
       // The new token may unblock previously-401'd /import or /forward retries —
       // sync immediately so the user sees the effect on the dashboard.
       return syncWorkspace();
+    case "set-companion-enabled":
+      await chrome.storage.local.set({ [STORAGE_KEYS.companionEnabled]: message.enabled });
+      runtimeState = { ...runtimeState, companionEnabled: message.enabled };
+      try {
+        return await syncWorkspace(message.enabled ? await getSyncStrategy() : undefined);
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : String(error);
+        runtimeWarnings = [messageText];
+        return { ...runtimeState, warnings: runtimeWarnings };
+      }
+    case "set-sync-strategy":
+      await chrome.storage.local.set({ [STORAGE_KEYS.syncStrategy]: message.strategy });
+      runtimeState = { ...runtimeState, syncStrategy: message.strategy };
+      return { ...runtimeState, warnings: runtimeWarnings };
     case "upsert-project":
       return handleUpsertProject(message.payload);
     case "delete-project":
@@ -212,6 +230,8 @@ async function handleRuntimeMessage(message: RuntimeRequest, sender: chrome.runt
       return handleDeleteRule(message.ruleId);
     case "upsert-rule-set":
       return handleUpsertRuleSet(message.payload);
+    case "apply-workspace-patch":
+      return handleApplyWorkspacePatch(message.payload);
     case "delete-rule-set":
       return handleDeleteRuleSet(message.ruleSetId);
     case "get-logs":
@@ -427,7 +447,10 @@ async function commitWorkspace(
 
 // ── Sync: local-first, then try remote service ───────────────────────────
 
-function syncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
+function syncWorkspace(strategy?: CompanionSyncStrategy): Promise<RuntimeState & { warnings: string[] }> {
+  if (strategy) {
+    return performSyncWorkspace(strategy);
+  }
   if (!syncWorkspacePromise) {
     syncWorkspacePromise = performSyncWorkspace().finally(() => {
       syncWorkspacePromise = undefined;
@@ -436,12 +459,25 @@ function syncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
   return syncWorkspacePromise;
 }
 
-async function performSyncWorkspace(): Promise<RuntimeState & { warnings: string[] }> {
+async function performSyncWorkspace(strategy?: CompanionSyncStrategy): Promise<RuntimeState & { warnings: string[] }> {
   const serviceUrl = await getServiceUrl();
-  const health = await getHealth(serviceUrl);
-  runtimeState = { ...runtimeState, serviceUrl, health };
+  const companionEnabled = await getCompanionEnabled();
+  const syncStrategy = await getSyncStrategy();
+  runtimeState = { ...runtimeState, serviceUrl, companionEnabled, syncStrategy };
 
   const localWorkspace = await readLocalWorkspace();
+  if (!companionEnabled) {
+    runtimeState = { ...runtimeState, health: null };
+    runtimeWarnings = [
+      localWorkspace.rules.length > 0
+        ? `已断开 Companion：正在使用本地存储的 ${localWorkspace.rules.length} 条规则。`
+        : "已断开 Companion：浏览器模式可直接使用本地规则。",
+    ];
+    return commitWorkspace(localWorkspace, serviceUrl, null);
+  }
+
+  const health = await getHealth(serviceUrl);
+  runtimeState = { ...runtimeState, health };
   if (!health) {
     runtimeWarnings = [
       localWorkspace.rules.length > 0
@@ -484,11 +520,47 @@ async function performSyncWorkspace(): Promise<RuntimeState & { warnings: string
     }
   }
 
-  try {
+  return finishConnectedSync(serviceUrl, health, strategy);
+}
+
+async function finishConnectedSync(
+  serviceUrl: string,
+  health: ServiceHealthResponse,
+  strategy: CompanionSyncStrategy | undefined,
+): Promise<RuntimeState & { warnings: string[] }> {
+  // A concurrent local mutation (for example toggling a group) may have
+  // landed after this sync sampled dirty ops. Replacing with the companion
+  // snapshot would revert that edit.
+  const leftoverPushOps = await readPendingPushOps();
+  if (leftoverPushOps.length > 0) {
+    return commitWorkspace(await readLocalWorkspace(), serviceUrl, health);
+  }
+
+  const local = await readLocalWorkspace();
+  if (strategy === "pull") {
     const workspace = await pullServiceWorkspace(serviceUrl);
     return commitWorkspace(workspace, serviceUrl, health, workspace.revision);
+  }
+  if (strategy === "push" || strategy === "merge") {
+    const response = await sendGuardedMutation<MutationResponse>(serviceUrl, "/import", "POST", (revision) => ({
+      content: serializeWorkspace(userOwnedSlice(local), "json"),
+      format: "json",
+      merge: strategy === "merge",
+      ifRevision: revision,
+    } satisfies ImportWorkspacePayload));
+    return commitWorkspace(response.workspace, serviceUrl, health, response.revision);
+  }
+
+  try {
+    const workspace = await pullServiceWorkspace(serviceUrl);
+    return commitWorkspace(
+      reconcileAgentManagedSubtrees(local, workspace),
+      serviceUrl,
+      health,
+      workspace.revision,
+    );
   } catch {
-    return commitWorkspace(reconcileAgentManagedSubtrees(localWorkspace, localWorkspace), serviceUrl, health);
+    return commitWorkspace(reconcileAgentManagedSubtrees(local, local), serviceUrl, health);
   }
 }
 
@@ -662,6 +734,39 @@ async function handleUpsertRuleSet(payload: { ruleSet: RuleSet }): Promise<Runti
   });
 }
 
+async function handleApplyWorkspacePatch(payload: WorkspacePatchPayload): Promise<RuntimeState & { warnings: string[] }> {
+  return withWriteLock(async () => {
+    const localWorkspace = await readLocalWorkspace();
+    // Reject the whole batch if any target project is agent-managed (read-only).
+    // Cover both the patch's own projects and the projects that own the
+    // patch's rule sets (existing or newly introduced by the patch).
+    const projectById = new Map(localWorkspace.projects.map((project) => [project.id, project]));
+    for (const project of payload.projects ?? []) projectById.set(project.id, project);
+    const touchedProjectIds = new Set<string>();
+    for (const project of payload.projects ?? []) touchedProjectIds.add(project.id);
+    for (const ruleSet of payload.ruleSets ?? []) touchedProjectIds.add(ruleSet.projectId);
+    for (const projectId of touchedProjectIds) {
+      const project = projectById.get(projectId);
+      if (project && isAgentManagedProject(project)) {
+        throw new Error("agent-managed 站点为只读，请使用 agent control。");
+      }
+    }
+    const nextWorkspace = applyWorkspacePatch(localWorkspace, payload);
+    const serviceUrl = await getServiceUrl();
+    const result = await commitWorkspaceAndStartPush(
+      nextWorkspace,
+      serviceUrl,
+      (opId) => sendGuardedMutation<MutationResponse>(serviceUrl, "/import", "POST", (revision) => ({
+        content: serializeWorkspace(userOwnedSlice(nextWorkspace), "json"),
+        format: "json",
+        merge: true,
+        ifRevision: revision,
+      } satisfies ImportWorkspacePayload)).then((response) => recordMutationResult(opId, serviceUrl, response)),
+    );
+    return result;
+  });
+}
+
 async function handleDeleteRuleSet(ruleSetId: string): Promise<RuntimeState & { warnings: string[] }> {
   return withWriteLock(async () => {
     const localWorkspace = await readLocalWorkspace();
@@ -710,8 +815,23 @@ async function commitWorkspaceAndStartPush(
   work: (opId: string) => Promise<void>,
 ): Promise<RuntimeState & { warnings: string[] }> {
   const registration = await registerPush(work);
-  const result = await commitWorkspace(workspace, serviceUrl, runtimeState.health);
-  registration.start();
+  const companionEnabled = await getCompanionEnabled();
+  runtimeState = {
+    ...runtimeState,
+    companionEnabled,
+    health: companionEnabled ? runtimeState.health : null,
+  };
+  const result = await commitWorkspace(
+    workspace,
+    serviceUrl,
+    runtimeState.health,
+  );
+  // Keep the dirty marker so reconnect can push, but never contact Companion
+  // while the user has explicitly disconnected — a successful mutation
+  // response would otherwise overwrite local rules.
+  if (companionEnabled) {
+    registration.start();
+  }
   return result;
 }
 
@@ -758,10 +878,24 @@ async function handleExportWorkspace(projectIds: string[], format: "json" | "yam
 async function hydrateRuntimeStateFromLocal(): Promise<void> {
   if (localRuntimeHydrated) return;
   if (!localRuntimeHydration) {
-    localRuntimeHydration = Promise.all([readLocalWorkspace(), getServiceUrl(), getLastServiceRevision()])
-      .then(([workspace, serviceUrl, serviceRevision]) => {
+    localRuntimeHydration = Promise.all([
+      readLocalWorkspace(),
+      getServiceUrl(),
+      getLastServiceRevision(),
+      getCompanionEnabled(),
+      getSyncStrategy(),
+    ])
+      .then(([workspace, serviceUrl, serviceRevision, companionEnabled, syncStrategy]) => {
         if (!localRuntimeHydrated) {
-          runtimeState = { ...runtimeState, serviceUrl, workspace, serviceRevision };
+          runtimeState = {
+            ...runtimeState,
+            serviceUrl,
+            workspace,
+            serviceRevision,
+            companionEnabled,
+            syncStrategy,
+            health: companionEnabled ? runtimeState.health : null,
+          };
           localRuntimeHydrated = true;
         }
       })
@@ -788,6 +922,13 @@ async function getSidepanelState(tabId?: number): Promise<DashboardState> {
 }
 
 async function getDashboardState(tabId?: number): Promise<DashboardState> {
+  const [companionEnabled, syncStrategy] = await Promise.all([getCompanionEnabled(), getSyncStrategy()]);
+  runtimeState = {
+    ...runtimeState,
+    companionEnabled,
+    syncStrategy,
+    health: companionEnabled ? runtimeState.health : null,
+  };
   if (runtimeState.workspace.rules.length === 0) {
     try { await syncWorkspace(); } catch { /* use whatever runtimeState has */ }
   }
@@ -1052,8 +1193,11 @@ async function getTabSnapshot(tabId?: number): Promise<DashboardState["currentTa
 }
 
 async function getHealth(serviceUrl: string): Promise<ServiceHealthResponse | null> {
+  if (!(await getCompanionEnabled())) {
+    return null;
+  }
   try {
-    const response = await serviceFetch("/health", { serviceUrl });
+    const response = await serviceFetch("/health", { serviceUrl, signal: AbortSignal.timeout(2000) });
     if (!response.ok) {
       return null;
     }
@@ -1087,6 +1231,17 @@ async function getServiceUrl(): Promise<string> {
   return typeof stored[STORAGE_KEYS.serviceUrl] === "string"
     ? stored[STORAGE_KEYS.serviceUrl]
     : DEFAULT_SERVICE_URL;
+}
+
+async function getCompanionEnabled(): Promise<boolean> {
+  const stored = await chrome.storage.local.get(STORAGE_KEYS.companionEnabled);
+  return stored[STORAGE_KEYS.companionEnabled] !== false;
+}
+
+async function getSyncStrategy(): Promise<CompanionSyncStrategy> {
+  const stored = await chrome.storage.local.get(STORAGE_KEYS.syncStrategy);
+  const value = stored[STORAGE_KEYS.syncStrategy];
+  return value === "pull" || value === "push" || value === "merge" ? value : "merge";
 }
 
 async function getServiceToken(): Promise<string | undefined> {

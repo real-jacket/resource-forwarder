@@ -30,6 +30,26 @@ export function matchesRuleSetSite(
   return patterns.some((pattern) => matchesSitePattern(pattern, pageUrl));
 }
 
+/**
+ * How specifically a set of site-match patterns pins down a given page URL.
+ * Higher = more specific (an exact URL beats a `/*` wildcard). Returns -1 when
+ * none of the patterns match the URL. Measured as the literal (non-wildcard)
+ * character count of the most specific matching pattern.
+ *
+ * Used to break ties between equal-priority asset_redirect rules whose owning
+ * groups both match the current page: the more specific group is treated as
+ * the effective one, since the browser's DNR tie for equal priority is
+ * otherwise undefined.
+ */
+export function siteScopeSpecificity(patterns: string[], pageUrl: string): number {
+  let best = -1;
+  for (const pattern of patterns) {
+    if (!matchesSitePattern(pattern, pageUrl)) continue;
+    best = Math.max(best, pattern.replace(/\*/g, "").length);
+  }
+  return best;
+}
+
 function matchesSitePattern(pattern: string, pageUrl: string): boolean {
   const trimmed = pattern.trim();
   if (!trimmed || trimmed === "*" || trimmed === "<all_urls>") return true;

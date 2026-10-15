@@ -4,7 +4,7 @@ import { matchesProjectSite, matchesRuleSetSite, sortRules } from "@resource-for
 import type { Project, Rule, RuleSet } from "@resource-forwarder/shared-types";
 import { joinCsv } from "../shared/helpers.js";
 import type { GetDashboardStateResponse, UpsertMutationResponse } from "../shared/messages.js";
-import { collectExecutableRuleIds, describeRuleRoutes } from "./rule-execution.js";
+import { collectExecutableRuleIds, collectShadowedRuleIds, describeRuleRoutes } from "./rule-execution.js";
 import { runtimeRequest } from "../shared/messages.js";
 import {
   buildOptionsNavigationUrl,
@@ -178,6 +178,17 @@ function App() {
     [matchedRules, executableRuleIds],
   );
 
+  // A rule can be page-active yet never fire because a higher-precedence rule
+  // of the same kind fully covers it — for a given request only the first
+  // match in precedence order wins (and for 资源替换 duplicates, only one DNR
+  // redirect applies). Dim those so the rule that actually wins stands out.
+  const shadowedRuleIds = useMemo(
+    () => dashboard && currentUrl
+      ? collectShadowedRuleIds(dashboard.workspace, currentUrl, dashboard.currentTab?.id)
+      : new Set<string>(),
+    [dashboard, currentUrl],
+  );
+
   const dnrRegisteredCount =
     (dashboard?.dnrRuleCount?.dynamic ?? 0) + (dashboard?.dnrRuleCount?.session ?? 0);
   const dnrBadgeTone =
@@ -223,6 +234,8 @@ function App() {
       applyDashboardState(cachedState);
       if (!cachedState.currentTab?.host) {
         setStatus("当前标签页不可识别，请切到一个正常网页。");
+      } else if (cachedState.companionEnabled === false) {
+        setStatus("已断开 Companion，正在使用本地规则。");
       } else if (!cachedState.health) {
         setStatus("Companion 未连接；普通 API 转发仍由浏览器执行，本地文件规则暂不可用。");
       } else {
@@ -234,7 +247,13 @@ function App() {
       await runtimeRequest({ type: "sync-workspace" });
       const syncedState = await runtimeRequest<GetDashboardStateResponse>({ type: "get-sidepanel-state" });
       applyDashboardState(syncedState);
-      setStatus(syncedState.health ? "当前页面状态已同步。" : "Companion 未连接；已继续使用本地规则。");
+      setStatus(
+        syncedState.companionEnabled === false
+          ? "已断开 Companion，正在使用本地规则。"
+          : syncedState.health
+            ? "当前页面状态已同步。"
+            : "Companion 未连接；已继续使用本地规则。",
+      );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "加载侧边栏失败。");
     } finally {
@@ -345,9 +364,9 @@ function App() {
         </div>
         <div className="sp-hero-url">{currentUrl || "打开一个网页后显示"}</div>
         <div className="sp-hero-badges">
-          <span className={`sp-badge ${dashboard?.health ? "online" : "offline"}`}>
+          <span className={`sp-badge ${dashboard?.companionEnabled === false ? "offline" : dashboard?.health ? "online" : "offline"}`}>
             <span className="sp-badge-dot" />
-            {dashboard?.health ? "Companion 在线" : "浏览器模式"}
+            {dashboard?.companionEnabled === false ? "已断开 Companion" : dashboard?.health ? "Companion 在线" : "浏览器模式"}
           </span>
           <span className={`sp-badge ${visibleProjects.length > 0 ? "matched" : "unmatched"}`}>
             {visibleProjects.length > 0 ? `${visibleProjects.length} 个站点` : "未匹配"}
@@ -512,10 +531,11 @@ function App() {
                   {!collapsedRuleGroupIds.has(ruleSet.id) && <div className="sp-rule-list">
                     {rules.map((rule) => {
                       const visuallyOff = !executableRuleIds.has(rule.id);
+                      const shadowed = !visuallyOff && shadowedRuleIds.has(rule.id);
                       const routes = describeRuleRoutes(rule, project, ruleSet, currentUrl);
                       return (
                         <div
-                          className={`sp-rule-item${visuallyOff ? " is-off" : ""}`}
+                          className={`sp-rule-item${visuallyOff ? " is-off" : ""}${shadowed ? " is-shadowed" : ""}`}
                           key={rule.id}
                         >
                           <label className="toggle-switch toggle-switch-sm">
@@ -533,6 +553,14 @@ function App() {
                               <span className={`match-badge ${rule.kind === "api_forward" ? "api" : "asset"}`}>
                                 {formatKind(rule.kind)}
                               </span>
+                              {shadowed && (
+                                <span
+                                  className="sp-rule-shadowed-badge"
+                                  title="该规则被同页面中优先级更高、匹配范围更广的规则完全覆盖，对这些请求不会生效。如需让它生效，请调高它的优先级。"
+                                >
+                                  被覆盖
+                                </span>
+                              )}
                             </div>
                             <div className="sp-rule-routes">
                               {routes.map((route) => (

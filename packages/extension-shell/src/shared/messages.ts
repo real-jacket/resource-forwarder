@@ -1,11 +1,14 @@
 import type {
+  CompanionSyncStrategy,
   ExportWorkspaceResponse,
   ForwardRequestPayload,
   ImportWorkspacePayload,
   LogsResponse,
   MatchRequestPayload,
   MatchResponse,
+  Project,
   RevisionGuard,
+  Rule,
   RuleSet,
   RuntimeState,
   ServiceHealthResponse,
@@ -35,14 +38,17 @@ export interface DashboardState extends RuntimeState {
 export type RuntimeRequest =
   | { type: "get-dashboard-state"; tabId?: number }
   | { type: "get-sidepanel-state"; tabId?: number }
-  | { type: "sync-workspace" }
+  | { type: "sync-workspace"; strategy?: CompanionSyncStrategy }
   | { type: "set-service-url"; serviceUrl: string }
   | { type: "set-service-token"; token: string }
+  | { type: "set-companion-enabled"; enabled: boolean }
+  | { type: "set-sync-strategy"; strategy: CompanionSyncStrategy }
   | { type: "upsert-project"; payload: UpsertProjectPayload }
   | { type: "delete-project"; projectId: string }
   | { type: "upsert-rule"; payload: UpsertRulePayload }
   | { type: "delete-rule"; ruleId: string }
   | { type: "upsert-rule-set"; payload: RevisionGuard & { ruleSet: RuleSet } }
+  | { type: "apply-workspace-patch"; payload: WorkspacePatchPayload }
   | { type: "delete-rule-set"; ruleSetId: string }
   | { type: "get-logs"; limit?: number; projectId?: string }
   | { type: "diagnose-match"; payload: MatchRequestPayload }
@@ -55,6 +61,18 @@ export type RuntimeRequest =
 export interface RuntimeEnvelope {
   type: string;
   payload?: unknown;
+}
+
+/**
+ * A batch of new/updated entities applied as one atomic local mutation + one
+ * service push. Used by copy flows (duplicate a rule set or a project) so the
+ * copied rule set(s) and the rules they reference persist together, instead of
+ * a rule-set upsert followed by N racing per-rule upserts.
+ */
+export interface WorkspacePatchPayload {
+  projects?: Project[];
+  ruleSets?: RuleSet[];
+  rules?: Rule[];
 }
 
 export type RefreshSiteContextAck =

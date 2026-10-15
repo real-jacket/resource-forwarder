@@ -26,7 +26,7 @@ export {
   serializeWorkspace,
   trimWorkspaceForUrl,
 } from "./workspace.js";
-export { matchesProjectSite, matchesRuleSetSite } from "./site-matching.js";
+export { matchesProjectSite, matchesRuleSetSite, siteScopeSpecificity } from "./site-matching.js";
 
 // Matchers
 export {
@@ -78,6 +78,7 @@ export {
   applyUpsertProject,
   applyUpsertRule,
   applyUpsertRuleSet,
+  applyWorkspacePatch,
   emptyPendingDeletions,
   isPendingDeletionsEmpty,
   mergePendingDeletions,
@@ -89,6 +90,9 @@ export {
   upsertById,
 } from "./workspace-mutations.js";
 export type { PendingDeletions } from "./workspace-mutations.js";
+
+// Rule shadowing (which rules are fully covered by a higher-precedence rule)
+export { computeShadowedRuleIds } from "./rule-shadowing.js";
 
 // Agent-managed ownership and atomic switch helpers
 export {

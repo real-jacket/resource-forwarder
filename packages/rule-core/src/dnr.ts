@@ -25,6 +25,44 @@ const DNR_RESOURCE_TYPES: Record<string, Array<NonNullable<DynamicRedirectRule["
 
 const LEGACY_DEFAULT_ASSET_RESOURCE_TYPES: MatchResourceType[] = ["script", "stylesheet", "image", "font"];
 
+// Asset redirects run through Chrome DNR, whose tie between equal-priority
+// redirect rules is undefined. When two groups' rules both match a page, we
+// want the group whose page scope is MORE specific to win deterministically.
+// We fold that page-scope specificity into the DNR priority: the user's own
+// priority stays dominant (scaled up), and specificity only breaks ties among
+// equal user priorities.
+const PAGE_SCOPE_PRIORITY_SCALE = 1000;
+const MAX_PAGE_SCOPE_BUCKET = PAGE_SCOPE_PRIORITY_SCALE - 1;
+
+/** Intrinsic (URL-independent) specificity of a group's page scope patterns. */
+function pageScopeBucket(patterns: string[] | undefined): number {
+  if (!patterns || patterns.length === 0) return 0;
+  let maxLiteral = 0;
+  for (const pattern of patterns) {
+    maxLiteral = Math.max(maxLiteral, pattern.replace(/\*/g, "").length);
+  }
+  return Math.min(maxLiteral, MAX_PAGE_SCOPE_BUCKET);
+}
+
+/**
+ * Fold page-scope specificity into a DNR priority. The base priority is scaled
+ * so a difference of 1 in the user's own priority (≥ SCALE) always outranks any
+ * specificity bucket (< SCALE); specificity only decides ties.
+ */
+function toDnrPriority(basePriority: number, pageScopePatterns: string[] | undefined): number {
+  return basePriority * PAGE_SCOPE_PRIORITY_SCALE + pageScopeBucket(pageScopePatterns);
+}
+
+/** The effective page-scope patterns for a binding (group's, else project's). */
+function bindingPageScopePatterns(binding: {
+  ruleSet?: { siteMatchPatterns?: string[] };
+  project?: { siteMatchPatterns?: string[] };
+}): string[] | undefined {
+  return binding.ruleSet?.siteMatchPatterns?.length
+    ? binding.ruleSet.siteMatchPatterns
+    : binding.project?.siteMatchPatterns;
+}
+
 function isWasmPathGlob(pathGlob: string | undefined): boolean {
   return (pathGlob ?? "").toLowerCase().includes(".wasm");
 }
@@ -68,12 +106,13 @@ export function toDynamicNetRequestRules(workspace: WorkspaceSnapshot): DynamicR
           },
         },
         binding.project?.siteHosts,
+        bindingPageScopePatterns(binding),
       );
     })
     .filter((rule): rule is DynamicRedirectRule => Boolean(rule));
 }
 
-export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicRedirectRule {
+export function toDynamicRule(rule: Rule, projectSiteHosts?: string[], pageScopePatterns?: string[]): DynamicRedirectRule {
   const normalizedMatchResourceTypes =
     rule.kind === "asset_redirect"
       ? normalizeAssetRedirectResourceTypes(rule.match.resourceType, rule.match.pathGlob)
@@ -86,6 +125,7 @@ export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicR
     : undefined;
 
   const redirectUrl = rule.target.redirectUrl ?? "";
+  const priority = toDnrPriority(rule.priority, pageScopePatterns);
   const initiatorDomains = resolveInitiatorDomains(
     projectSiteHosts,
     rule.match.host,
@@ -104,7 +144,7 @@ export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicR
     const wildcard = buildWildcardRedirect(match, redirectUrl);
     return {
       id: stablePositiveHash(rule.id),
-      priority: rule.priority,
+      priority,
       action: {
         type: "redirect",
         redirect: { regexSubstitution: wildcard.regexSubstitution },
@@ -121,7 +161,7 @@ export function toDynamicRule(rule: Rule, projectSiteHosts?: string[]): DynamicR
   const condition = buildDnrCondition(match);
   return {
     id: stablePositiveHash(rule.id),
-    priority: rule.priority,
+    priority,
     action: {
       type: "redirect",
       redirect: { url: redirectUrl },

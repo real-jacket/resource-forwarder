@@ -36,7 +36,7 @@ function installChromeMock(workspace: WorkspaceSnapshot) {
   const historyListeners: Listener[] = [];
   const fragmentListeners: Listener[] = [];
   const tabsUpdatedListeners: Listener[] = [];
-  const localStorage = { [STORAGE_KEYS.workspace]: workspace };
+  const localStorage = { [STORAGE_KEYS.workspace]: structuredClone(workspace) };
   const emptyEvent = () => createEvent(passiveListeners);
   const noop = vi.fn(async () => undefined);
   const openSidePanel = vi.fn(async () => undefined);
@@ -667,6 +667,54 @@ describe("background sidepanel loading", () => {
     expect((stored[STORAGE_KEYS.workspace] as WorkspaceSnapshot).revision).toBe(2);
     expect(appliedBodies).not.toContain(1);
   });
+  it("copies a rule set and its rules in a single service push", async () => {
+    const chromeMock = installChromeMock(apiWorkspace);
+    const copiedRuleSet = { ...apiWorkspace.ruleSets[0]!, id: "ruleset-copy", name: "Rules 副本", ruleIds: ["api-copy"] };
+    const copiedRule = { ...apiWorkspace.rules[0]!, id: "api-copy" };
+    const importedWorkspace = {
+      ...apiWorkspace,
+      revision: 1,
+      ruleSets: [...apiWorkspace.ruleSets, copiedRuleSet],
+      rules: [...apiWorkspace.rules, copiedRule],
+    };
+    const importBodies: WorkspaceSnapshot[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (path === "/import") {
+        const body = JSON.parse(String(init?.body)) as { content: string };
+        importBodies.push(JSON.parse(body.content) as WorkspaceSnapshot);
+        return new Response(JSON.stringify({ workspace: importedWorkspace, revision: 1, warnings: [] }), { status: 200 });
+      }
+      if (path === "/workspace") return new Response(JSON.stringify({ workspace: importedWorkspace, revision: 1 }), { status: 200 });
+      if (path === "/applied") return new Response(JSON.stringify({ appliedRevision: 1 }), { status: 200 });
+      throw new Error(path);
+    }));
+    await loadBackgroundWorker();
+
+    await chromeMock.send({
+      type: "apply-workspace-patch",
+      payload: {
+        ruleSets: [copiedRuleSet],
+        rules: [copiedRule],
+      },
+    });
+    await vi.waitFor(() => expect(importBodies).toHaveLength(1));
+    await vi.waitFor(async () => {
+      const storedWorkspace = (await chrome.storage.local.get(STORAGE_KEYS.workspace))[STORAGE_KEYS.workspace] as WorkspaceSnapshot;
+      expect(storedWorkspace.revision).toBe(1);
+    });
+
+    const stored = (await chrome.storage.local.get(STORAGE_KEYS.workspace))[STORAGE_KEYS.workspace] as WorkspaceSnapshot;
+    const copied = stored.ruleSets.find((rs) => rs.id === "ruleset-copy");
+    expect(copied?.ruleIds).toEqual(["api-copy"]);
+    expect(stored.rules.find((r) => r.id === "api-copy")).toBeDefined();
+    // Exactly one push carried both the group and its rule — no per-rule CAS race.
+    expect(importBodies).toHaveLength(1);
+    expect(importBodies[0]!.ruleSets.find((rs) => rs.id === "ruleset-copy")?.ruleIds).toEqual(["api-copy"]);
+    expect(importBodies[0]!.rules.find((r) => r.id === "api-copy")).toBeDefined();
+  });
+
   it("external agent upsert wins over a clean local state", async () => {
     const chromeMock = installChromeMock(agentWorkspace);
     const serviceWorkspace = {
@@ -685,7 +733,7 @@ describe("background sidepanel loading", () => {
     await chromeMock.send({ type: "sync-workspace" });
     const stored = await chrome.storage.local.get(STORAGE_KEYS.workspace);
 
-    expect((stored[STORAGE_KEYS.workspace] as WorkspaceSnapshot).projects[0]?.name).toBe("Service Agent");
+    expect((stored[STORAGE_KEYS.workspace] as WorkspaceSnapshot).projects.find((project) => project.id === "agent")?.name).toBe("Service Agent");
   });
 
   it("external agent upsert wins over dirty local state without being pushed", async () => {
@@ -714,7 +762,7 @@ describe("background sidepanel loading", () => {
     const stored = await chrome.storage.local.get(STORAGE_KEYS.workspace);
 
     expect(pushedWorkspace?.projects).toEqual([]);
-    expect((stored[STORAGE_KEYS.workspace] as WorkspaceSnapshot).projects[0]?.name).toBe("Service Agent");
+    expect((stored[STORAGE_KEYS.workspace] as WorkspaceSnapshot).projects.find((project) => project.id === "agent")?.name).toBe("Service Agent");
   });
 
   it("external agent delete sticks through pending-delete reconciliation", async () => {
@@ -803,8 +851,10 @@ describe("background sidepanel loading", () => {
     releaseImport();
     await syncPromise;
     const dirty = await chrome.storage.local.get(STORAGE_KEYS.workspaceDirty);
+    const stored = await chrome.storage.local.get(STORAGE_KEYS.workspace);
 
     expect(dirty[STORAGE_KEYS.workspaceDirty]).toEqual([expect.any(String)]);
+    expect((stored[STORAGE_KEYS.workspace] as WorkspaceSnapshot).projects.some((project) => project.id === "local-race")).toBe(true);
   });
   it("rejects crafted agent references before local import or DNR", async () => {
     const chromeMock = installChromeMock(agentWorkspace);
@@ -857,5 +907,226 @@ describe("background sidepanel loading", () => {
     await vi.waitFor(() => expect(outbound).toBeDefined());
 
     expect(outbound?.agentReservations).toBeUndefined();
+  });
+});
+
+describe("companion disconnect", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps local rule-set toggles and never contacts companion while disconnected", async () => {
+    const chromeMock = installChromeMock(apiWorkspace);
+    const fetchMock = vi.fn(async () => {
+      throw new Error("disconnected companion must not be contacted");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await chrome.storage.local.set({ [STORAGE_KEYS.companionEnabled]: false });
+    await loadBackgroundWorker();
+
+    const toggled = await chromeMock.send({
+      type: "upsert-rule-set",
+      payload: { ruleSet: { ...apiWorkspace.ruleSets[0]!, enabled: false } },
+    }) as { workspace: WorkspaceSnapshot; companionEnabled?: boolean; health: unknown };
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(toggled.companionEnabled).toBe(false);
+    expect(toggled.health).toBeNull();
+    expect(toggled.workspace.ruleSets[0]?.enabled).toBe(false);
+
+    await chromeMock.send({ type: "sync-workspace" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    const stored = (await chrome.storage.local.get(STORAGE_KEYS.workspace))[STORAGE_KEYS.workspace] as WorkspaceSnapshot;
+    expect(stored.ruleSets[0]?.enabled).toBe(false);
+    expect(stored.ruleSets[0]?.name).toBe("Rules");
+  });
+
+  it("does not pull companion workspace after the user disconnects", async () => {
+    const chromeMock = installChromeMock(apiWorkspace);
+    const serviceWorkspace = {
+      ...apiWorkspace,
+      revision: 9,
+      ruleSets: [{ ...apiWorkspace.ruleSets[0]!, enabled: false, name: "Service Group" }],
+    };
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (path === "/workspace") return new Response(JSON.stringify({ workspace: serviceWorkspace, revision: 9 }), { status: 200 });
+      if (path === "/applied") return new Response(JSON.stringify({ appliedRevision: 9 }), { status: 200 });
+      throw new Error(path);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await loadBackgroundWorker();
+    await chromeMock.send({ type: "sync-workspace" });
+    expect(fetchMock).toHaveBeenCalled();
+    fetchMock.mockClear();
+
+    const disconnected = await chromeMock.send({ type: "set-companion-enabled", enabled: false }) as {
+      companionEnabled?: boolean;
+      health: unknown;
+    };
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(disconnected.companionEnabled).toBe(false);
+    expect(disconnected.health).toBeNull();
+
+    await chromeMock.send({ type: "sync-workspace" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reconnects and contacts companion after companion is enabled", async () => {
+    const chromeMock = installChromeMock(apiWorkspace);
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (path === "/import") {
+        return new Response(JSON.stringify({ workspace: { ...apiWorkspace, revision: 2 }, revision: 2, warnings: [] }), { status: 200 });
+      }
+      if (path === "/workspace") {
+        return new Response(JSON.stringify({ workspace: { ...apiWorkspace, revision: 2 }, revision: 2 }), { status: 200 });
+      }
+      if (path === "/applied") return new Response(JSON.stringify({ appliedRevision: 2 }), { status: 200 });
+      throw new Error(path);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await chrome.storage.local.set({ [STORAGE_KEYS.companionEnabled]: false });
+    await loadBackgroundWorker();
+    await chromeMock.send({ type: "sync-workspace" });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const reconnected = await chromeMock.send({ type: "set-companion-enabled", enabled: true }) as {
+      companionEnabled?: boolean;
+      health: { ok: boolean } | null;
+    };
+    expect(fetchMock).toHaveBeenCalled();
+    expect(reconnected.companionEnabled).toBe(true);
+    expect(reconnected.health?.ok).toBe(true);
+  });
+});
+
+describe("companion sync strategy", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps local user-owned rules on background sync and still refreshes agent-managed rules", async () => {
+    const mixedLocal: WorkspaceSnapshot = {
+      ...apiWorkspace,
+      projects: [
+        { ...apiWorkspace.projects[0]!, name: "Local User" },
+        { ...agentWorkspace.projects[0]! },
+      ],
+      ruleSets: [...apiWorkspace.ruleSets, ...agentWorkspace.ruleSets],
+      rules: [...apiWorkspace.rules, ...agentWorkspace.rules],
+    };
+    const mixedService: WorkspaceSnapshot = {
+      ...mixedLocal,
+      revision: 5,
+      projects: [
+        { ...apiWorkspace.projects[0]!, name: "Service User" },
+        { ...agentWorkspace.projects[0]!, name: "Service Agent" },
+      ],
+    };
+    const chromeMock = installChromeMock(mixedLocal);
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (path === "/workspace") return new Response(JSON.stringify({ workspace: mixedService, revision: 5 }), { status: 200 });
+      if (path === "/applied") return new Response(JSON.stringify({ appliedRevision: 5 }), { status: 200 });
+      throw new Error(path);
+    }));
+    await loadBackgroundWorker();
+    await chromeMock.send({ type: "sync-workspace" });
+    const stored = (await chrome.storage.local.get(STORAGE_KEYS.workspace))[STORAGE_KEYS.workspace] as WorkspaceSnapshot;
+
+    expect(stored.projects.find((project) => project.id === "project")?.name).toBe("Local User");
+    expect(stored.projects.find((project) => project.id === "agent")?.name).toBe("Service Agent");
+  });
+
+  it("replaces local user-owned rules when sync strategy is pull", async () => {
+    const chromeMock = installChromeMock({
+      ...apiWorkspace,
+      projects: [{ ...apiWorkspace.projects[0]!, name: "Local User" }],
+    });
+    const serviceWorkspace = {
+      ...apiWorkspace,
+      revision: 4,
+      projects: [{ ...apiWorkspace.projects[0]!, name: "Service User" }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (path === "/workspace") return new Response(JSON.stringify({ workspace: serviceWorkspace, revision: 4 }), { status: 200 });
+      if (path === "/applied") return new Response(JSON.stringify({ appliedRevision: 4 }), { status: 200 });
+      throw new Error(path);
+    }));
+    await loadBackgroundWorker();
+    await chromeMock.send({ type: "sync-workspace", strategy: "pull" });
+    const stored = (await chrome.storage.local.get(STORAGE_KEYS.workspace))[STORAGE_KEYS.workspace] as WorkspaceSnapshot;
+
+    expect(stored.projects[0]?.name).toBe("Service User");
+  });
+
+  it("pushes local user-owned rules with merge:false when strategy is push", async () => {
+    const localWorkspace = {
+      ...apiWorkspace,
+      projects: [{ ...apiWorkspace.projects[0]!, name: "Local User" }],
+    };
+    const chromeMock = installChromeMock(localWorkspace);
+    let importBody: { merge?: boolean; content: string } | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (path === "/import") {
+        importBody = JSON.parse(String(init?.body)) as { merge?: boolean; content: string };
+        return new Response(JSON.stringify({ workspace: localWorkspace, revision: 6, warnings: [] }), { status: 200 });
+      }
+      if (path === "/applied") return new Response(JSON.stringify({ appliedRevision: 6 }), { status: 200 });
+      throw new Error(path);
+    }));
+    await loadBackgroundWorker();
+    await chromeMock.send({ type: "sync-workspace", strategy: "push" });
+
+    expect(importBody?.merge).toBe(false);
+    expect(JSON.parse(importBody!.content).projects[0].name).toBe("Local User");
+  });
+
+  it("merges local user-owned rules with merge:true when strategy is merge", async () => {
+    const localWorkspace = {
+      ...apiWorkspace,
+      projects: [{ ...apiWorkspace.projects[0]!, name: "Local User" }],
+    };
+    const chromeMock = installChromeMock(localWorkspace);
+    let importBody: { merge?: boolean } | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/health") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (path === "/import") {
+        importBody = JSON.parse(String(init?.body)) as { merge?: boolean };
+        return new Response(JSON.stringify({ workspace: localWorkspace, revision: 7, warnings: [] }), { status: 200 });
+      }
+      if (path === "/applied") return new Response(JSON.stringify({ appliedRevision: 7 }), { status: 200 });
+      throw new Error(path);
+    }));
+    await loadBackgroundWorker();
+    await chromeMock.send({ type: "sync-workspace", strategy: "merge" });
+
+    expect(importBody?.merge).toBe(true);
+  });
+
+  it("persists the selected sync strategy without contacting companion", async () => {
+    const chromeMock = installChromeMock(apiWorkspace);
+    const fetchMock = vi.fn(async () => {
+      throw new Error("saving sync strategy must not contact companion");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await loadBackgroundWorker();
+    const result = await chromeMock.send({ type: "set-sync-strategy", strategy: "pull" }) as { syncStrategy?: string };
+    const stored = await chrome.storage.local.get(STORAGE_KEYS.syncStrategy);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.syncStrategy).toBe("pull");
+    expect(stored[STORAGE_KEYS.syncStrategy]).toBe("pull");
   });
 });

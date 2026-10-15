@@ -13,6 +13,7 @@ import {
   sortRules,
 } from "@resource-forwarder/rule-core";
 import type {
+  CompanionSyncStrategy,
   Project,
   Rule,
   RuleSet,
@@ -409,7 +410,13 @@ function App() {
     try {
       const state = await runtimeRequest<GetDashboardStateResponse>({ type: "get-dashboard-state" });
       hydrateDashboard(state);
-      setStatus(state.health ? "规则已同步。" : "未连接到本地服务，请先在设置里检查服务地址。");
+      setStatus(
+        state.health
+          ? "规则已同步。"
+          : state.companionEnabled === false
+            ? "已断开 Companion，正在使用本地规则。"
+            : "未连接到本地服务，请先在设置里检查服务地址。",
+      );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "加载规则失败。");
     } finally {
@@ -527,11 +534,13 @@ function App() {
       setStatus("请先定位分组所属的站点。");
       return;
     }
+    // Default to the current site: "复制一份到本站点" is the common case, and the
+    // user can still pick another site from the dropdown.
     setCopyDraft({
       mode: "rule-set",
       sourceProjectId: sourceProject.id,
       sourceRuleSetId: ruleSet.id,
-      targetProjectId: findDefaultCopyTargetProjectId(projects, sourceProject.id),
+      targetProjectId: sourceProject.id,
     });
   }
 
@@ -584,6 +593,59 @@ function App() {
       setStatus(error instanceof Error ? error.message : "保存服务地址失败。");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function syncCompanion(): Promise<void> {
+    const strategy = dashboard?.syncStrategy ?? "merge";
+    setBusy(true);
+    try {
+      const state = await runtimeRequest<SyncWorkspaceResponse>({ type: "sync-workspace", strategy });
+      hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      setStatus(
+        state.companionEnabled === false
+          ? "已断开 Companion，正在使用本地规则。"
+          : !state.health
+            ? "未连接到本地服务，请先在设置里检查服务地址。"
+            : strategy === "pull"
+              ? "已用 Companion 覆盖本地规则。"
+              : strategy === "push"
+                ? "已用本地规则覆盖 Companion。"
+                : "已合并本地与 Companion 规则。",
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "同步失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setCompanionEnabled(enabled: boolean): Promise<void> {
+    setBusy(true);
+    try {
+      const state = await runtimeRequest<SyncWorkspaceResponse>({ type: "set-companion-enabled", enabled });
+      hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      setStatus(enabled ? "已连接 Companion。" : "已断开 Companion，本地规则不再被覆盖。");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "切换 Companion 连接失败。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setSyncStrategy(strategy: CompanionSyncStrategy): Promise<void> {
+    try {
+      const state = await runtimeRequest<SyncWorkspaceResponse>({ type: "set-sync-strategy", strategy });
+      hydrateDashboard({ ...state, logs: dashboard?.logs ?? [], currentTab: dashboard?.currentTab });
+      setStatus(
+        strategy === "pull"
+          ? "同步策略已设为覆盖本地。"
+          : strategy === "push"
+            ? "同步策略已设为覆盖 Companion。"
+            : "同步策略已设为合并。",
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "保存同步策略失败。");
     }
   }
 
@@ -929,28 +991,18 @@ function App() {
     try {
       const now = new Date().toISOString();
       const bundle = createProjectCopyBundle(dashboard.workspace, project.id, now, createId);
+      // One atomic push carries the project, its groups, and all their rules —
+      // no per-rule CAS race that could drop rules from the copy.
       nextState = await runtimeRequest<UpsertMutationResponse>({
-        type: "upsert-project",
+        type: "apply-workspace-patch",
         payload: {
-          project: bundle.project,
+          projects: [bundle.project],
           ruleSets: bundle.ruleSets,
+          rules: bundle.rules,
         },
       });
 
-      for (const rule of bundle.rules) {
-        const targetRuleSet = bundle.ruleSets.find((ruleSet) => ruleSet.ruleIds.includes(rule.id));
-        if (!targetRuleSet) {
-          continue;
-        }
-        nextState = await runtimeRequest<UpsertMutationResponse>({
-          type: "upsert-rule",
-          payload: { rule, ruleSetId: targetRuleSet.id },
-        });
-      }
-
-      if (nextState) {
-        hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
-      }
+      hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
       setSelectedProjectId(bundle.project.id);
       setSelectedProjectIds(new Set());
       setStatus(`站点「${project.name}」已复制为「${bundle.project.name}」。`);
@@ -1010,19 +1062,13 @@ function App() {
           now,
           createId,
         );
+        // Push the copied group and all its rules as ONE atomic mutation so a
+        // per-rule CAS race can't drop rules and leave an empty group behind.
         nextState = await runtimeRequest<UpsertMutationResponse>({
-          type: "upsert-rule-set",
-          payload: { ruleSet: bundle.ruleSet },
+          type: "apply-workspace-patch",
+          payload: { ruleSets: [bundle.ruleSet], rules: bundle.rules },
         });
-        for (const rule of bundle.rules) {
-          nextState = await runtimeRequest<UpsertMutationResponse>({
-            type: "upsert-rule",
-            payload: { rule, ruleSetId: bundle.ruleSet.id },
-          });
-        }
-        if (nextState) {
-          hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
-        }
+        hydrateDashboard({ ...nextState, logs: dashboard.logs, currentTab: dashboard.currentTab });
         setSelectedProjectId(targetProject.id);
         setSelectedRuleSetId(bundle.ruleSet.id);
         setStatus(`分组「${bundle.ruleSet.name}」已复制到站点「${targetProject.name}」。`);
@@ -1481,20 +1527,36 @@ function App() {
         </div>
 
         <div className="sidebar-footer">
-          <div className={`sidebar-status ${dashboard?.health ? "online" : "offline"}`}>
+          <div className={`sidebar-status ${dashboard?.companionEnabled === false ? "offline" : dashboard?.health ? "online" : "offline"}`}>
             <span className="sidebar-status-dot" />
             <div className="sidebar-status-copy sidebar-nav-label">
-              <strong>{dashboard?.health ? "本地服务已连接" : "本地服务离线"}</strong>
-              <span>{dashboard?.health ? `端口 ${servicePort}，${rules.length} 条规则` : `本地缓存 ${rules.length} 条规则`}</span>
+              <strong>
+                {dashboard?.companionEnabled === false
+                  ? "已断开 Companion"
+                  : dashboard?.health
+                    ? "本地服务已连接"
+                    : "本地服务离线"}
+              </strong>
+              <span>
+                {dashboard?.companionEnabled === false
+                  ? `本地 ${rules.length} 条规则，不受 Companion 影响`
+                  : dashboard?.health
+                    ? `端口 ${servicePort}，${rules.length} 条规则`
+                    : `本地缓存 ${rules.length} 条规则`}
+              </span>
             </div>
           </div>
-          {!dashboard?.health && rules.length > 0 && (
+          {dashboard?.companionEnabled === false ? (
+            <div className="sidebar-status-hint sidebar-nav-label">
+              本地规则独立运行。需要 Companion 时请在设置中连接。
+            </div>
+          ) : !dashboard?.health && rules.length > 0 ? (
             <div className="sidebar-status-hint sidebar-nav-label">
               {dashboard?.warnings?.some((w) => w.includes("离线模式"))
                 ? `${rules.length} 条规则已缓存，服务恢复后自动同步`
                 : "启动本地服务后数据将自动同步"}
             </div>
-          )}
+          ) : null}
         </div>
       </nav>
 
@@ -1598,12 +1660,16 @@ function App() {
                 url: serviceUrl,
                 setUrl: setServiceUrl,
                 save: saveServiceUrl,
-                refresh,
+                refresh: syncCompanion,
                 port: servicePort,
                 tokenInput: serviceTokenInput,
                 setTokenInput: setServiceTokenInput,
                 tokenSaved: serviceTokenSaved,
                 saveToken: saveServiceToken,
+                companionEnabled: dashboard?.companionEnabled !== false,
+                setCompanionEnabled,
+                syncStrategy: dashboard?.syncStrategy ?? "merge",
+                setSyncStrategy,
               }}
               filters={{
                 status: siteStatusFilter,

@@ -289,6 +289,9 @@ function BasicTab({
 
       {conflicts.length > 0 && (
         <div className="form-warnings">
+          <div className="form-conflict-hint">
+            检测到与以下规则匹配范围重叠。同一请求只会命中一条规则：优先级高的先生效；优先级相同时，创建更早的先生效。若希望本规则（更精确的那条）生效，请把它的优先级调高。
+          </div>
           {conflicts.map((c) => (
             <div className="form-conflict-item" key={c.ruleId}>{c.reason}</div>
           ))}

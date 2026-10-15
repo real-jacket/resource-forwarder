@@ -348,11 +348,25 @@ export interface SiteContextPayload {
   warnings: string[];
 }
 
+export type CompanionSyncStrategy = "pull" | "push" | "merge";
+
 export interface RuntimeState {
   serviceUrl: string;
   health: ServiceHealthResponse | null;
   workspace: WorkspaceSnapshot;
   serviceRevision?: number;
+  /**
+   * Whether the optional local Companion is allowed to connect.
+   * `false` means the user explicitly disconnected: never probe, pull, or
+   * overwrite local rules. Missing/undefined is treated as enabled.
+   */
+  companionEnabled?: boolean;
+  /**
+   * How an explicit sync (设置页「立即同步」或重新连接) reconciles user-owned
+   * rules with Companion. Background reconcile still only refreshes
+   * agent-managed subtrees. Missing/undefined is treated as `merge`.
+   */
+  syncStrategy?: CompanionSyncStrategy;
 }
 
 // --- AI-facing analysis endpoints (/match, /rules/validate, /schema) ---

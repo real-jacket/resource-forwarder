@@ -1866,6 +1866,16 @@ summary {
   line-height: 1.45;
 }
 
+.form-conflict-hint {
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
 .form-conflict-item {
   display: flex;
   align-items: flex-start;
@@ -2819,6 +2829,10 @@ details[open] .import-preview-warnings-summary::before {
   border-radius: 50%;
   flex-shrink: 0;
 }
+.service-status-bar .service-status-text {
+  flex: 1;
+  min-width: 0;
+}
 .service-status-bar.online .service-status-dot {
   background: var(--success);
   box-shadow: 0 0 0 3px var(--success-soft);
@@ -2826,11 +2840,85 @@ details[open] .import-preview-warnings-summary::before {
 .service-status-bar.offline .service-status-dot {
   background: var(--border-strong);
 }
+.service-status-bar.disconnected .service-status-dot {
+  background: var(--warning);
+  box-shadow: 0 0 0 3px var(--warning-soft);
+}
 .service-status-bar.online .service-status-text {
   color: var(--success-text);
 }
 .service-status-bar.offline .service-status-text {
   color: var(--muted);
+}
+.service-status-bar.disconnected .service-status-text {
+  color: var(--warning-text);
+}
+
+.sync-strategy {
+  margin: 4px 0 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.sync-strategy .form-label {
+  padding: 0;
+}
+.sync-strategy-hint {
+  margin: 4px 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.sync-strategy-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.sync-strategy-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+  cursor: pointer;
+}
+.sync-strategy-option input {
+  margin-top: 3px;
+  accent-color: var(--primary);
+  flex-shrink: 0;
+}
+.sync-strategy-option-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.sync-strategy-option-copy strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.sync-strategy-option-copy span {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.sync-strategy-option.is-selected,
+.sync-strategy-option:has(input:checked) {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.sync-strategy-option:has(input:focus-visible) {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+@media (max-width: 720px) {
+  .sync-strategy-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .settings-card {
@@ -4851,6 +4939,23 @@ details[open] .import-preview-warnings-summary::before {
 
 .sp-rule-item.is-off {
   opacity: 0.55;
+}
+
+/* Page-active but fully covered by a higher-precedence rule: dimmed so the
+   rule that actually wins stands out, without hiding it entirely. */
+.sp-rule-item.is-shadowed {
+  opacity: 0.6;
+}
+
+.sp-rule-shadowed-badge {
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border: 1px dashed var(--border);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  cursor: help;
 }
 
 .sp-rule-item .toggle-switch {
