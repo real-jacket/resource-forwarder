@@ -1,4 +1,154 @@
-import type {
+import type {import type {
+    ForwardProfile,
+    ForwardRequestPayload,
+    ForwardResponsePayload,
+    MatchResourceType,
+    RequestContext,
+    RuleBinding,
+} from "@resource-forwarder/shared-types";
+import { isTextualContentType, resolveForwardProfile } from "@resource-forwarder/rule-core";
+
+export const STREAMING_UNSUPPORTED = "STREAMING_UNSUPPORTED";
+const DEFAULT_FORWARD_TIMEOUT_MS = 15_000;
+const MAX_FORWARDABLE_BODY_BYTES = 4 * 1024 * 1024;
+
+export const RESTRICTED_HEADERS = new Set([
+    "host",
+    "content-length",
+    "connection",
+    "transfer-encoding",
+    "keep-alive",
+    "upgrade",
+    "sec-websocket-key",
+    "sec-websocket-version",
+    "sec-websocket-extensions",
+    "sec-websocket-accept"
+  ]);
+
+export function mergeAndFilterHeaders(
+    baseHeaders: Record<string, string> = {},
+    overrideHeaders: Record<string, string> = {}
+  ): Record<string, string> {
+    const result: Record<string, string> = {};
+    const lowerKeyMap = new Map<string, string>();
+    for (const [key, value] of Object.entries(baseHeaders)) {
+          const lowerKey = key.toLowerCase();
+          if (RESTRICTED_HEADERS.has(lowerKey)) continue;
+          result[key] = value;
+          lowerKeyMap.set(lowerKey, key);
+    }
+    for (const [key, value] of Object.entries(overrideHeaders)) {
+          const lowerKey = key.toLowerCase();
+          if (RESTRICTED_HEADERS.has(lowerKey)) continue;
+          if (lowerKeyMap.has(lowerKey)) {
+                  delete result[lowerKeyMap.get(lowerKey)!];
+          }
+          result[key] = value;
+          lowerKeyMap.set(lowerKey, key);
+    }
+    return result;
+}
+
+export interface ForwardMockFileResult {
+    value: unknown;
+    displayName: string;
+}
+
+export type ForwardMockFileAdapter = (configuredPath: string) => Promise<ForwardMockFileResult>;
+
+export interface ForwardExecutionOptions {
+    signal?: AbortSignal;
+    fetch?: typeof globalThis.fetch;
+    mockFile?: ForwardMockFileAdapter;
+}
+
+export function createRequestContext(payload: {
+    url: string;
+    pageUrl?: string;
+    method?: string;
+    resourceType?: MatchResourceType;
+    headers?: Record<string, string>;
+    body?: string;
+}): RequestContext {
+    const parsedUrl = new URL(payload.url);
+    return {
+          url: payload.url,
+          origin: parsedUrl.origin,
+          pathname: parsedUrl.pathname,
+          query: parsedUrl.search,
+          method: (payload.method || "GET").toUpperCase(),
+          headers: payload.headers || {},
+          body: payload.body,
+          resourceType: payload.resourceType || "other",
+          pageUrl: payload.pageUrl,
+    };
+}
+
+export async function executeForwarding(
+    payload: ForwardRequestPayload,
+    rules: RuleBinding[],
+    options: ForwardExecutionOptions = {}
+  ): Promise<ForwardResponsePayload> {
+    const context = createRequestContext(payload);
+    const profile = resolveForwardProfile(rules, context);
+
+    if (profile.action === "allow") {
+          return {
+                  action: "allow",
+                  matchedRuleId: profile.matchedRuleId,
+                  finalUrl: context.url,
+                  headers: mergeAndFilterHeaders(context.headers, {}),
+          };
+    }
+
+    if (profile.action === "block") {
+          return {
+                  action: "block",
+                  matchedRuleId: profile.matchedRuleId,
+                  finalUrl: context.url,
+                  headers: {},
+                  status: 403,
+                  statusText: "Forbidden by Forwarder Rule",
+          };
+    }
+
+    const customFetch = options.fetch || globalThis.fetch;
+    const mergedHeaders = mergeAndFilterHeaders(payload.headers || {}, profile.headers || {});
+
+    const requestInit: RequestInit = {
+          method: payload.method || "GET",
+          headers: mergedHeaders,
+          signal: options.signal,
+    };
+
+    if (payload.body && !["GET", "HEAD"].includes(requestInit.method!)) {
+          requestInit.body = payload.body;
+    }
+
+    const targetUrl = profile.targetUrl || payload.url;
+    const response = await customFetch(targetUrl, requestInit);
+
+    const responseHeaders: Record<string, string> = {};
+    response.headers.forEach((val, key) => {
+          responseHeaders[key] = val;
+    });
+
+    const contentType = response.headers.get("content-type") || "";
+    let bodyText = "";
+    if (isTextualContentType(contentType)) {
+          bodyText = await response.text();
+    }
+
+    return {
+          action: "redirect",
+          matchedRuleId: profile.matchedRuleId,
+          finalUrl: response.url || targetUrl,
+          status: response.status,
+          statusText: response.statusText,
+          headers: mergeAndFilterHeaders(responseHeaders, {}),
+          body: bodyText,
+    };
+}
   ForwardProfile,
   ForwardRequestPayload,
   ForwardResponsePayload,
