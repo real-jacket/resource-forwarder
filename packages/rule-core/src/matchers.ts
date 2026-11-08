@@ -19,7 +19,114 @@ export function normalizeMethod(method: string): string {
  * Stable rule sort: highest priority first, then oldest creation timestamp,
  * then id as the deterministic tiebreaker. Returns a NEW array so callers can
  * safely mutate the result without poisoning the workspace.
- */
+ */import { Rule } from "./types.js";
+import { escapeRegex, globToPathRegexSource } from "./matcher-cache.js";
+
+/**
+ * Bounded LRU Cache with a default maxSize of 300
+  */
+export class BoundedLRUCache<K, V> {
+    private cache = new Map<K, V>();
+    constructor(public readonly maxSize: number = 300) {}
+
+    get(key: K): V | undefined {
+          if (!this.cache.has(key)) return undefined;
+          const value = this.cache.get(key)!;
+          this.cache.delete(key);
+          this.cache.set(key, value);
+          return value;
+    }
+
+    set(key: K, value: V): void {
+          if (this.cache.has(key)) {
+                  this.cache.delete(key);
+          } else if (this.cache.size >= this.maxSize) {
+                  const firstKey = this.cache.keys().next().value;
+                  if (firstKey !== undefined) {
+                            this.cache.delete(firstKey);
+                  }
+          }
+          this.cache.set(key, value);
+    }
+
+    has(key: K): boolean {
+          return this.cache.has(key);
+    }
+
+    clear(): void {
+          this.cache.clear();
+    }
+
+    get size(): number {
+          return this.cache.size;
+    }
+}
+
+const regexCache = new BoundedLRUCache<string, RegExp>(300);
+
+export function sortRules(rules: Rule[]): Rule[] {
+    return [...rules].sort((left, right) => {
+          if (left.priority !== right.priority) return right.priority - left.priority;
+          if (left.createdAt !== right.createdAt) return left.createdAt.localeCompare(right.createdAt);
+          return left.id.localeCompare(right.id);
+    });
+}
+
+export function matchesHost(patterns: string[], host: string): boolean {
+    if (patterns.length === 0 || patterns.includes("*")) return true;
+    return patterns.some((pattern) => {
+          if (pattern.startsWith("*.")) {
+                  const suffix = pattern.slice(1);
+                  return host.endsWith(suffix);
+          }
+          if (pattern.includes("*")) {
+                  return new RegExp(`^${escapeRegex(pattern).replace(/\*/g, ".*")}$`).test(host);
+          }
+          return host === pattern;
+    });
+}
+
+export function matchesPath(pathGlob: string, pathname: string): boolean {
+    return new RegExp(`^${globToPathRegexSource(pathGlob || "*")}$`).test(pathname);
+}
+
+/**
+ * Match a rule pattern with try/catch error handling and LRU regex cache
+  */
+export function matchRulePattern(pattern: string, urlStr: string): boolean {
+    try {
+          if (!pattern || !urlStr) return false;
+          let regex = regexCache.get(pattern);
+          if (!regex) {
+                  regex = new RegExp(pattern);
+                  regexCache.set(pattern, regex);
+          }
+          return regex.test(urlStr);
+    } catch (error) {
+          return false;
+    }
+}
+
+/**
+ * Resolve target URL and preserve/merge original query parameters
+  */
+export function resolveTargetUrl(targetPattern: string, requestUrl: string): string {
+    try {
+          const origUrl = new URL(requestUrl);
+          const targetUrl = new URL(targetPattern, origUrl.origin);
+
+          // Merge original search params into targetUrl if not already present
+          origUrl.searchParams.forEach((val, key) => {
+                  if (!targetUrl.searchParams.has(key)) {
+                            targetUrl.searchParams.set(key, val);
+                  }
+          });
+
+          return targetUrl.toString();
+    } catch (e) {
+          return targetPattern;
+    }
+}
 export function sortRules(rules: Rule[]): Rule[] {
   return [...rules].sort((left, right) => {
     if (left.priority !== right.priority) return right.priority - left.priority;
